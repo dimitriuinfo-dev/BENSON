@@ -90,7 +90,19 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
 
-## 2026-06 (fork) — CONFIRMARE WAKE (sunet) + BANNER REACTIVARE ACCESSIBILITY
+## 2026-06 (fork) — WAKE CHIME VOLUME control + GENTLE ACCESSIBILITY REMINDER
+- WAKE CHIME VOLUME (Settings): lib/agents/wakeChime.ts gained setWakeChimeVolume(v) (0=off..1)
+  applied live to the loaded sound; playWakeChime() no-ops when volume<=0. index.tsx: new wakeVolume
+  state + AsyncStorage key 'bensonWakeChimeVolume' (restored in init, applied to module), handler
+  changeWakeVolume() persists + previews. Settings section "SUNET LA TREZIRE" = 4 chips
+  Oprit(0)/Încet(0.3)/Mediu(0.6)/Tare(1.0), mirrors the VOICE ENGINE chip pattern.
+- GENTLE ACCESSIBILITY REMINDER: index.tsx watchdog onStatus now re-speaks a short calm cue every
+  5 min while the service stays off, gated to foreground + idle (!listening/!loading/!speaking) so
+  it never nags or talks over a turn. onDropped seeds a11yLastReminderRef so its immediate message
+  counts as the first; reconnect resets the timer. The red banner (visual) is unchanged.
+- tsc 0 errors; eslint back to the file's pre-existing baseline (no new issues from these changes).
+
+
 - WAKE CHIME (Feature A, JS-only): assets/sounds/wake.wav (~11KB, two-note rising ding, generated).
   New lib/agents/wakeChime.ts (expo-av, same stack as openaiTTS) preload+play, never throws.
   Preloaded in init(); played at the very start of handleWakeDetected() so every recognized

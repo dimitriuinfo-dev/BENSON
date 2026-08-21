@@ -40,7 +40,7 @@ import {
   type Voice, type SttEngine,
 } from '../lib/agents/voiceAgent';
 import { preloadLocalWhisper } from '../lib/agents/localWhisperEngine';
-import { preloadWakeChime, playWakeChime } from '../lib/agents/wakeChime';
+import { preloadWakeChime, playWakeChime, setWakeChimeVolume } from '../lib/agents/wakeChime';
 import { speakWithOpenAI, stopOpenAITTS } from '../lib/agents/openaiTTS';
 import { buildVoiceInstructions, currentTimeOfDay } from '../lib/agents/voiceInstructions';
 import { startCarAutoDetection, type CarAutoDetectHandle } from '../lib/carAutoDetect';
@@ -243,6 +243,9 @@ export default function BensonApp() {
   // silently auto-disabled service is impossible to miss (spoken alert + notification alone can be
   // dismissed/unheard).
   const [accessibilityDown, setAccessibilityDown] = useState(false);
+  // Gentle-reminder bookkeeping — while the service stays off, re-speak a short cue periodically
+  // (not every poll, that would nag), only when BENSON is idle in the foreground.
+  const a11yLastReminderRef = useRef(0);
   // "Screen in screen" (2026-07-17): real PiP shrinks this SAME Activity, so BensonMainScreen
   // needs to know to switch to the logo-only layout — there's no separate native PiP screen.
   const [isInPip, setIsInPip] = useState(false);
@@ -260,6 +263,8 @@ export default function BensonApp() {
   const [voices, setVoices]           = useState<Voice[]>([]);
   const [ttsProvider, setTtsProvider] = useState<TtsProvider>('device');
   const [modelProvider, setModelProvider] = useState<ModelProvider>('claude');
+  // Wake-confirmation "ding" level: 0 = off, up to 1.0 = full. User-configurable in Settings.
+  const [wakeVolume, setWakeVolume]   = useState(1.0);
   // Cloud STT is confirmed unreliable on this device independent of language (see
   // AUDIO_DIAGNOSIS_REPORT.md/project_stt_broken memory). 'ondevice' (Android's built-in offline
   // recognition) was tried and also hangs/contends for the mic with the passive loop; 'local' is
@@ -752,11 +757,27 @@ export default function BensonApp() {
   // notification, rather than the user only finding out once a command that needed it fails.
   useEffect(() => {
     if (phase !== 'chat') return;
+    // How often to gently re-remind by voice while the service stays off (ms). onStatus fires every
+    // 60s poll + on every foreground return; we throttle the spoken cue to this interval so it's a
+    // calm nudge, never a nag. The banner (visual) stays up the whole time regardless.
+    const REMIND_EVERY_MS = 5 * 60 * 1000;
     const watch = startAccessibilityWatch({
-      onDropped: () => speak(
-        'Serviciul de accesibilitate tocmai s-a dezactivat. Nu mai pot citi ecranul sau apăsa butoane până nu-l reactivezi din Setări.',
-      ),
-      onStatus: (connected) => setAccessibilityDown(!connected),
+      onDropped: () => {
+        a11yLastReminderRef.current = Date.now(); // the drop message counts as the first reminder
+        speak('Serviciul de accesibilitate tocmai s-a dezactivat. Nu mai pot citi ecranul sau apăsa butoane până nu-l reactivezi din Setări.');
+      },
+      onStatus: (connected) => {
+        setAccessibilityDown(!connected);
+        if (connected) { a11yLastReminderRef.current = 0; return; }
+        // Still off — periodic gentle reminder, but only when BENSON is idle & in the foreground so
+        // it never talks over a conversation or from the background.
+        const now = Date.now();
+        const idle = isForegroundRef.current && !listeningRef.current && !loadingRef.current && !speakingRef.current;
+        if (idle && now - a11yLastReminderRef.current >= REMIND_EVERY_MS) {
+          a11yLastReminderRef.current = now;
+          speak(`Reamintire blândă, ${getAddress()}: serviciul de accesibilitate e încă oprit. Când ai un moment, reactivează-l din Setări ca să pot ajuta din nou complet.`);
+        }
+      },
     });
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       if (response.notification.request.content.data?.tag === ACCESSIBILITY_ALERT_NOTIFICATION_TAG) {
@@ -836,6 +857,13 @@ export default function BensonApp() {
     Location.requestForegroundPermissionsAsync().catch(() => {});
     // Warm the wake-confirmation chime so the first "Benson" gets an instant sound, no decode lag.
     preloadWakeChime();
+    // Restore the user's wake-chime volume (0 = off). Read separately from the big Promise.all below
+    // to avoid touching that long destructuring; applied to the audio module immediately.
+    AsyncStorage.getItem('bensonWakeChimeVolume').then((wv) => {
+      if (wv == null) return;
+      const n = parseFloat(wv);
+      if (!isNaN(n)) { setWakeVolume(n); setWakeChimeVolume(n); }
+    }).catch(() => {});
 
     const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, tp, cm, acm, cda, cdn, vig, rl, mp, se, ww] = await Promise.all([
       AsyncStorage.getItem('masterName'),
@@ -1286,6 +1314,14 @@ export default function BensonApp() {
     replyLangRef.current = l;
     await AsyncStorage.setItem('bensonLang', l);
     await AsyncStorage.setItem('bensonReplyLang', l);
+  }
+
+  // Wake-confirmation chime volume (0 = off). Applied live, persisted, and previewed (unless off).
+  async function changeWakeVolume(v: number) {
+    setWakeVolume(v);
+    setWakeChimeVolume(v);
+    await AsyncStorage.setItem('bensonWakeChimeVolume', v.toString());
+    if (v > 0) playWakeChime();
   }
 
   async function updateRate(r: number) {
@@ -2423,6 +2459,26 @@ export default function BensonApp() {
               </View>
               <Text style={s.factLine}>
                 OpenAI voice costs per use and needs internet; Benson falls back to the device voice automatically if it's unavailable.
+              </Text>
+
+              {/* Wake-confirmation chime — the short "ding" Benson plays when it hears "Benson".
+                  "Oprit" turns it off entirely; the others set how loud it is (and preview it). */}
+              <Text style={s.label}>SUNET LA TREZIRE</Text>
+              <View style={s.row}>
+                {([['Oprit', 0], ['Încet', 0.3], ['Mediu', 0.6], ['Tare', 1.0]] as [string, number][]).map(([label, v]) => {
+                  const active = Math.abs(wakeVolume - v) < 0.05;
+                  return (
+                    <TouchableOpacity key={label} onPress={() => { tap(); changeWakeVolume(v); }}
+                      style={[s.chip, active && s.chipActive]}
+                      accessibilityLabel={`Sunet la trezire ${label}`} accessibilityRole="button"
+                      accessibilityState={{ selected: active }}>
+                      <Text style={[s.chipTxt, active && s.chipTxtActive]}>{label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={s.factLine}>
+                Sunetul scurt care confirmă că te-am auzit când spui „Benson”. Alege „Oprit” ca să nu se mai audă.
               </Text>
 
               {/* STT engine — cloud recognition on this device has been unreliable (hangs/errors);
