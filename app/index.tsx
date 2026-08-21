@@ -382,6 +382,16 @@ export default function BensonApp() {
   const wakeTriggeredRef  = useRef(false);
   const jsSttSessionIdRef = useRef('none'); // BENSON_AUDIO session id for the current JS STT session
   const lastPartialTranscriptRef = useRef<{ sessionId: string; text: string } | null>(null);
+  // For turning SILENT listen failures into feedback: what started the current STT session
+  // ('manual_tap' | 'conversation_mode' | 'wake_word') and whether it produced any transcript.
+  // A manual medallion tap or a wake-word command that captures NOTHING must not just die quietly
+  // (the "I pressed the medallion, heard a beep, then nothing" bug) — endSub uses these to say so.
+  const sttTriggerRef = useRef<'manual_tap' | 'conversation_mode' | 'wake_word'>('manual_tap');
+  const sessionGotResultRef = useRef(false);
+  // Safety net for a hung STT session (cloud recognizer is documented to sometimes hang with no
+  // result/error/end — AUDIO_DIAGNOSIS_REPORT.md). If a session never ends on its own, this forces
+  // it closed so the mic is never left stuck "listening" forever with no reaction.
+  const listenWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Fragment-assembly buffer (product-owner-directed 2026-07-31, root cause confirmed live the
   // same day): every STT session — final result (resultSub) or the partial-fallback (endSub) —
   // ends at the same ~1.2-1.8s silence timeout tuned for command capture (see startRecognition's
@@ -503,6 +513,7 @@ export default function BensonApp() {
           logAudioDiag('TRANSCRIPT_ACCEPTED', `session=${sid} text="${transcript}" language=${langRef.current} REJECTED_self_echo=true`);
         } else {
           logAudioDiag('TRANSCRIPT_ACCEPTED', `session=${sid} text="${transcript}" language=${langRef.current}`);
+          sessionGotResultRef.current = true;
           scheduleAssembledDispatch(transcript);
         }
       }
@@ -522,6 +533,7 @@ export default function BensonApp() {
     // If convMode is on and nothing is processing/speaking, restart.
     const endSub = addEndListener(() => {
       const sid = jsSttSessionIdRef.current;
+      if (listenWatchdogRef.current) { clearTimeout(listenWatchdogRef.current); listenWatchdogRef.current = null; }
       logAudioDiag('STT_STOPPED', `session=${sid} component=js_stt convMode=${convModeRef.current} wakeTriggered=${wakeTriggeredRef.current}`);
       try { setSystemSoundsMuted(false); } catch {}
       setListening(false);
@@ -539,6 +551,7 @@ export default function BensonApp() {
           logAudioDiag('TRANSCRIPT_ACCEPTED', `session=${sid} text="${fallbackText}" language=${langRef.current} source=partial_fallback REJECTED_self_echo=true`);
         } else {
           logAudioDiag('TRANSCRIPT_ACCEPTED', `session=${sid} text="${fallbackText}" language=${langRef.current} source=partial_fallback`);
+          sessionGotResultRef.current = true;
           scheduleAssembledDispatch(fallbackText);
           return;
         }
@@ -572,10 +585,20 @@ export default function BensonApp() {
       // reply resumes JS directly via resultSub's handleIncomingText -> speakText flow — neither of
       // those paths ever reaches this block, since loadingRef/speakingRef guards it out above.
       if (!loadingRef.current && !speakingRef.current) {
+        // Explicit user attempt (medallion tap or wake-word command) that captured NOTHING: give a
+        // short spoken cue instead of dying silently. This is the "pressed the medallion, heard a
+        // beep/click, then no reaction at all" bug — a miss must be acknowledged. Not fired for
+        // ambient conversation auto-loop cycles (those end quietly by design).
+        const missedExplicit = !sessionGotResultRef.current &&
+          (sttTriggerRef.current === 'manual_tap' || wakeTriggeredRef.current);
         if (wakeTriggeredRef.current) {
           wakeTriggeredRef.current = false;
           try { hideWakeRing(); } catch {}
           logAudioDiag('MODE_TRANSITION', 'from=COMMAND to=PASSIVE_WAKE reason=command_empty_or_timeout');
+        }
+        if (missedExplicit) {
+          logAudioDiag('STT_MISS_FEEDBACK', `session=${sid} trigger=${sttTriggerRef.current} engine=${sttEngineRef.current}`);
+          speak(`Nu am auzit nimic, ${getAddress()}. Mai încearcă o dată.`);
         }
         try { resumeHotword(); } catch {}
       }
@@ -1558,6 +1581,8 @@ export default function BensonApp() {
     const trigger = wakeTriggeredRef.current ? 'wake_word' : convModeRef.current ? 'conversation_mode' : 'manual_tap';
     const sessionId = `js-${Date.now()}`;
     jsSttSessionIdRef.current = sessionId;
+    sttTriggerRef.current = trigger;
+    sessionGotResultRef.current = false;
     logAudioDiag('STT_REQUESTED', `session=${sessionId} trigger=${trigger} component=js_stt`);
     try {
       // Unconditional, regardless of caller — previously only toggleConvMode() and the wake-word
@@ -1596,6 +1621,17 @@ export default function BensonApp() {
       logAudioDiag('RECORDER_CREATE', `session=${sessionId} component=js_stt engine=${sttEngineRef.current} lang=${langRef.current}`);
       startRecognition(langRef.current, sttEngineRef.current);
       logAudioDiag('STT_START_CALLED', `session=${sessionId} component=js_stt`);
+      // Watchdog: cloud/ondevice SpeechRecognizer can hang with no end event; local capture has a
+      // 60s pre-speech native timeout. Force-close if the session is still the current one and
+      // still listening after the ceiling, so it can never leave the mic stuck. stopRecognition()
+      // triggers the normal 'end' path, which fires the miss feedback + hands the mic back.
+      if (listenWatchdogRef.current) clearTimeout(listenWatchdogRef.current);
+      listenWatchdogRef.current = setTimeout(() => {
+        if (listeningRef.current && jsSttSessionIdRef.current === sessionId) {
+          logAudioDiag('STT_WATCHDOG', `session=${sessionId} forced_stop engine=${sttEngineRef.current}`);
+          try { stopRecognition(); } catch {}
+        }
+      }, sttEngineRef.current === 'local' ? 65000 : 12000);
     } catch (e) {
       logAudioDiag('STT_ERROR', `session=${sessionId} component=js_stt code=-1 name=JS_EXCEPTION message="${String(e)}"`);
       try { setSystemSoundsMuted(false); } catch {}
