@@ -62,12 +62,17 @@ export default function VoiceDiagScreen() {
   const [started, setStarted] = useState(false);        // 2: session started (native `start` event)
   const [engineReturned, setEngineReturned] = useState(false); // 3: result/nomatch/error after speech
   const [transcript, setTranscript] = useState('');     // 3/4: captured transcript
+  const [lastPartial, setLastPartial] = useState('');
+  const [lastFinal, setLastFinal] = useState('');
+  const [partialCount, setPartialCount] = useState(0);
+  const [finalCount, setFinalCount] = useState(0);
   const [peakRms, setPeakRms] = useState<number>(-999); // mic-energy proof
   const [lastError, setLastError] = useState('');
   const [orchestratorReply, setOrchestratorReply] = useState('');
 
   const [lang, setLang] = useState<Lang>('ro-RO');
   const [onDevice, setOnDevice] = useState(false);      // requiresOnDeviceRecognition toggle
+  const [interim, setInterim] = useState(true);         // interimResults — flip OFF to replicate the live app exactly
   const [autoRoute, setAutoRoute] = useState(true);     // send final transcript to orchestrator
   const [listening, setListening] = useState(false);
 
@@ -99,6 +104,8 @@ export default function VoiceDiagScreen() {
           const isFinal = ev?.isFinal !== false;
           append('result', `isFinal=${isFinal} text="${text}"`);
           setEngineReturned(true);
+          if (isFinal) { setFinalCount((c) => c + 1); if (text) setLastFinal(text); }
+          else { setPartialCount((c) => c + 1); if (text) setLastPartial(text); }
           if (text) {
             setTranscript(text);
             if (isFinal && autoRoute && !routedRef.current) {
@@ -220,6 +227,10 @@ export default function VoiceDiagScreen() {
     setStarted(false);
     setEngineReturned(false);
     setTranscript('');
+    setLastPartial('');
+    setLastFinal('');
+    setPartialCount(0);
+    setFinalCount(0);
     setPeakRms(-999);
     setLastError('');
     setOrchestratorReply('');
@@ -239,11 +250,11 @@ export default function VoiceDiagScreen() {
     }
 
     setListening(true);
-    append('start-call', `ExpoSpeechRecognitionModule.start lang=${lang} onDevice=${onDevice}`);
+    append('start-call', `ExpoSpeechRecognitionModule.start lang=${lang} onDevice=${onDevice} interim=${interim}`);
     try {
       ExpoSpeechRecognitionModule.start({
         lang,
-        interimResults: true,        // TRUE here on purpose: partial results are extra proof the mic is capturing
+        interimResults: interim,     // toggle: ON = extra proof; OFF = replicate the live app exactly (Defect B test)
         continuous: false,
         maxAlternatives: 1,
         requiresOnDeviceRecognition: onDevice,
@@ -294,6 +305,14 @@ export default function VoiceDiagScreen() {
         <View style={s.card}>
           <Text style={s.cardTitle}>TRANSCRIPT</Text>
           <Text testID="voicediag-transcript" style={s.transcript}>{transcript || '—'}</Text>
+          <Text style={s.tally}>partial results: {partialCount}   ·   final results: {finalCount}</Text>
+          {partialCount > 0 && finalCount === 0 && (
+            <Text style={s.warn}>⚠ Numai rezultate PARȚIALE, niciun FINAL — exact „Defect B” (device-ul nu trimite finalul). Microfonul MERGE; problema e că aplicația live aștepta finalul.</Text>
+          )}
+          <Text style={s.subLabel}>last partial:</Text>
+          <Text style={s.subVal}>{lastPartial || '—'}</Text>
+          <Text style={s.subLabel}>last final:</Text>
+          <Text style={s.subVal}>{lastFinal || '—'}</Text>
           <Text style={[s.cardTitle, { marginTop: 10 }]}>ORCHESTRATOR REPLY</Text>
           <Text testID="voicediag-orchestrator-reply" style={s.reply}>{orchestratorReply || '—'}</Text>
         </View>
@@ -311,6 +330,7 @@ export default function VoiceDiagScreen() {
             ))}
           </View>
           <Toggle label="On-device engine (requiresOnDeviceRecognition)" value={onDevice} onToggle={() => setOnDevice((v) => !v)} testID="voicediag-toggle-ondevice" />
+          <Toggle label="Interim results ON (OFF = exact live-app setting)" value={interim} onToggle={() => setInterim((v) => !v)} testID="voicediag-toggle-interim" />
           <Toggle label="Auto-route final transcript to orchestrator" value={autoRoute} onToggle={() => setAutoRoute((v) => !v)} testID="voicediag-toggle-autoroute" />
         </View>
 
@@ -395,6 +415,10 @@ const s = StyleSheet.create({
   energy: { color: '#C9A24B', fontSize: 13, marginTop: 8 },
   errText: { color: '#E5484D', fontSize: 13, marginTop: 6 },
   transcript: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  tally: { color: '#8Fb8de', fontSize: 12, marginTop: 6, fontWeight: '700' },
+  warn: { color: '#E5C07B', fontSize: 12, marginTop: 6, lineHeight: 17 },
+  subLabel: { color: '#6b7683', fontSize: 11, marginTop: 6 },
+  subVal: { color: '#B7C4D0', fontSize: 13 },
   reply: { color: '#4CC38A', fontSize: 15 },
   rowLabel: { color: '#9AA3AC', fontSize: 12, marginBottom: 6 },
   chipRow: { flexDirection: 'row', gap: 8, marginBottom: 6 },
