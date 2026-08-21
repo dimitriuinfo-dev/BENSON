@@ -55,3 +55,8 @@ modules/*/android/.cxx/
 /porcupine-model
 /whisper-models
 *.apk 
+.env
+.env.*
+*.env
+credentials.json
+.credentials
