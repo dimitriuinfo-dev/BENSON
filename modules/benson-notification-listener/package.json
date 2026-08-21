@@ -1,0 +1,8 @@
+{
+  "name": "benson-notification-listener",
+  "version": "1.0.0",
+  "description": "Notification Listener Service enable-detection and settings deep link (reading WhatsApp notification content is a separate future task)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

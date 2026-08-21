@@ -1,0 +1,26 @@
+{
+  "id": "whatsapp.send-message.v1",
+  "packageName": "com.whatsapp",
+  "entryTimeoutMs": 4000,
+  "steps": [
+    {
+      "id": "find-send",
+      "kind": "waitFor",
+      "timeoutMs": 4000,
+      "locator": {
+        "role": "button",
+        "semantic": "send",
+        "requiresEditableOnScreen": true
+      }
+    },
+    { "id": "tap-send", "kind": "click", "target": "find-send" },
+    {
+      "id": "verify-sent",
+      "kind": "assert",
+      "timeoutMs": 2500,
+      "condition": { "kind": "draftDoesNotContainParam", "param": "expectedDraft" }
+    },
+    { "id": "settle", "kind": "delay", "ms": 1200 },
+    { "id": "return", "kind": "returnToBenson" }
+  ]
+}

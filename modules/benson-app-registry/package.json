@@ -1,0 +1,8 @@
+{
+  "name": "benson-app-registry",
+  "version": "1.0.0",
+  "description": "Enumerates launchable apps installed on the device, for the App Permissions onboarding screen",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

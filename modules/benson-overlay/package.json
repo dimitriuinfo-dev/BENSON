@@ -1,0 +1,8 @@
+{
+  "name": "benson-overlay",
+  "version": "1.0.0",
+  "description": "Floating draggable bubble (SYSTEM_ALERT_WINDOW) that activates BENSON's mic from any app",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

@@ -1,0 +1,46 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <!-- The service acquires a PARTIAL_WAKE_LOCK while passively listening, and RECORD_AUDIO is
+       what the whole module exists for — both are already declared at the app level
+       (android/app/src/main/AndroidManifest.xml), so this doesn't change current behavior, but
+       declaring them here too keeps this module correct on its own, independent of what else the
+       merged app manifest happens to already cover. -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+  <application>
+    <service
+      android:name=".BensonForegroundService"
+      android:exported="false"
+      android:foregroundServiceType="microphone" />
+
+    <receiver
+      android:name=".BensonWatchdogReceiver"
+      android:exported="false" />
+
+    <receiver
+      android:name=".BensonBootReceiver"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+      </intent-filter>
+    </receiver>
+
+    <!-- Guardian secondary revival layer: a Quick Settings tile the user can add once (Android
+         does not let an app add itself to the shade automatically) that revives BENSON directly
+         from the notification shade without opening the app. -->
+    <service
+      android:name=".BensonQsTileService"
+      android:exported="true"
+      android:label="BENSON"
+      android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+      <intent-filter>
+        <action android:name="android.service.quicksettings.action.QS_TILE" />
+      </intent-filter>
+    </service>
+  </application>
+</manifest>

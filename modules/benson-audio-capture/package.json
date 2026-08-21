@@ -1,0 +1,8 @@
+{
+  "name": "benson-audio-capture",
+  "version": "1.0.0",
+  "description": "Native AudioRecord + silence-based VAD capture, producing a WAV file for on-device Whisper transcription — replaces dependency on Android's SpeechRecognizer for command capture.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

@@ -1,0 +1,52 @@
+apply plugin: 'com.android.library'
+
+group = 'expo.modules.foregroundservice'
+version = '1.0.0'
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+def useManagedAndroidSdkVersions = false
+if (useManagedAndroidSdkVersions) {
+  useDefaultAndroidSdkVersions()
+} else {
+  buildscript {
+    ext.safeExtGet = { prop, fallback ->
+      rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+    }
+  }
+  project.android {
+    compileSdkVersion safeExtGet("compileSdkVersion", 35)
+    defaultConfig {
+      minSdkVersion safeExtGet("minSdkVersion", 24)
+      targetSdkVersion safeExtGet("targetSdkVersion", 35)
+    }
+  }
+}
+
+android {
+  namespace "expo.modules.foregroundservice"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  // Guardian secondary revival layer (BensonHealthWorker) — periodic health check independent
+  // of the AlarmManager watchdog and the AccessibilityService resurrection anchor.
+  implementation "androidx.work:work-runtime-ktx:2.9.1"
+
+  // Wake-word engine (product-owner-directed 2026-08-01) — plain Android AAR, confirmed via
+  // GitHub source (PorcupineManager.Builder.build(Context, PorcupineManagerCallback)) to take a
+  // plain android.content.Context, NOT a React Native ReactApplicationContext. A Service already
+  // IS a Context, so this needs no RN bridge at all — unlike whisper.rn, which is why that path
+  // was blocked. See WAKE_ENGINE in BensonForegroundService.kt for the runtime fallback.
+  implementation "ai.picovoice:porcupine-android:3.0.1"
+}
