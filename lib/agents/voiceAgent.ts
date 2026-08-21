@@ -98,6 +98,47 @@ function runLocalCapture(lang: string) {
   });
 }
 
+// ── Passive wake-word scan (FREE, on-device, zero new deps) ────────────────────────────────────
+// Reuses the SAME local capture pipeline (benson-audio-capture VAD + Whisper) that already works
+// for command capture on this device, instead of Android's broken SpeechRecognizer hotword loop.
+// One VAD-gated capture cycle: it only records/transcribes when real speech is detected (not
+// silence), transcribes it, and reports the text back. The caller (app/index.tsx) decides whether
+// the text contains "Benson" and loops. Single AudioRecord owner → no mic contention, since a scan
+// and a command capture never run at the same time.
+let wakeScanEndSub: { remove: () => void } | null = null;
+let wakeScanActive = false;
+
+export function startWakeScan(lang: string, onResult: (text: string) => void, onIdle: () => void) {
+  wakeScanActive = true;
+  wakeScanEndSub?.remove();
+  wakeScanEndSub = addCaptureEndListener(async (filePath, reason) => {
+    wakeScanEndSub?.remove();
+    wakeScanEndSub = null;
+    if (!wakeScanActive) return; // stopped mid-flight — drop the result
+    wakeScanActive = false;
+    if (!filePath) { onIdle(); return; }
+    try {
+      const text = await transcribeLocally(filePath, lang);
+      onResult(text || '');
+    } catch {
+      onResult('');
+    }
+  });
+  startCapture().catch(() => {
+    wakeScanEndSub?.remove();
+    wakeScanEndSub = null;
+    wakeScanActive = false;
+    onIdle();
+  });
+}
+
+export function stopWakeScan() {
+  wakeScanActive = false;
+  wakeScanEndSub?.remove();
+  wakeScanEndSub = null;
+  stopCapture().catch(() => {});
+}
+
 export function startRecognition(lang: string, engine: SttEngine = 'cloud') {
   activeEngine = engine;
   if (engine === 'local') {

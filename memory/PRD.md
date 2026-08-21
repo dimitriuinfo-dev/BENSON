@@ -90,7 +90,25 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
 
-## 2026-08 — BATCH: butler-grade fixes (build-ready, verified tsc+lint+Metro graph)
+## 2026-06 (fork) — WAKE WORD (Variant A) verified complete + SETUP WIZARD permission gating
+- WAKE WORD (local Whisper, free): reviewed app/index.tsx + voiceAgent.ts. Implementation is
+  COMPLETE & coherent: startWakeScan/stopWakeScan exported from voiceAgent.ts; single wake path
+  handleWakeDetected() (no duplication) fed by BOTH the native listener (wakeWordSub) and the local
+  Whisper VAD loop (startLocalWakeLoop); resumePassiveWake() picks engine (local default / native
+  fallback — the one remaining resumeHotword() at ~1646 is the intentional 'native' branch). Mic
+  handoff coherent across every reply path (mission/governance/routeCommand): after a reply, if not
+  conv-mode & wakeTriggered → resumePassiveWake() restarts passive scan. tsc 0 errors. No dangling
+  resumeHotword. User must final-test on native Android APK (no web/Expo Go possible).
+- SETUP WIZARD (components/onboarding/SetupWizard.tsx): enforced critical-permission gating.
+  * Critical (blocking) = Microfon + Serviciul de Accesibilitate ONLY (per user 2026-06). Battery
+    downgraded critical:true→false.
+  * StepScreen: a critical step that isn't 'granted' now DISABLES "CONTINUĂ" (blocked hint shown) so
+    the user cannot skip past mic/accessibility. Optional steps advance freely.
+  * "N/M ACTIVE" progress indicator added to both StepScreen header and Dashboard.
+  * Dashboard: "GATA" (finish) disabled until allCriticalGranted; shows missing-critical hint, or a
+    green success line "✓ Tot ce e esențial este activat" when done. finish() also guards internally.
+  * tsc + eslint clean on the file.
+
 - ROMANIAN DEFAULTS (index.tsx): langRef, replyLangRef, useState lang, restore fallback all
   'en-GB'→'ro-RO'. This was the "engleză proastă" root cause — LLM got lang='en-GB' so replied
   English, and local Whisper decoded Romanian speech as English. Agent replies use

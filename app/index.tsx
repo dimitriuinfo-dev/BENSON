@@ -34,6 +34,7 @@ import { routeCommand, type ModelProvider } from '../lib/agents/orchestrator';
 import {
   requestMicPermission, checkMicPermission, startRecognition, stopRecognition,
   addResultListener, addErrorListener, addEndListener, addVolumeListener,
+  startWakeScan, stopWakeScan,
   speakNow, stopSpeaking, getAvailableVoices,
   isOnDeviceLocaleInstalled, triggerOfflineModelDownload,
   type Voice, type SttEngine,
@@ -380,6 +381,12 @@ export default function BensonApp() {
   // is in flight, so the completion callback knows to resumeHotword() instead of doStartListening
   // again for continuous conv mode.
   const wakeTriggeredRef  = useRef(false);
+  // FREE local-Whisper wake engine (Option A): 'local' runs a VAD-gated Whisper passive loop that
+  // reuses the command capture pipeline; 'native' is the old Android SpeechRecognizer hotword loop
+  // (kept as a fallback but broken on this device). Default 'local'. wakeScanningRef guards against
+  // starting two overlapping scans.
+  const wakeEngineRef     = useRef<'local' | 'native'>('local');
+  const wakeScanningRef   = useRef(false);
   const jsSttSessionIdRef = useRef('none'); // BENSON_AUDIO session id for the current JS STT session
   const lastPartialTranscriptRef = useRef<{ sessionId: string; text: string } | null>(null);
   // For turning SILENT listen failures into feedback: what started the current STT session
@@ -600,7 +607,7 @@ export default function BensonApp() {
           logAudioDiag('STT_MISS_FEEDBACK', `session=${sid} trigger=${sttTriggerRef.current} engine=${sttEngineRef.current}`);
           speak(`Nu am auzit nimic, ${getAddress()}. Mai încearcă o dată.`);
         }
-        try { resumeHotword(); } catch {}
+        try { resumePassiveWake(); } catch {}
       }
     });
 
@@ -630,31 +637,9 @@ export default function BensonApp() {
     // overlay. Pause is a no-op safety net (already paused). If the user said the command in the
     // same breath ("Benson, deschide Waze"), native hands back the tail — process it immediately
     // instead of starting a second, empty listening session; otherwise capture the command now.
-    const wakeWordSub = addWakeWordDetectedListener(async (commandTail) => {
-      console.log('[WakeWord] detected, commandTail=', JSON.stringify(commandTail));
-      logAudioDiag('WAKE_EVENT_RECEIVED_IN_JS', `commandTail="${commandTail}"`);
-      wakeTriggeredRef.current = true;
-      bumpSessionKeepAwake();
-      try { await pauseHotword(); } catch {}
-      if (commandTail && commandTail.trim()) {
-        logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=same_breath_command_tail');
-        tap();
-        handleIncomingText(commandTail.trim());
-      } else {
-        logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=bare_wake_word_prompt_then_listen');
-        // Bare "Benson" — speak a short audible cue ("Te ascult") and only start the real
-        // command-capture STT session once it's finished playing. Previously padded with an
-        // extra fixed 600ms guess-delay here because NO_SPEECH_DETECTED kept firing right after
-        // "Te ascult" — traced (2026-07-09) to a real bug in speakWithOpenAI's onDone: it fired
-        // before the player's unloadAsync() actually completed, so expo-av could still be holding
-        // DoNotMix audio focus when startRecognition() ran. That race is now fixed at the source
-        // (lib/agents/openaiTTS.ts awaits unloadAsync before calling onDone), so onFinished here
-        // is a real "audio focus released" signal, not an approximation — no guess-buffer needed
-        // on top of it, consistent with every other TTS->STT handoff in this file (none of them
-        // pad with an extra delay either).
-        const msg = WAKE_LISTENING_PROMPT[replyLangRef.current] || WAKE_LISTENING_PROMPT['en-GB'];
-        speakText(msg, () => doStartListening());
-      }
+    const wakeWordSub = addWakeWordDetectedListener((commandTail) => {
+      logAudioDiag('WAKE_EVENT_RECEIVED_IN_JS', `commandTail="${commandTail}" source=native`);
+      handleWakeDetected(commandTail || '');
     });
 
     // Resume hands-free listening when the user returns to BENSON after the app was
@@ -677,7 +662,7 @@ export default function BensonApp() {
         if (convModeRef.current) {
           try { stopRecognition(); } catch {}
           setListening(false); listeningRef.current = false;
-          try { resumeHotword(); } catch {}
+          try { resumePassiveWake(); } catch {}
         }
         return;
       }
@@ -1575,8 +1560,97 @@ export default function BensonApp() {
   // certainly why it was muted here in the first place. Reverted to always-muted; the STT-miss
   // problem after wake word remains open (see openaiTTS.ts / handleIncomingText history for what
   // was already tried and ruled out).
+  // ── Local Whisper wake word (Option A — free, on-device, no new deps) ─────────
+  // detectWakeWord: does the transcript contain "Benson"? Whisper commonly mis-hears the name, so
+  // we accept a small set of near-spellings plus a fuzzy check on each token.
+  const WAKE_VARIANTS = ['benson', 'bensen', 'benzon', 'bension', 'pension', 'penson', 'benton', 'bensons'];
+  function detectWakeWord(text: string): boolean {
+    const norm = (text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (!norm.trim()) return false;
+    if (WAKE_VARIANTS.some((w) => norm.includes(w))) return true;
+    // fuzzy: any single token within edit-distance 1 of "benson"
+    return norm.split(/[^a-z]+/).some((tok) => tok.length >= 5 && lev(tok, 'benson') <= 1);
+  }
+  function lev(a: string, b: string): number {
+    const m = a.length, n = b.length;
+    if (!m) return n; if (!n) return m;
+    let prev = Array.from({ length: n + 1 }, (_, i) => i);
+    for (let i = 1; i <= m; i++) {
+      const cur = [i];
+      for (let j = 1; j <= n; j++) cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+    return prev[n];
+  }
+  // stripWakeWord: return whatever the user said AFTER "Benson" as the command tail (so
+  // "Benson, deschide Waze" runs "deschide Waze" in one breath); empty if only the wake word.
+  function stripWakeWord(text: string): string {
+    const idx = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').search(/bens|benz|bent|pens/);
+    if (idx < 0) return '';
+    const after = text.slice(idx).replace(/^[^\s]+[\s,.:;!?-]*/, '').trim(); // drop the wake token itself
+    return after;
+  }
+
+  // Single reusable wake handler — invoked by BOTH the native hotword listener AND the local
+  // Whisper scan loop, so there is exactly ONE wake-handling path (no duplication).
+  async function handleWakeDetected(commandTail: string) {
+    stopWakeScan();
+    wakeScanningRef.current = false;
+    wakeTriggeredRef.current = true;
+    bumpSessionKeepAwake();
+    try { await pauseHotword(); } catch {}
+    const tail = (commandTail || '').trim();
+    if (tail) {
+      logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=same_breath_command_tail');
+      tap();
+      handleIncomingText(tail);
+    } else {
+      logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=bare_wake_word_prompt_then_listen');
+      const msg = WAKE_LISTENING_PROMPT[replyLangRef.current] || WAKE_LISTENING_PROMPT['en-GB'];
+      speakText(msg, () => doStartListening());
+    }
+  }
+
+  // The free passive wake loop: one VAD-gated Whisper capture; if it heard "Benson" hand off to the
+  // command flow, otherwise scan again. Self-restarting. Guarded so it never overlaps a command
+  // capture, TTS, or an in-flight session.
+  function startLocalWakeLoop() {
+    if (wakeEngineRef.current !== 'local') return;
+    if (!serviceActiveRef.current) return;
+    if (wakeScanningRef.current) return;
+    if (listeningRef.current || loadingRef.current || speakingRef.current || wakeTriggeredRef.current) return;
+    wakeScanningRef.current = true;
+    logAudioDiag('WAKE_SCAN_START', `engine=local lang=${langRef.current}`);
+    startWakeScan(
+      langRef.current,
+      (text) => {
+        wakeScanningRef.current = false;
+        if (detectWakeWord(text)) {
+          logAudioDiag('WAKE_SCAN_HIT', `text="${text}"`);
+          handleWakeDetected(stripWakeWord(text));
+        } else {
+          setTimeout(startLocalWakeLoop, 150); // not the wake word — keep listening
+        }
+      },
+      () => { wakeScanningRef.current = false; setTimeout(startLocalWakeLoop, 150); },
+    );
+  }
+
+  // Hand the mic back to passive listening after a command/return. Chooses the engine: local
+  // Whisper loop (free, works on this device) or the native hotword loop (fallback).
+  function resumePassiveWake() {
+    if (wakeEngineRef.current === 'local') {
+      try { pauseHotword(); } catch {} // make sure the native SpeechRecognizer loop is off
+      startLocalWakeLoop();
+    } else {
+      try { resumeHotword(); } catch {}
+    }
+  }
+
   async function doStartListening() {
     if (listeningRef.current || loadingRef.current || speakingRef.current) return;
+    try { stopWakeScan(); } catch {}
+    wakeScanningRef.current = false;
     bumpSessionKeepAwake();
     const trigger = wakeTriggeredRef.current ? 'wake_word' : convModeRef.current ? 'conversation_mode' : 'manual_tap';
     const sessionId = `js-${Date.now()}`;
@@ -1699,7 +1773,7 @@ export default function BensonApp() {
       const msg = CONV_OFF[replyLangRef.current] || CONV_OFF['en-GB'];
       addMessage('benson', msg);
       speak(msg);
-      try { await resumeHotword(); } catch {}
+      try { resumePassiveWake(); } catch {}
     }
   }
 
@@ -1899,7 +1973,7 @@ export default function BensonApp() {
           if (wakeTriggeredRef.current) {
             wakeTriggeredRef.current = false;
             try { hideWakeRing(); } catch {}
-            try { resumeHotword(); } catch {}
+            try { resumePassiveWake(); } catch {}
           }
         });
         return;
@@ -1977,7 +2051,7 @@ export default function BensonApp() {
         if (wakeTriggeredRef.current) {
           wakeTriggeredRef.current = false;
           try { hideWakeRing(); } catch {}
-          try { resumeHotword(); } catch {}
+          try { resumePassiveWake(); } catch {}
         }
       });
       return;
@@ -2001,7 +2075,7 @@ export default function BensonApp() {
           if (wakeTriggeredRef.current) {
             wakeTriggeredRef.current = false;
             try { hideWakeRing(); } catch {}
-            try { resumeHotword(); } catch {}
+            try { resumePassiveWake(); } catch {}
           }
         }, instructions)
       : null;
