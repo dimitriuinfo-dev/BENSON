@@ -256,9 +256,13 @@ export default function BensonApp() {
   // AUDIO_DIAGNOSIS_REPORT.md/project_stt_broken memory). 'ondevice' (Android's built-in offline
   // recognition) was tried and also hangs/contends for the mic with the passive loop; 'local' is
   // BENSON's own AudioRecord+VAD+Whisper pipeline (benson-audio-capture + localWhisperEngine),
-  // fully on-device, no Google/OpenAI dependency for listening at all. Defaults to 'cloud' so
-  // behavior never changes unless explicitly opted into.
-  const [sttEngine, setSttEngineState] = useState<SttEngine>('cloud');
+  // fully on-device, no Google/OpenAI dependency for listening at all. Default is 'local':
+  // cloud recognition is proven unreliable on THIS device (OnePlus Nord 4 / OxygenOS — two
+  // consecutive ERROR_NO_MATCH with zero partial results, live 2026-08, see
+  // AUDIO_DIAGNOSIS_REPORT.md), while the on-device Whisper engine transcribed successfully on the
+  // same device the same session. The cloud recognition service is an OEM black box we cannot make
+  // reliable from JS, so we default off it.
+  const [sttEngine, setSttEngineState] = useState<SttEngine>('local');
 
   // Wake-word kill switch (product-owner-directed) — default ON. When off, the native passive
   // hotword loop never opens the mic at all (gated in BensonForegroundService.kt's own
@@ -350,7 +354,7 @@ export default function BensonApp() {
   const openaiKeyRef    = useRef('');
   const ttsProviderRef  = useRef<TtsProvider>('device');
   const modelProviderRef = useRef<ModelProvider>('claude');
-  const sttEngineRef = useRef<SttEngine>('cloud');
+  const sttEngineRef = useRef<SttEngine>('local');
   const masterNameRef   = useRef('');
   const characterRef    = useRef<Character>('butler');
   const addressModeRef  = useRef<AddressMode>('master');
@@ -855,9 +859,23 @@ export default function BensonApp() {
     if (ok) { setOpenaiKey(ok); openaiKeyRef.current = ok; }
     if (tp === 'openai' || tp === 'device') { setTtsProvider(tp); ttsProviderRef.current = tp; }
     if (mp === 'openai' || mp === 'claude') { setModelProvider(mp); modelProviderRef.current = mp; }
+    // STT engine restore + one-time cloud→local migration. Cloud is proven unreliable on this
+    // device (see AUDIO_DIAGNOSIS_REPORT.md / the sttEngine useState comment). Existing installs
+    // that still have the old 'cloud' value are moved to 'local' ONCE (no manual Settings change
+    // needed); after that, an explicit re-pick of any engine in Settings is preserved.
+    const sttMigrated = (await AsyncStorage.getItem('bensonSttDefaultLocalMigrated_v1')) === 'true';
     if (se === 'ondevice' || se === 'local') {
       setSttEngineState(se); sttEngineRef.current = se;
       if (se === 'local') preloadLocalWhisper();
+    } else if (se === 'cloud' && !sttMigrated) {
+      setSttEngineState('local'); sttEngineRef.current = 'local';
+      AsyncStorage.multiSet([['bensonSttEngine', 'local'], ['bensonSttDefaultLocalMigrated_v1', 'true']]).catch(() => {});
+      preloadLocalWhisper();
+    } else if (se === 'cloud') {
+      setSttEngineState('cloud'); sttEngineRef.current = 'cloud';
+    } else {
+      // Nothing stored yet — default is already 'local'; warm the Whisper model ahead of first use.
+      preloadLocalWhisper();
     }
     // Wake-word kill switch — restore the visual toggle state and push it to native explicitly
     // (even when it's the same as native's own default) so JS and native never disagree about

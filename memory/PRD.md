@@ -38,16 +38,32 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 ## Work done (this session) — dates
 - 2026-06: Imported BENSON repo into workspace. Installed deps. Verified native event contract
   from expo-speech-recognition@3.1.3 source.
-- 2026-06: Built ISOLATED on-screen Voice Diagnostic harness `app/voicediag.tsx`:
-  talks DIRECTLY to ExpoSpeechRecognitionModule (bypasses voiceAgent/orchestrator gating/wake
-  word/foreground service). Shows 4 checkpoints live (permission, session start, engine returned,
-  transcript), mic-energy (RMS) proof, full event trace with timestamps, device recognizer caps
-  (isRecognitionAvailable/default service/on-device support), language (ro/en/de) + on-device
-  engine toggles, and optional auto-route of the final transcript through the SAME runMission the
-  typed path uses (reply shown on screen). Entry point: gold button in Debug Panel.
-- Registered route in app/_layout.tsx. Wrote VOICE_DIAGNOSTIC_GUIDE.md (RO).
-- Verified: tsc 0 errors, eslint clean, full Metro Android graph (1800 modules) resolves &
-  transforms (only container hermesc binary step fails — env limitation, not code).
+- 2026-06: Built ISOLATED on-screen Voice Diagnostic harness `app/voicediag.tsx` (later enhanced
+  with interim-results toggle + partial/final counters) + Debug Panel entry button.
+- 2026-08: DEVICE EVIDENCE obtained by product owner via the diagnostic + logcat:
+  cloud engine failed 2/2 (ERROR_NO_MATCH code 7, ZERO partials) on OnePlus Nord 4 / OxygenOS;
+  local Whisper engine transcribed successfully same session ("su no pe Hana pe WhatsApp").
+- 2026-08: FIX — switched default STT engine to 'local' (Whisper) in `app/index.tsx`:
+  * useState default 'cloud'→'local'; sttEngineRef default 'cloud'→'local'.
+  * One-time migration in settings-restore: existing installs with stored 'cloud' are moved to
+    'local' once (flag 'bensonSttDefaultLocalMigrated_v1'), no manual Settings change needed;
+    an explicit re-pick afterwards is preserved. Whisper preloaded on local.
+  * tsc clean. Only startRecognition call site (index.tsx:1597) uses sttEngineRef → now local.
+  RATIONALE: cloud recognizer is an OEM black box (android.speech.SpeechRecognizer via
+  expo-speech-recognition) — unfixable from JS with any guarantee; local is offline + proven on
+  this device.
+  SCOPE/HONEST LIMIT: this fixes the MANUAL medallion + conversation-mode COMMAND capture (they
+  call startRecognition → local, bypassing the device recognizer). It does NOT fix wake-word
+  ("Benson") detection — that is a separate NATIVE path in BensonForegroundService.kt still using
+  the same failing device SpeechRecognizer. Whisper is not a wake-word engine; native wake-word
+  redesign is a separate, larger task.
+
+## Branch / sync
+- My session work is committed by the platform to branch `conflict_210826_1714` (main = clean
+  base 709107d). /app == that branch. Merging to main = user's Save-to-GitHub / GitHub action
+  (agent cannot push directly).
+
+## Prior notes
 
 ## Verification status (honest)
 - NO automated test possible: native-only app, no device, won't render on web (native module
