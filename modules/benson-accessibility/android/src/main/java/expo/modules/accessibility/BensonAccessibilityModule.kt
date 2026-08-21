@@ -107,6 +107,10 @@ class BensonAccessibilityModule : Module() {
       BensonAccessibilityService.instance?.goHome() ?: false
     }
 
+    AsyncFunction("openRecents") {
+      BensonAccessibilityService.instance?.openRecents() ?: false
+    }
+
     // Waze-launch diagnostic (and future launch verification generally): the last package the
     // accessibility service saw come to the foreground. Null if the service isn't running/
     // enabled — callers must treat that as "can't verify", never as a pass or a fail.

@@ -26,6 +26,7 @@ export function performSetText(nodeId: string, value: string): Promise<boolean>;
 export function fillForm(fields: Record<string, string>): Promise<number>;
 export function goBack(): Promise<boolean>;
 export function goHome(): Promise<boolean>;
+export function openRecents(): Promise<boolean>;
 export function getForegroundPackage(): string | null;
 export function addScreenUpdateListener(
   listener: (event: { json: string }) => void

@@ -109,6 +109,8 @@ class BensonCommandExecutor(
                           else fail(i, action, "tap_rejected", "Global BACK was not accepted.")
                 "home" -> if (service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)) ok(i, action)
                           else fail(i, action, "tap_rejected", "Global HOME was not accepted.")
+                "recents" -> if (service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS)) ok(i, action)
+                          else fail(i, action, "tap_rejected", "Global RECENTS was not accepted.")
                 "scroll" -> doScroll(i, step)
                 "return_to_benson" -> { returnToBenson(); ok(i, action) }
                 else -> fail(i, action, "invalid", "Unknown action \"$action\".")

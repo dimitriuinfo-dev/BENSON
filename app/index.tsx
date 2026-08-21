@@ -25,7 +25,7 @@ import {
   hasOverlayPermission, requestOverlayPermission, showBubble, hideBubble,
   addBubbleTappedListener, hideWakeRing,
 } from 'benson-overlay';
-import { isServiceEnabled as isAccessibilityEnabled, openAccessibilitySettings } from 'benson-accessibility';
+import { isServiceEnabled as isAccessibilityEnabled, openAccessibilitySettings, openRecents } from 'benson-accessibility';
 import { startAccessibilityWatch, ACCESSIBILITY_ALERT_NOTIFICATION_TAG } from '../lib/accessibilityWatchdog';
 import { ensureAccessibilityReady, ACCESSIBILITY_DOWN_SPOKEN_MESSAGE_RO } from '../src/core/safety';
 import type { Character, AnthropicMsg, FamilyMember } from '../lib/agents/types';
@@ -194,6 +194,10 @@ const WAKE_LISTENING_PROMPT: Record<string, string> = {
 // entirely for the actions a blind user needs most often.
 const VOICE_FASTER_PATTERN = /\bvorbe[șs]te\s+mai\s+repede\b|\bspeak\s+faster\b|\bsprich\s+schneller\b/i;
 const VOICE_SLOWER_PATTERN = /\bvorbe[șs]te\s+mai\s+(?:încet|incet)\b|\bspeak\s+slower\b|\bsprich\s+langsamer\b/i;
+// Voice command → open the Android Recents / app-switcher screen. Anchored on the app-switcher
+// meaning to avoid false hits: "aplicații recente/deschise", bare "recente", "multitasking",
+// "comutator (de) aplicații", plus EN/DE fallbacks.
+const SHOW_RECENTS_PATTERN = /\baplica[țt]ii(?:le)?\s+recente\b|\baplica[țt]ii(?:le)?\s+deschise\b|\b(?:arat[ăa]|deschide|comut[ăa](?:\s+la)?|mergi\s+la|vreau)\s+recente\b|\bmultitasking\b|\bcomutator(?:ul)?\s+(?:de\s+)?aplica[țt]ii\b|\brecent\s+apps\b|\bapp\s+switcher\b|\bletzte\s+apps\b/i;
 const DELETE_MEMORY_PATTERN = /\b[șs]terge\s+memoria\b|\bdelete\s+(?:my\s+)?memory\b|\bwipe\s+memory\b|\bl[öo]sche\s+(?:den\s+)?speicher\b/i;
 const ADD_FAMILY_PATTERN =
   /\badaug[ăa]\s+(?:un\s+membru\s+(?:al\s+familiei\s+)?)?(?:numit\s+)?(.+)$/i.source +
@@ -246,6 +250,9 @@ export default function BensonApp() {
   // Gentle-reminder bookkeeping — while the service stays off, re-speak a short cue periodically
   // (not every poll, that would nag), only when BENSON is idle in the foreground.
   const a11yLastReminderRef = useRef(0);
+  // Configurable reminder interval (ms) — read inside the watchdog's onStatus closure (which is set
+  // up once, so it must read a ref, not the state) and settable from Settings. Default 5 min.
+  const a11yReminderMsRef = useRef(5 * 60 * 1000);
   // "Screen in screen" (2026-07-17): real PiP shrinks this SAME Activity, so BensonMainScreen
   // needs to know to switch to the logo-only layout — there's no separate native PiP screen.
   const [isInPip, setIsInPip] = useState(false);
@@ -265,6 +272,8 @@ export default function BensonApp() {
   const [modelProvider, setModelProvider] = useState<ModelProvider>('claude');
   // Wake-confirmation "ding" level: 0 = off, up to 1.0 = full. User-configurable in Settings.
   const [wakeVolume, setWakeVolume]   = useState(1.0);
+  // How often (minutes) the gentle spoken accessibility reminder repeats while the service is off.
+  const [reminderMins, setReminderMins] = useState(5);
   // Cloud STT is confirmed unreliable on this device independent of language (see
   // AUDIO_DIAGNOSIS_REPORT.md/project_stt_broken memory). 'ondevice' (Android's built-in offline
   // recognition) was tried and also hangs/contends for the mic with the passive loop; 'local' is
@@ -757,10 +766,6 @@ export default function BensonApp() {
   // notification, rather than the user only finding out once a command that needed it fails.
   useEffect(() => {
     if (phase !== 'chat') return;
-    // How often to gently re-remind by voice while the service stays off (ms). onStatus fires every
-    // 60s poll + on every foreground return; we throttle the spoken cue to this interval so it's a
-    // calm nudge, never a nag. The banner (visual) stays up the whole time regardless.
-    const REMIND_EVERY_MS = 5 * 60 * 1000;
     const watch = startAccessibilityWatch({
       onDropped: () => {
         a11yLastReminderRef.current = Date.now(); // the drop message counts as the first reminder
@@ -769,11 +774,12 @@ export default function BensonApp() {
       onStatus: (connected) => {
         setAccessibilityDown(!connected);
         if (connected) { a11yLastReminderRef.current = 0; return; }
-        // Still off — periodic gentle reminder, but only when BENSON is idle & in the foreground so
-        // it never talks over a conversation or from the background.
+        // Still off — periodic gentle reminder (interval user-configurable in Settings), but only
+        // when BENSON is idle & in the foreground so it never talks over a conversation or from
+        // the background. The banner (visual) stays up the whole time regardless.
         const now = Date.now();
         const idle = isForegroundRef.current && !listeningRef.current && !loadingRef.current && !speakingRef.current;
-        if (idle && now - a11yLastReminderRef.current >= REMIND_EVERY_MS) {
+        if (idle && now - a11yLastReminderRef.current >= a11yReminderMsRef.current) {
           a11yLastReminderRef.current = now;
           speak(`Reamintire blândă, ${getAddress()}: serviciul de accesibilitate e încă oprit. Când ai un moment, reactivează-l din Setări ca să pot ajuta din nou complet.`);
         }
@@ -863,6 +869,12 @@ export default function BensonApp() {
       if (wv == null) return;
       const n = parseFloat(wv);
       if (!isNaN(n)) { setWakeVolume(n); setWakeChimeVolume(n); }
+    }).catch(() => {});
+    // Restore the accessibility-reminder interval (minutes → ms), applied to the watchdog's ref.
+    AsyncStorage.getItem('bensonA11yReminderMins').then((rm) => {
+      if (rm == null) return;
+      const m = parseInt(rm, 10);
+      if (m === 5 || m === 15 || m === 30) { setReminderMins(m); a11yReminderMsRef.current = m * 60 * 1000; }
     }).catch(() => {});
 
     const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, tp, cm, acm, cda, cdn, vig, rl, mp, se, ww] = await Promise.all([
@@ -1322,6 +1334,13 @@ export default function BensonApp() {
     setWakeChimeVolume(v);
     await AsyncStorage.setItem('bensonWakeChimeVolume', v.toString());
     if (v > 0) playWakeChime();
+  }
+
+  // How often the gentle spoken accessibility reminder repeats (5/15/30 min). Applied live via ref.
+  async function changeReminderMins(m: number) {
+    setReminderMins(m);
+    a11yReminderMsRef.current = m * 60 * 1000;
+    await AsyncStorage.setItem('bensonA11yReminderMins', m.toString());
   }
 
   async function updateRate(r: number) {
@@ -1854,6 +1873,23 @@ export default function BensonApp() {
       const delta = VOICE_FASTER_PATTERN.test(text) ? 0.15 : -0.15;
       const next = Math.max(0.5, Math.min(2.0, voiceRateRef.current + delta));
       await updateRate(next); // updateRate already speaks its own confirmation
+      return true;
+    }
+
+    // "arată aplicațiile recente" — open the system Recents/app-switcher. Needs the accessibility
+    // service connected (GLOBAL_ACTION_RECENTS is issued from it); honest reply if it's off.
+    if (SHOW_RECENTS_PATTERN.test(text)) {
+      const enabled = await isAccessibilityEnabled().catch(() => false);
+      if (!enabled) {
+        const reply = `Am nevoie de Serviciul de Accesibilitate activ ca să deschid aplicațiile recente, ${getAddress()}.`;
+        addMessage('benson', reply); speak(reply);
+        return true;
+      }
+      const ok = await openRecents().catch(() => false);
+      const reply = ok
+        ? 'Am deschis aplicațiile recente.'
+        : `Nu am reușit să deschid aplicațiile recente, ${getAddress()}.`;
+      addMessage('benson', reply); speak(reply);
       return true;
     }
 
@@ -2479,6 +2515,26 @@ export default function BensonApp() {
               </View>
               <Text style={s.factLine}>
                 Sunetul scurt care confirmă că te-am auzit când spui „Benson”. Alege „Oprit” ca să nu se mai audă.
+              </Text>
+
+              {/* Accessibility reminder interval — how often Benson gently re-speaks the reminder
+                  while the Accessibility service stays off. */}
+              <Text style={s.label}>REAMINTIRE ACCESIBILITATE</Text>
+              <View style={s.row}>
+                {([['5 min', 5], ['15 min', 15], ['30 min', 30]] as [string, number][]).map(([label, m]) => {
+                  const active = reminderMins === m;
+                  return (
+                    <TouchableOpacity key={label} onPress={() => { tap(); changeReminderMins(m); }}
+                      style={[s.chip, active && s.chipActive]}
+                      accessibilityLabel={`Reamintire la fiecare ${label}`} accessibilityRole="button"
+                      accessibilityState={{ selected: active }}>
+                      <Text style={[s.chipTxt, active && s.chipTxtActive]}>{label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={s.factLine}>
+                Cât de des îți reamintesc vocal, blând, dacă Serviciul de Accesibilitate rămâne oprit.
               </Text>
 
               {/* STT engine — cloud recognition on this device has been unreliable (hangs/errors);

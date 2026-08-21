@@ -90,7 +90,23 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
 
-## 2026-06 (fork) — WAKE CHIME VOLUME control + GENTLE ACCESSIBILITY REMINDER
+## 2026-06 (fork) — RECENTS voice command + REMINDER INTERVAL setting
+- RECENTS ("arată aplicațiile recente"): NEEDS NATIVE REBUILD (Kotlin). Added openRecents() mirroring
+  goHome — BensonAccessibilityService.kt fun openRecents()=performGlobalAction(GLOBAL_ACTION_RECENTS)
+  (no canPerformGestures needed, stays false); BensonAccessibilityModule.kt AsyncFunction("openRecents");
+  benson-accessibility index.js + index.d.ts export; BensonCommandExecutor.kt gained a "recents" step.
+  JS: index.tsx imports openRecents, new SHOW_RECENTS_PATTERN (RO "aplicații recente/deschise", bare
+  "recente", "multitasking", "comutator aplicații" + EN/DE), handled in trySettingsVoiceCommand
+  (checked before the orchestrator): if accessibility connected → openRecents()+confirm, else honest
+  "need the service on" reply.
+- REMINDER INTERVAL (Settings): the gentle accessibility reminder cadence is now user-picked 5/15/30
+  min. index.tsx: reminderMins state + a11yReminderMsRef (watchdog onStatus reads the ref since it's
+  set up once), AsyncStorage 'bensonA11yReminderMins', changeReminderMins() handler, Settings section
+  "REAMINTIRE ACCESIBILITATE" (3 chips, chip pattern). Restored in init.
+- tsc 0 errors; eslint at the file's pre-existing 15-item baseline (no new issues). Native Kotlin
+  cannot be gradle-compiled in this container — openRecents mirrors goHome exactly (low risk).
+
+
 - WAKE CHIME VOLUME (Settings): lib/agents/wakeChime.ts gained setWakeChimeVolume(v) (0=off..1)
   applied live to the loaded sound; playWakeChime() no-ops when volume<=0. index.tsx: new wakeVolume
   state + AsyncStorage key 'bensonWakeChimeVolume' (restored in init, applied to module), handler

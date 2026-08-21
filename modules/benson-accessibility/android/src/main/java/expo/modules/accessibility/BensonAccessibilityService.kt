@@ -475,6 +475,9 @@ class BensonAccessibilityService : AccessibilityService() {
 
     fun goBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)
     fun goHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
+    // Opens the system Recents / app-switcher screen. GLOBAL_ACTION_RECENTS is a plain global
+    // action (no canPerformGestures needed — that flag stays false for OEM anti-spyware safety).
+    fun openRecents(): Boolean = performGlobalAction(GLOBAL_ACTION_RECENTS)
 
     /**
      * Runs a package-allow-listed declarative profile on the service coroutine. The profile

@@ -47,6 +47,12 @@ export function goHome() {
   return NativeModule.goHome();
 }
 
+// Opens the Android Recents / app-switcher screen (GLOBAL_ACTION_RECENTS). Needs the accessibility
+// service connected; no gesture capability required.
+export function openRecents() {
+  return NativeModule.openRecents();
+}
+
 // Last package the accessibility service saw come to the foreground, or null if the service
 // isn't running (not enabled in Settings, or not yet connected). Used to verify a launch actually
 // worked instead of trusting startActivity() not throwing.
