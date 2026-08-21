@@ -169,7 +169,11 @@ export async function askClaude(params: {
   return fullText || `I did not quite catch that, ${params.address}.`;
 }
 
-const MAX_TOOL_ITERATIONS = 4;
+// Raised from 4 → 10 so the agent can operate a real app end-to-end as a phone operator:
+// a genuine task (open app → readScreen → tapOnScreen → readScreen → enterText → tapOnScreen …)
+// takes several readScreen/act cycles. 10 is a safe ceiling — the loop still stops the moment the
+// model stops emitting tool_use, so simple one-shot tools cost the same one turn as before.
+const MAX_TOOL_ITERATIONS = 10;
 
 // Agency loop — same conversational fallback as askClaude, but with real device tools
 // (lib/agents/tools.ts) on the table. Claude decides whether to call one, the matching module

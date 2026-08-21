@@ -1,7 +1,7 @@
 import { Linking } from 'react-native';
 import * as Location from 'expo-location';
 import { launchApp } from './appLauncherAgent';
-import { fillForm, isServiceEnabled } from 'benson-accessibility';
+import { fillForm, isServiceEnabled, executeCommand } from 'benson-accessibility';
 import { getLastScreenSnapshot } from '../screenBridge';
 import { buildActionRequest, execute as executeGoverned } from '../../src/core/mission';
 import { tavilySearch } from './searchAgent';
@@ -95,6 +95,43 @@ export const AGENT_TOOLS = [
   {
     name: 'startCarMode',
     description: 'Switches the app into Car Mode, the large hands-free driving UI. Use when the user says they are driving or asks for car/driving mode.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'tapOnScreen',
+    description:
+      'Taps a control on whatever screen is currently open, found by its visible text or ' +
+      'content-description (requires the Accessibility Service). This is how you operate ANY app ' +
+      'like a finger: press buttons, open a chat/contact/list item, menu entries, tabs. Call ' +
+      'readScreen first to see what is available, then tap by its exact visible label. Loop ' +
+      'readScreen → tapOnScreen as needed to reach the goal. Never taps payment/card/2FA controls.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Visible text or content-description of the element to tap (partial match allowed).' },
+        packageName: { type: 'string', description: 'Optional: only tap if this exact app package is in the foreground.' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'enterText',
+    description:
+      'Types text into an editable field on the current screen (requires the Accessibility ' +
+      'Service). Use to fill a search box, a message field, or a form input inside any app. ' +
+      'Never types into payment/card/2FA fields.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'The text to type.' },
+        intoField: { type: 'string', description: 'Optional: visible label/hint of the target field, to disambiguate when several inputs exist.' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'pressBack',
+    description: 'Presses the Android Back button on the current screen (requires the Accessibility Service). Use to dismiss a screen or step back one level while operating an app.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -264,6 +301,38 @@ export async function executeTool(toolName: string, input: any, ctx: ToolContext
     case 'startCarMode': {
       ctx.onStartCarMode?.();
       return 'Car Mode activated.';
+    }
+    case 'tapOnScreen': {
+      const enabled = await isServiceEnabled();
+      if (!enabled) return `Accessibility Service isn't enabled, so I can't tap the screen, ${ctx.address}.`;
+      const text = String(input?.text ?? '').trim();
+      if (!text) return 'No target text given to tap.';
+      const match: Record<string, unknown> = { textContains: text, clickableAncestor: true, excludeSearchUi: true };
+      const step: Record<string, unknown> = { action: 'click', match, timeoutMs: 4000 };
+      if (input?.packageName) step.requirePackage = String(input.packageName);
+      const result = await executeCommand({ steps: [step] } as any);
+      return result.success
+        ? `Tapped "${text}".`
+        : `Couldn't tap "${text}" — ${result.status}${result.detail ? `: ${result.detail}` : ''}.`;
+    }
+    case 'enterText': {
+      const enabled = await isServiceEnabled();
+      if (!enabled) return `Accessibility Service isn't enabled, so I can't type, ${ctx.address}.`;
+      const text = String(input?.text ?? '');
+      if (!text) return 'No text given to type.';
+      const match: Record<string, unknown> = input?.intoField
+        ? { editable: true, textContains: String(input.intoField) }
+        : { editable: true };
+      const result = await executeCommand({ steps: [{ action: 'set_text', match, text, timeoutMs: 3000 }] } as any);
+      return result.success
+        ? 'Typed the text into the field.'
+        : `Couldn't type — ${result.status}${result.detail ? `: ${result.detail}` : ''}.`;
+    }
+    case 'pressBack': {
+      const enabled = await isServiceEnabled();
+      if (!enabled) return `Accessibility Service isn't enabled, ${ctx.address}.`;
+      const result = await executeCommand({ steps: [{ action: 'back' }] } as any);
+      return result.success ? 'Went back.' : `Back didn't work — ${result.status}.`;
     }
     case 'getLocation': {
       try {

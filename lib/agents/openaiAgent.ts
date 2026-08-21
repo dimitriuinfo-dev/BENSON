@@ -13,7 +13,9 @@ import { LLM_PROXY_URL, SUPABASE_ANON_KEY } from '../supabaseConfig';
 export const GPT4O_MODEL = 'gpt-4o';
 
 const SENTENCE_SPLIT = /(?<=[.!?…])\s+/;
-const MAX_TOOL_ITERATIONS = 4;
+// Raised 4 → 10 to match askClaudeWithTools: a real phone-operator task needs several
+// readScreen/act cycles. The loop still exits as soon as the model stops requesting tools.
+const MAX_TOOL_ITERATIONS = 10;
 
 const headers = {
   'Content-Type': 'application/json',

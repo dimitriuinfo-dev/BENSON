@@ -57,6 +57,15 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
   ("Benson") detection — that is a separate NATIVE path in BensonForegroundService.kt still using
   the same failing device SpeechRecognizer. Whisper is not a wake-word engine; native wake-word
   redesign is a separate, larger task.
+- 2026-08: PHONE OPERATOR — Phase 1 (JS-only, no rebuild). Extended lib/agents/tools.ts (no new
+  files): exposed existing native executeCommand({steps}) as 3 LLM tools — tapOnScreen (click by
+  visible text/desc), enterText (set_text into editable field), pressBack. With existing readScreen
+  (screenBridge snapshot) + openApp + fillForm, the LLM tool-use loop now operates ANY app like a
+  finger: open → readScreen → tap → readScreen → type → tap. Raised MAX_TOOL_ITERATIONS 4→10 in
+  claudeAgent.ts + openaiAgent.ts. tsc+lint clean. Testable via JS reload (no rebuild).
+  Phase 2 (needs native rebuild): add scroll action to BensonCommandExecutor.kt + scrollScreen tool
+  (reach off-screen content); optional getScreenSnapshot() native getter. Honest limit: "close app"
+  = Home/recents only (Android forbids force-stop via accessibility).
 
 ## Branch / sync
 - My session work is committed by the platform to branch `conflict_210826_1714` (main = clean
