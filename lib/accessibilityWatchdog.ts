@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import { getConnectionState } from 'benson-accessibility';
+import { AppState } from 'react-native';
 
 export type AccessibilityWatchHandle = { stop: () => void };
 
@@ -14,7 +15,7 @@ export const ACCESSIBILITY_ALERT_NOTIFICATION_TAG = 'benson_accessibility_droppe
 // transition, never repeatedly while already known to be off — the user has already been told
 // once; re-alerting every interval would be the exact "eternal loop" class of bug fixed earlier
 // this session.
-export function startAccessibilityWatch(params: { onDropped: () => void }): AccessibilityWatchHandle {
+export function startAccessibilityWatch(params: { onDropped: () => void; onStatus?: (connected: boolean) => void }): AccessibilityWatchHandle {
   let wasConnected = true; // optimistic — the first real check corrects this within one interval
   let stopped = false;
 
@@ -27,6 +28,10 @@ export function startAccessibilityWatch(params: { onDropped: () => void }): Acce
       return;
     }
     const connected = state === 'enabled_connected';
+    // Report the CURRENT state on every check (not just the drop transition) so callers can keep a
+    // live in-app banner in sync — showing it while the service is off, clearing it once the user
+    // re-enables it. Fired every interval + on each foreground return below.
+    try { params.onStatus?.(connected); } catch {}
     if (wasConnected && !connected) {
       params.onDropped();
       try {
@@ -45,11 +50,18 @@ export function startAccessibilityWatch(params: { onDropped: () => void }): Acce
 
   const interval = setInterval(check, CHECK_INTERVAL_MS);
   check();
+  // Re-check immediately whenever the app returns to the foreground — the user most likely just
+  // came back from the system Accessibility settings screen, and a 60s poll would otherwise leave
+  // the banner stale for up to a minute after they fixed it.
+  const appStateSub = AppState.addEventListener('change', (next) => {
+    if (next === 'active') check();
+  });
 
   return {
     stop: () => {
       stopped = true;
       clearInterval(interval);
+      appStateSub.remove();
     },
   };
 }

@@ -40,6 +40,7 @@ import {
   type Voice, type SttEngine,
 } from '../lib/agents/voiceAgent';
 import { preloadLocalWhisper } from '../lib/agents/localWhisperEngine';
+import { preloadWakeChime, playWakeChime } from '../lib/agents/wakeChime';
 import { speakWithOpenAI, stopOpenAITTS } from '../lib/agents/openaiTTS';
 import { buildVoiceInstructions, currentTimeOfDay } from '../lib/agents/voiceInstructions';
 import { startCarAutoDetection, type CarAutoDetectHandle } from '../lib/carAutoDetect';
@@ -236,6 +237,12 @@ export default function BensonApp() {
   const [serviceStatus, setServiceStatus] = useState({
     mic: false, accessibility: false, gps: false, ai: false,
   });
+  // In-app banner state for the accessibility service being off — kept in sync by the watchdog's
+  // onStatus callback (fires on every poll + on every foreground return). When true, a persistent,
+  // tappable banner is shown over the main screen with a one-tap route into system Settings, so a
+  // silently auto-disabled service is impossible to miss (spoken alert + notification alone can be
+  // dismissed/unheard).
+  const [accessibilityDown, setAccessibilityDown] = useState(false);
   // "Screen in screen" (2026-07-17): real PiP shrinks this SAME Activity, so BensonMainScreen
   // needs to know to switch to the logo-only layout — there's no separate native PiP screen.
   const [isInPip, setIsInPip] = useState(false);
@@ -749,6 +756,7 @@ export default function BensonApp() {
       onDropped: () => speak(
         'Serviciul de accesibilitate tocmai s-a dezactivat. Nu mai pot citi ecranul sau apăsa butoane până nu-l reactivezi din Setări.',
       ),
+      onStatus: (connected) => setAccessibilityDown(!connected),
     });
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       if (response.notification.request.content.data?.tag === ACCESSIBILITY_ALERT_NOTIFICATION_TAG) {
@@ -826,6 +834,8 @@ export default function BensonApp() {
     // needed it — fire it at app start instead, so the permission dialog isn't a surprise
     // mid-command. Not awaited: this shouldn't delay the rest of setup.
     Location.requestForegroundPermissionsAsync().catch(() => {});
+    // Warm the wake-confirmation chime so the first "Benson" gets an instant sound, no decode lag.
+    preloadWakeChime();
 
     const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, tp, cm, acm, cda, cdn, vig, rl, mp, se, ww] = await Promise.all([
       AsyncStorage.getItem('masterName'),
@@ -1594,6 +1604,9 @@ export default function BensonApp() {
   // Single reusable wake handler — invoked by BOTH the native hotword listener AND the local
   // Whisper scan loop, so there is exactly ONE wake-handling path (no duplication).
   async function handleWakeDetected(commandTail: string) {
+    // Immediate non-verbal "I heard you" — plays the instant "Benson" is recognized, before the
+    // mic is handed off, so the user knows they were heard even if the spoken prompt is a beat away.
+    playWakeChime();
     stopWakeScan();
     wakeScanningRef.current = false;
     wakeTriggeredRef.current = true;
@@ -2265,6 +2278,26 @@ export default function BensonApp() {
         onSubmitText={handleIncomingText}
       />
 
+      {/* ── Accessibility-down banner ── persistent, tappable, over the main screen. Shown only on
+          the chat screen and never while the onboarding/setup modals (which already handle this
+          permission) are open, so it doesn't double-nag. One tap opens the system Settings screen
+          where the user re-enables the service. */}
+      {accessibilityDown && phase === 'chat' && !setupWizardOpen && !appPermOpen && (
+        <View style={s.a11yBanner}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.a11yBannerTitle}>Serviciul de Accesibilitate este oprit</Text>
+            <Text style={s.a11yBannerBody}>
+              Nu pot citi ecranul sau apăsa butoane în alte aplicații până nu îl reactivezi.
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={s.a11yBannerBtn}
+            onPress={() => { tap(); openAccessibilitySettings(); }}
+            accessibilityLabel="Deschide setările de accesibilitate" accessibilityRole="button">
+            <Text style={s.a11yBannerBtnText}>DESCHIDE SETĂRILE</Text>
+          </TouchableOpacity>
+        </View>
+      )}
       {/* ── Settings Modal ── */}
       <Modal visible={settingsOpen} animationType="slide" transparent>
         <View style={s.modalBg}>
@@ -2749,6 +2782,13 @@ export default function BensonApp() {
 const s = StyleSheet.create({
   container:     { flex: 1, backgroundColor: NAVY },
   center:        { flex: 1, backgroundColor: NAVY, alignItems: 'center', justifyContent: 'center', padding: 32 },
+
+  a11yBanner:    { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center',
+                   backgroundColor: RED, paddingTop: 44, paddingBottom: 12, paddingHorizontal: 14, gap: 12 },
+  a11yBannerTitle: { color: '#fff', fontWeight: '800', fontSize: 13, letterSpacing: 0.5, marginBottom: 2 },
+  a11yBannerBody:  { color: 'rgba(255,255,255,0.92)', fontSize: 12, lineHeight: 16 },
+  a11yBannerBtn:   { backgroundColor: '#fff', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 6 },
+  a11yBannerBtnText: { color: RED, fontWeight: '800', fontSize: 11, letterSpacing: 0.5 },
 
   seal:          { width: 100, height: 100, borderRadius: 50, backgroundColor: PANEL, borderWidth: 2, borderColor: GOLD, alignItems: 'center', justifyContent: 'center', marginBottom: 24 },
   sealB:         { fontSize: 48, color: GOLD, fontWeight: '300' },

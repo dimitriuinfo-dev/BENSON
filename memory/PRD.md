@@ -90,7 +90,25 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
 
-## 2026-06 (fork) — WAKE WORD (Variant A) verified complete + SETUP WIZARD permission gating
+## 2026-06 (fork) — CONFIRMARE WAKE (sunet) + BANNER REACTIVARE ACCESSIBILITY
+- WAKE CHIME (Feature A, JS-only): assets/sounds/wake.wav (~11KB, two-note rising ding, generated).
+  New lib/agents/wakeChime.ts (expo-av, same stack as openaiTTS) preload+play, never throws.
+  Preloaded in init(); played at the very start of handleWakeDetected() so every recognized
+  "Benson" gets an instant non-verbal confirmation before mic handoff. tsc+lint clean.
+- ACCESSIBILITY-DOWN BANNER (Feature C, JS-only): accessibilityWatchdog.ts gained an onStatus(connected)
+  callback (fires every 60s poll + on every AppState 'active' foreground return, via a new AppState
+  listener inside the watch). index.tsx: new accessibilityDown state driven by onStatus; a persistent
+  RED banner over the main screen (shown only phase==='chat' && !setupWizardOpen && !appPermOpen) with
+  "DESCHIDE SETĂRILE" → openAccessibilitySettings(). Complements the existing spoken alert + tappable
+  notification. tsc+lint clean.
+- CLOSE APP (Feature B): product owner picked "honest, return-to-BENSON only" (no gestures — see
+  device-safety note). appLauncherExecutor.ts CLOSE_APP now returns an honest spoken message
+  ("Nu pot închide complet {app} — Android nu-mi permite asta. Am revenit la tine.") instead of the
+  old "Am revenit în Benson." Reliable swipe-close in Recents was rejected: it needs
+  android:canPerformGestures=true, confirmed (2026-07-09) to trigger OxygenOS/ColorOS anti-spyware
+  auto-disable of the WHOLE service on this device — stays false. tsc+lint clean.
+
+
 - WAKE WORD (local Whisper, free): reviewed app/index.tsx + voiceAgent.ts. Implementation is
   COMPLETE & coherent: startWakeScan/stopWakeScan exported from voiceAgent.ts; single wake path
   handleWakeDetected() (no duplication) fed by BOTH the native listener (wakeWordSub) and the local

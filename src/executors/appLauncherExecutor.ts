@@ -224,7 +224,14 @@ export const AppLauncherExecutor: Executor = {
     if (request.intent === 'CLOSE_APP') {
       const target = typeof request.parameters.appName === 'string' ? request.parameters.appName : 'unknown';
       devLog('CLOSE_APP target=', target, 'method=OPEN_BENSON');
-      return bringBensonBack(request.id, 'Am revenit în Benson.');
+      // Honest scope (per product owner, 2026-06): Android gives an accessibility app no way to
+      // force-stop another app, and the one Recents-swipe technique needs canPerformGestures — which
+      // on this OnePlus/OxygenOS device triggered the OEM anti-spyware auto-disable of the whole
+      // service, so it must stay off. Best we can safely do is leave that app (bring BENSON to
+      // front) and say so plainly, rather than pretend it was closed.
+      const label = target && target !== 'unknown' ? target : 'aplicația';
+      const msg = `Nu pot închide complet ${label} — Android nu-mi permite asta. Am revenit la tine.`;
+      return bringBensonBack(request.id, msg);
     }
 
     if (request.intent === 'OPEN_WAZE') return launchAllowlisted(request.id, 'Waze', 'com.waze');
