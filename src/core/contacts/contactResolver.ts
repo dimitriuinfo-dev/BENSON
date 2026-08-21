@@ -27,6 +27,42 @@ function matchesPartial(candidate: string, normalizedQuery: string): boolean {
   return normalizedCandidate.includes(normalizedQuery) || normalizedQuery.includes(normalizedCandidate);
 }
 
+// Levenshtein edit distance — small, dependency-free. Used only in the fuzzy tier below.
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  let curr = new Array<number>(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[b.length];
+}
+
+// Two normalized strings are "close" if their edit distance is within ~1/3 of the longer one.
+// This is what rescues imperfect voice transcripts: "hana" -> "hannah" (distance 2, threshold 3),
+// "steffan" -> "stefan", "adriaan" -> "adriana". Both must be >=3 chars so 1-2 letter fragments
+// never fuzzy-match half the address book.
+function fuzzyClose(a: string, b: string): boolean {
+  if (a.length < 3 || b.length < 3) return false;
+  const threshold = Math.ceil(Math.max(a.length, b.length) / 3);
+  return levenshtein(a, b) <= threshold;
+}
+
+// Fuzzy tier: compare the query against the whole normalized candidate AND against each of its
+// name tokens, so "hana" matches the "hannah" token inside a "Hannah Müller" display name.
+function matchesFuzzy(candidate: string, normalizedQuery: string): boolean {
+  const nc = normalizeName(candidate);
+  if (fuzzyClose(nc, normalizedQuery)) return true;
+  return nc.split(/\s+/).some((tok) => fuzzyClose(tok, normalizedQuery));
+}
+
 // Confirmed live (2026-07-17): the same physical contact can be enumerated more than once by
 // expo-contacts (e.g. linked/synced across accounts at the OS level) even though the device's own
 // Contacts app shows it once — the raw ContactsProvider query for "Baby" returned exactly one row,
@@ -57,6 +93,16 @@ function findMatches(normalizedQuery: string, contacts: TrustedContact[]): Trust
 
   const partialAlias = dedupeContacts(contacts.filter((c) => (c.aliases ?? []).some((a) => matchesPartial(a, normalizedQuery))));
   if (partialAlias.length > 0) return partialAlias;
+
+  // Weakest tier — fuzzy (edit-distance) match, to rescue imperfect voice transcripts of a name
+  // (the "Hannah" heard as "Hana" bug). Only reached when every stricter tier found nothing, so a
+  // clean exact/substring hit is never overridden by a looser fuzzy one. 2+ fuzzy hits still
+  // resolve as 'ambiguous' upstream, which safely asks the user "which one?" rather than guessing.
+  const fuzzyDisplayName = dedupeContacts(contacts.filter((c) => matchesFuzzy(c.displayName, normalizedQuery)));
+  if (fuzzyDisplayName.length > 0) return fuzzyDisplayName;
+
+  const fuzzyAlias = dedupeContacts(contacts.filter((c) => (c.aliases ?? []).some((a) => matchesFuzzy(a, normalizedQuery))));
+  if (fuzzyAlias.length > 0) return fuzzyAlias;
 
   return [];
 }

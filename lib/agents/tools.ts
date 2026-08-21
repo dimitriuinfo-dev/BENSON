@@ -135,6 +135,19 @@ export const AGENT_TOOLS = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'scrollScreen',
+    description:
+      'Scrolls the current screen to reveal content that is not visible yet (requires the ' +
+      'Accessibility Service). When what you need is off-screen, scroll then call readScreen again ' +
+      'to see the newly revealed items. direction: "forward" (down, default) or "backward" (up).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        direction: { type: 'string', enum: ['forward', 'backward'], description: 'forward = down, backward = up.' },
+      },
+    },
+  },
+  {
     name: 'getLocation',
     description:
       'Gets the phone\'s current GPS location (city/area name and coordinates). Use this whenever ' +
@@ -333,6 +346,15 @@ export async function executeTool(toolName: string, input: any, ctx: ToolContext
       if (!enabled) return `Accessibility Service isn't enabled, ${ctx.address}.`;
       const result = await executeCommand({ steps: [{ action: 'back' }] } as any);
       return result.success ? 'Went back.' : `Back didn't work — ${result.status}.`;
+    }
+    case 'scrollScreen': {
+      const enabled = await isServiceEnabled();
+      if (!enabled) return `Accessibility Service isn't enabled, so I can't scroll, ${ctx.address}.`;
+      const direction = input?.direction === 'backward' ? 'backward' : 'forward';
+      const result = await executeCommand({ steps: [{ action: 'scroll', direction }] } as any);
+      return result.success
+        ? `Scrolled ${direction}.`
+        : `Couldn't scroll ${direction} — ${result.status}${result.detail ? `: ${result.detail}` : ''}.`;
     }
     case 'getLocation': {
       try {

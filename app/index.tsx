@@ -244,7 +244,7 @@ export default function BensonApp() {
   }, []);
 
   // Voice settings
-  const [lang, setLang]               = useState('en-GB');
+  const [lang, setLang]               = useState('ro-RO');
   const [voiceRate, setVoiceRate]     = useState(1.1);
   const [voicePitch, setVoicePitch]   = useState(0.85);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
@@ -337,14 +337,14 @@ export default function BensonApp() {
   const pulseAnim  = useRef(new Animated.Value(1)).current;
 
   // ── Refs for stale-closure safety ──────────────────────────────────────────
-  const langRef         = useRef('en-GB');
+  const langRef         = useRef('ro-RO');
   // Reply (TTS) language, deliberately separate from langRef (STT recognition language). The
   // voice-only "change language" command (2026-07-14) sets ONLY this — changing STT language via
   // voice risks locking a voice-only user out entirely, since Android's recognizer only listens
   // in one locale at a time: if they then speak in whatever language they were using before,
   // it goes unrecognized and they have no way to say the words to switch back. Touch-based
   // changeLang() (Settings picker) still syncs both, since a sighted user can see/fix it there.
-  const replyLangRef    = useRef('en-GB');
+  const replyLangRef    = useRef('ro-RO');
   const voiceEnabledRef = useRef(true);
   const voiceRateRef    = useRef(1.1);
   const voicePitchRef   = useRef(0.85);
@@ -870,7 +870,7 @@ export default function BensonApp() {
     ]);
 
     if (sl) { setLang(sl); langRef.current = sl; try { setSttLanguage(sl); } catch {} }
-    replyLangRef.current = rl || sl || 'en-GB';
+    replyLangRef.current = rl || sl || 'ro-RO';
     if (sr) { const r = parseFloat(sr); setVoiceRate(r); voiceRateRef.current = r; }
     if (sp) { const p = parseFloat(sp); setVoicePitch(p); voicePitchRef.current = p; }
     if (ve) { const v = ve === 'true'; setVoiceEnabled(v); voiceEnabledRef.current = v; }

@@ -109,6 +109,7 @@ class BensonCommandExecutor(
                           else fail(i, action, "tap_rejected", "Global BACK was not accepted.")
                 "home" -> if (service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)) ok(i, action)
                           else fail(i, action, "tap_rejected", "Global HOME was not accepted.")
+                "scroll" -> doScroll(i, step)
                 "return_to_benson" -> { returnToBenson(); ok(i, action) }
                 else -> fail(i, action, "invalid", "Unknown action \"$action\".")
             }
@@ -124,6 +125,36 @@ class BensonCommandExecutor(
     // ------------------------------------------------------------------
     // Acțiuni
     // ------------------------------------------------------------------
+
+    // Scroll the current screen so content that isn't visible yet can be reached (Faza 2 — the
+    // "operator" can only tap what's on screen otherwise). Finds the first scrollable container
+    // from the active window root and asks it to scroll. direction: "forward"/"down" (default) or
+    // "backward"/"up". A rejected action usually just means we're already at the edge of the list.
+    private fun doScroll(i: Int, step: JSONObject): CommandResult {
+        val direction = step.optString("direction", "forward").lowercase()
+        val scrollAction = if (direction == "backward" || direction == "up")
+            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        else
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        val root = service.rootInActiveWindow
+            ?: return fail(i, "scroll", "not_found", "No active window to scroll.")
+        val scrollable = findScrollable(root, IntArray(1), 0)
+            ?: return fail(i, "scroll", "not_found", "No scrollable node on screen.")
+        return if (scrollable.performAction(scrollAction)) ok(i, "scroll")
+        else fail(i, "scroll", "tap_rejected", "Scrollable node found but scroll was not accepted (already at the edge?).")
+    }
+
+    private fun findScrollable(node: AccessibilityNodeInfo, counter: IntArray, depth: Int): AccessibilityNodeInfo? {
+        if (counter[0] >= MAX_NODES || depth >= MAX_DEPTH) return null
+        counter[0]++
+        if (node.isScrollable) return node
+        for (c in 0 until node.childCount) {
+            val child = node.getChild(c) ?: continue
+            val hit = findScrollable(child, counter, depth + 1)
+            if (hit != null) return hit
+        }
+        return null
+    }
 
     private fun doLaunchApp(i: Int, step: JSONObject): CommandResult {
         val pkg = step.optString("package", "")

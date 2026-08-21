@@ -89,3 +89,28 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 ## Backlog / notes
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
+
+## 2026-08 — BATCH: butler-grade fixes (build-ready, verified tsc+lint+Metro graph)
+- ROMANIAN DEFAULTS (index.tsx): langRef, replyLangRef, useState lang, restore fallback all
+  'en-GB'→'ro-RO'. This was the "engleză proastă" root cause — LLM got lang='en-GB' so replied
+  English, and local Whisper decoded Romanian speech as English. Agent replies use
+  replyLangRef.current (buildSystemPrompt: "Respond in language ${lang}") → now Romanian.
+- HANNAH / contact matching (src/core/contacts/contactResolver.ts): added a Levenshtein fuzzy tier
+  (matchesFuzzy) after exact/partial tiers. Threshold = ceil(maxLen/3), both strings >=3 chars,
+  matches whole string + each name token. Rescues "Hana"→"Hannah". 2+ hits → 'ambiguous' (asks).
+- MIC ALWAYS-RESPONSIVE (index.tsx): (prev) local default + migration; NEW: miss feedback (explicit
+  manual/wake attempt that captures nothing now SPEAKS "Nu am auzit nimic, mai încearcă" instead of
+  silence) via sttTriggerRef + sessionGotResultRef; watchdog (listenWatchdogRef) force-stops a hung
+  session (cloud 12s / local 65s) so mic is never stuck. Local VAD window is natural (60s pre-speech,
+  2.5s end-silence) — no change needed.
+- PHONE OPERATOR (lib/agents/tools.ts): tapOnScreen/enterText/pressBack (prev) + NEW scrollScreen,
+  all backed by native executeCommand. MAX_TOOL_ITERATIONS 4→10 (claude+openai agents).
+- SCROLL NATIVE (BensonCommandExecutor.kt): added "scroll" action (doScroll + findScrollable),
+  ACTION_SCROLL_FORWARD/BACKWARD on first scrollable node. NEEDS REBUILD; cannot gradle-compile in
+  this container (low risk, mirrors existing style).
+- WAKE WORD (Porcupine/Picovoice): playbook obtained. BLOCKED on external creds only the user can
+  provide: (1) Picovoice AccessKey (console.picovoice.ai), (2) custom Benson_android.ppn keyword
+  file. Best arch = integrate Porcupine into existing BensonForegroundService (single AudioRecord,
+  fan out PCM to Porcupine + recognizer). Not built yet — needs key+ppn + native rebuild.
+- VERIFIED: tsc 0 errors, eslint clean on all touched JS, Metro Android graph 1800 modules resolve
+  (Hermes binary step is a container-only limitation).
