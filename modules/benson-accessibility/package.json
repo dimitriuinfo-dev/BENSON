@@ -1,0 +1,8 @@
+{
+  "name": "benson-accessibility",
+  "version": "1.0.0",
+  "description": "Screen-reading, form-filling accessibility service for BENSON (Etapa 10)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

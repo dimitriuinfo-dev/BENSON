@@ -1,0 +1,8 @@
+{
+  "name": "benson-foreground-service",
+  "version": "1.0.0",
+  "description": "Persistent foreground service notification for BENSON background listening",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

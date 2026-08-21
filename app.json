@@ -1,0 +1,73 @@
+{
+  "expo": {
+    "name": "BENSON",
+    "slug": "benson-android",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "benson",
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0D1B2A"
+      },
+      "package": "com.benson.butler",
+      "permissions": [
+        "android.permission.READ_CONTACTS",
+        "android.permission.CALL_PHONE",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.WRITE_CONTACTS",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.WAKE_LOCK",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-contacts",
+      "expo-av",
+      "expo-file-system",
+      "expo-location",
+      "expo-notifications",
+      "expo-secure-store",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "BENSON needs your microphone to hear your commands.",
+          "speechRecognitionPermission": "BENSON needs speech recognition to understand you.",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox"
+          ]
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "BENSON needs access to your photos to show them to you.",
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ],
+      "expo-video",
+      "./plugins/withReleaseSigning.js",
+      "./plugins/withBundledAssets.js",
+      "./plugins/withNoCompressBin.js",
+      "./plugins/withProguardRules.js"
+    ],
+    "extra": {
+      "router": {},
+      "buildLabel": "BENSON 36",
+      "eas": {
+        "projectId": "95c83e25-6623-48ef-bf36-d26c58285b5a"
+      }
+    }
+  }
+}

@@ -1,0 +1,57 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+app-example
+
+# generated native folders
+/ios
+/android
+modules/*/android/build/
+modules/*/android/.cxx/
+
+# release signing secrets (path to an out-of-project keystore + passwords) — read by
+# plugins/withReleaseSigning.js at prebuild time, never committed
+/release-signing.json
+
+# bundled model assets (large binaries, not secrets) — copied into android/app/src/main/assets/
+# at prebuild time by plugins/withBundledAssets.js. These exist ONLY on this disk once removed
+# from git — make sure any project backup includes this folder, or the models must be
+# re-obtained/re-converted from scratch.
+/porcupine-model
+/whisper-models
+*.apk 

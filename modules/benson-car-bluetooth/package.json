@@ -1,0 +1,8 @@
+{
+  "name": "benson-car-bluetooth",
+  "version": "1.0.0",
+  "description": "Bluetooth connection monitoring for Car Mode auto-detection",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

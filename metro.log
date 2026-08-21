@@ -1,0 +1,996 @@
+Starting project at C:\Users\lenovo\Desktop\BENSON-Android
+Starting Metro Bundler
+The following packages should be updated for best compatibility with the installed expo version:
+  expo@54.0.35 - expected version: ~54.0.36
+Your project may not work correctly until you install the expected versions of the packages.
+Waiting on http://localhost:8081
+Logs for your project will appear below.
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 3185ms node_modules\expo-router\entry.js (1894 modules)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ ERROR  [Error: Uncaught (in promise, id: 0) Error: Unable to activate keep awake] 
+
+Call Stack
+  construct (<native>)
+  apply (<native>)
+  _construct (node_modules\@babel\runtime\helpers\construct.js)
+  Wrapper (node_modules\@babel\runtime\helpers\wrapNativeSuper.js)
+  construct (<native>)
+  _callSuper (node_modules\@babel\runtime\helpers\callSuper.js)
+  constructor (node_modules\expo-modules-core\src\errors\CodedError.ts)
+ LOG  [AccessibilityGuard] state= disabled
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 1839ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ ERROR  [Error: Uncaught (in promise, id: 0) Error: Unable to activate keep awake] 
+
+Call Stack
+  construct (<native>)
+  apply (<native>)
+  _construct (node_modules\@babel\runtime\helpers\construct.js)
+  Wrapper (node_modules\@babel\runtime\helpers\wrapNativeSuper.js)
+  construct (<native>)
+  _callSuper (node_modules\@babel\runtime\helpers\callSuper.js)
+  constructor (node_modules\expo-modules-core\src\errors\CodedError.ts)
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= vreți să mi scrie Te rog frumos lui Baby un mesaj pe WhatsApp normalizedText= vreți să mi scrie Te rog frumos lui Baby un mesaj pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784266512046_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [MissionExecutor] validation failed Multiple contacts match "Baby un mesaj": Baby (••••8957), Baby (••••8957). Which one?
+ LOG  [MissionOrchestrator] mission= mission_1784266512046_2 status= FAILED message= Multiple contacts match "Baby un mesaj": Baby (••••8957), Baby (••••8957). Which one?
+ LOG  [MissionOrchestrator] rawText= este același lucru este același lucru Doar una din ele normalizedText= este același lucru este același lucru Doar una din ele
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= deschide te rog frumos WhatsApp la baby și trimite i un mesaj normalizedText= deschide te rog frumos whatsapp la baby și trimite i un mesaj
+ LOG  [MissionOrchestrator] problemType= DEVICE_CONTROL_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784266572829_4 tasks= ["OPEN_APP"]
+ LOG  [AndroidActionExecutor] launchPackage com.whatsapp -> success= true
+ LOG  [WhatsAppTool] launchPackage com.whatsapp app_switch_observed= true
+ LOG  [MissionExecutor] tool result whatsapp openApp {"outcome": "app_switch_observed"}
+ LOG  [MissionOrchestrator] mission= mission_1784266572829_4 status= COMPLETED message= Am deschis WhatsApp.
+ LOG  [MissionOrchestrator] rawText= Benson trimite i un mesaj pe WhatsApp lui Baby Trimite un mesaj lui Baby pe WhatsApp normalizedText= trimite i un mesaj pe whatsapp lui Baby Trimite un mesaj lui Baby pe whatsapp
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= te iubesc normalizedText= te iubesc
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp prepareMessage
+ INFO  Launching DevTools...
+ WARN  No compatible apps connected. React Native DevTools can only be used with the Hermes engine.
+ LOG  [MissionOrchestrator] rawText= Nu ai deschis WhatsApp De ce nu deschizi WhatsApp normalizedText= Nu ai deschis whatsapp De ce nu deschizi whatsapp
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp prepareMessage
+ LOG  [MissionOrchestrator] rawText= să apăs că nu am unde să apăs ce să apăs normalizedText= să apăs că nu am unde să apăs ce să apăs
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= de ce vorbești prostii că accesibilitatea e deschisă normalizedText= de ce vorbești prostii că accesibilitatea e deschisă
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= eu nu pot să deblochez nimica tu trebuie să deblochezi tu trebuie să intri în WhatsApp normalizedText= eu nu pot să deblochez nimica tu trebuie să deblochezi tu trebuie să intri în whatsapp
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= deblocat normalizedText= deblocat
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AndroidActionExecutor] launchPackage com.whatsapp -> success= true
+ LOG  [WhatsAppTool] launchPackage com.whatsapp app_switch_observed= true
+ LOG  [MissionExecutor] tool result whatsapp openApp {"outcome": "app_switch_observed"}
+ LOG  [MissionOrchestrator] rawText= WhatsApp nu l ai deschis tu Benson te rog frumos trimite un mesaj lui Baby pe WhatsApp mesajul este te iubesc normalizedText= whatsapp nu l ai deschis tu Benson te rog frumos trimite un mesaj lui Baby pe whatsapp mesajul este te iubesc
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784267440623_6 tasks= ["PREPARE_MESSAGE"]
+ LOG  [MissionExecutor] validation failed Multiple contacts match "nu l ai deschis Benson trimite un mesaj lui Baby pe whatsapp mesajul este te iubesc": Baby (••••8957), Baby (••••8957). Which one?
+ LOG  [MissionOrchestrator] mission= mission_1784267440623_6 status= FAILED message= Multiple contacts match "nu l ai deschis Benson trimite un mesaj lui Baby pe whatsapp mesajul este te iubesc": Baby (••••8957), Baby (••••8957). Which one?
+ LOG  [MissionOrchestrator] rawText= baby opt nouă cinci șapte normalizedText= baby opt nouă cinci șapte
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp prepareMessage
+ LOG  [MissionOrchestrator] rawText= tu trebuie să l trimiți dar trebuie să mi arăți să îmi deschizi WhatsApp ul la baby normalizedText= tu trebuie să l trimiți dar trebuie să mi arăți să îmi deschizi whatsapp ul la baby
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp prepareMessage
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 53ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 51ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= Benson Sun o pe Ana pe WhatsApp normalizedText= Sun o pe Ana pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784267682089_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784267682089_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe o pe Ana pe WhatsApp. Confirmi?
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 52ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= Benson Sun o pe Hanna pe WhatsApp te rog normalizedText= Sun o pe Hanna pe whatsapp te rog
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784267739179_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784267739179_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe o pe Hanna pe WhatsApp. Confirmi?
+ LOG  [MissionOrchestrator] rawText= Benson Sună pe Hanna pe WhatsApp te rog normalizedText= Sună pe Hanna pe whatsapp te rog
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784267817310_4 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784267817310_4 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Hanna pe WhatsApp. Confirmi?
+ LOG  [MissionOrchestrator] rawText= sunt confirm normalizedText= sunt confirm
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= tu trebuie să trimiți mesajul Nu Eu Eu am confirmat că ai voie tu m ai întrebat dacă confirm eu am spus că da confirm așa că tu trebuie să trimiți mesajul normalizedText= tu trebuie să trimiți mesajul Nu Eu Eu am confirmat că ai voie tu m ai întrebat dacă confirm eu am spus că da confirm așa că tu trebuie să trimiți mesajul
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 53ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= pentru te rog frumos sun o pe Hanna pe WhatsApp normalizedText= pentru te rog frumos sun o pe Hanna pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784267961632_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784267961632_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe o pe Hanna pe WhatsApp. Confirmi?
+ LOG  [MissionOrchestrator] rawText= Sun o pe Hana pe WhatsApp normalizedText= Sun o pe Hana pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784268560827_4 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784268560827_4 status= WAITING_FOR_CONFIRMATION message= Îl sun pe o pe Hana pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "No search result for \"o pe Hana\" appeared.", "step": "find_result", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "No search result for \"o pe Hana\" appeared.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784268560827_4 status= COMPLETED message= Nu am reușit să-l sun pe o pe Hana pe WhatsApp (No search result for "o pe Hana" appeared.).
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 52ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 51ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 51ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= Benson Sun o pe Hanna pe WhatsApp normalizedText= Sun o pe Hanna pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784268735538_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784268735538_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Hanna pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "Could not find the search icon in WhatsApp.", "step": "find_search", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "Could not find the search icon in WhatsApp.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784268735538_2 status= COMPLETED message= Nu am reușit să-l sun pe Hanna pe WhatsApp (Could not find the search icon in WhatsApp.).
+ LOG  [MissionOrchestrator] rawText= pamțen Sun o pe Baby pe WhatsApp normalizedText= pamțen Sun o pe Baby pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784268836387_4 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784268836387_4 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Baby pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "Could not find the search icon in WhatsApp.", "step": "find_search", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "Could not find the search icon in WhatsApp.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784268836387_4 status= COMPLETED message= Nu am reușit să-l sun pe Baby pe WhatsApp (Could not find the search icon in WhatsApp.).
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 52ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= Sună l pe Lau pe WhatsApp normalizedText= Sună l pe Lau pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784268897248_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784268897248_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Lau pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "Could not find the search icon in WhatsApp.", "step": "find_search", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "Could not find the search icon in WhatsApp.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784268897248_2 status= COMPLETED message= Nu am reușit să-l sun pe Lau pe WhatsApp (Could not find the search icon in WhatsApp.).
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 51ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= Păi înseamnă Sună l pe WhatsApp pe normalizedText= Păi înseamnă Sună l pe whatsapp pe
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784269123756_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784269123756_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe l pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "Could not find the search icon in WhatsApp.", "step": "find_search", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "Could not find the search icon in WhatsApp.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784269123756_2 status= COMPLETED message= Nu am reușit să-l sun pe l pe WhatsApp (Could not find the search icon in WhatsApp.).
+ LOG  [MissionOrchestrator] rawText= nu am reușit să l sun pe WhatsApp cod not fiind dătări Sună l pe te rog pe Lau pe WhatsApp normalizedText= nu am reușit să l sun pe whatsapp cod not fiind dătări Sună l pe te rog pe Lau pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784269160514_4 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784269160514_4 status= WAITING_FOR_CONFIRMATION message= Îl sun pe whatsapp cod not fiind dătări Sună l pe pe Lau pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "Could not find the search icon in WhatsApp.", "step": "find_search", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "Could not find the search icon in WhatsApp.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784269160514_4 status= COMPLETED message= Nu am reușit să-l sun pe whatsapp cod not fiind dătări Sună l pe pe Lau pe WhatsApp (Could not find the search icon in WhatsApp.).
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 54ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= a revenit online Benson sună pe Baby pe WhatsApp normalizedText= a revenit online Benson sună pe Baby pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784269304362_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784269304362_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Baby pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "Could not find the search icon in WhatsApp.", "step": "find_search", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "Could not find the search icon in WhatsApp.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784269304362_2 status= COMPLETED message= Nu am reușit să-l sun pe Baby pe WhatsApp (Could not find the search icon in WhatsApp.).
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 52ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= Benson deschide YouTube și caută muzică românească normalizedText= deschide youtube și caută muzică românească
+ LOG  [MissionOrchestrator] problemType= DEVICE_CONTROL_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784269501197_2 tasks= ["OPEN_APP"]
+ LOG  [AppLauncherExecutor] execute OPEN_APP {"appName": "youtube"}
+ LOG  [AppLauncherExecutor] OPEN_APP appName param youtube
+ LOG  [AndroidActionExecutor] isPackageInstalled com.google.android.youtube -> false
+ LOG  [AppLauncherExecutor] detected package= com.google.android.youtube installed= false
+ LOG  [AppLauncherExecutor] result {"detectedPackage": "com.google.android.youtube", "error": "PACKAGE_NOT_INSTALLED", "foregroundAfter": null, "launchAttempted": false, "success": false}
+ LOG  [MissionOrchestrator] mission= mission_1784269501197_2 status= FAILED message= Nu găsesc aplicația YouTube pe telefon.
+ LOG  [MissionOrchestrator] rawText= frumos WhatsApp la Hanna și dă i următorul mesaj Te pupă tata normalizedText= frumos whatsapp la Hanna și dă i următorul mesaj Te pupă tata
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp prepareMessage
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [WhatsAppTool] accepted https://wa.me/••••8327?text=Te%20pup%C4%83%20tata app_switch_observed= true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] sendMessage (native send): {"error": "Could not find the send button — is the chat actually open with a message typed?", "step": "find_send", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp prepareMessage {"error": "Could not find the send button — is the chat actually open with a message typed?", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] rawText= eu confirm dar trebuie să l trimiți tu normalizedText= eu confirm dar trebuie să l trimiți tu
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 55ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= Sun o pe Ana pe WhatsApp te rog normalizedText= Sun o pe Ana pe whatsapp te rog
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784270030790_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784270030790_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Ana pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": null, "step": "done", "success": true}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"outcome": "app_switch_observed", "via": "accessibility_native_state_machine"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784270030790_2 status= COMPLETED message= L-am sunat pe Ana pe WhatsApp.
+ LOG  [MissionOrchestrator] rawText= Benson Sună pe WhatsApp pe Baby normalizedText= Sună pe whatsapp pe Baby
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784270241912_4 tasks= ["PREPARE_CALL"]
+ LOG  [PhoneCallExecutor] execute CALL_CONTACT {"contactId": "1655", "contactName": "Baby"}
+ LOG  [PhoneCallExecutor] sanitized phone number present: true
+ LOG  [PhoneCallExecutor] placed direct call via ACTION_CALL
+ LOG  [MissionOrchestrator] mission= mission_1784270241912_4 status= COMPLETED message= Îl sun pe Baby.
+ LOG  [MissionOrchestrator] rawText= Sună pe WhatsApp pe Baby te rog normalizedText= Sună pe whatsapp pe Baby te rog
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784270262171_6 tasks= ["PREPARE_CALL"]
+ LOG  [PhoneCallExecutor] execute CALL_CONTACT {"contactId": "1655", "contactName": "Baby"}
+ LOG  [PhoneCallExecutor] sanitized phone number present: true
+ LOG  [PhoneCallExecutor] placed direct call via ACTION_CALL
+ LOG  [MissionOrchestrator] mission= mission_1784270262171_6 status= COMPLETED message= Îl sun pe Baby.
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 50ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= pe Baby pe WhatsApp normalizedText= pe Baby pe whatsapp
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= vreau să o suni pe Baby pe WhatsApp normalizedText= vreau să o suni pe Baby pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784270500036_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784270500036_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Baby pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": null, "step": "done", "success": true}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"outcome": "app_switch_observed", "via": "accessibility_native_state_machine"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784270500036_2 status= COMPLETED message= L-am sunat pe Baby pe WhatsApp.
+ LOG  [MissionOrchestrator] rawText= L am sunat pe Baby pe WhatsApp Mulțumesc perfect ai făcut normalizedText= L am sunat pe Baby pe whatsapp Mulțumesc perfect ai făcut
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= Nu mulțumesc normalizedText= Nu mulțumesc
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= mulțumesc thank you normalizedText= mulțumesc thank you
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 51ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= pentru să mi scrii te rog frumos lu' Ana pe WhatsApp Te iubește tata normalizedText= pentru să mi scrii te rog frumos lu' Ana pe whatsapp Te iubește tata
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionExecutor] validation failed Multiple contacts match "Ana": Banatu Mihai (••••3550), Dana Isacu (••••1070), Diana Bucur (••••4027), Mariana Medrea (••••1793), Oana Dl Ovidiu (••••0460), Oana Fonduri (••••0365), Roxana (••••9701), Sorana Barna (••••1524), Thales Georgiana (••••9325), Vasile Managache (••••1723). Which one?
+ LOG  [MissionOrchestrator] rawText= este Hanna nu Ana normalizedText= este Hanna nu Ana
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp prepareMessage
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [WhatsAppTool] accepted https://wa.me/••••8327?text=Te%20iube%C8%99te%20tata app_switch_observed= true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] sendMessage (native send): {"error": "Could not find the send button — is the chat actually open with a message typed?", "step": "find_send", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp prepareMessage {"error": "Could not find the send button — is the chat actually open with a message typed?", "outcome": "opened_manual_action_required"}
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 51ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= Benson Scrie i un mesaj pe WhatsApp lui haina normalizedText= Scrie i un mesaj pe whatsapp lui haina
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784271633263_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [MissionExecutor] validation failed No contact matching "i un mesaj" was found.
+ LOG  [MissionOrchestrator] mission= mission_1784271633263_2 status= FAILED message= No contact matching "i un mesaj" was found.
+ LOG  [MissionOrchestrator] rawText= Benson Sună pe WhatsApp pe mama normalizedText= Sună pe whatsapp pe mama
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784271682773_4 tasks= ["PREPARE_CALL"]
+ LOG  [PhoneCallExecutor] execute CALL_CONTACT {"contactId": "4841", "contactName": "Mama"}
+ LOG  [PhoneCallExecutor] sanitized phone number present: true
+ LOG  [PhoneCallExecutor] placed direct call via ACTION_CALL
+ LOG  [MissionOrchestrator] mission= mission_1784271682773_4 status= COMPLETED message= Îl sun pe Mama.
+ LOG  [MissionOrchestrator] rawText= Benson Sun o pe WhatsApp pe mama normalizedText= Sun o pe whatsapp pe mama
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784271822180_6 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784271822180_6 status= WAITING_FOR_CONFIRMATION message= Îl sun pe o pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "No search result for \"o\" appeared.", "step": "find_result", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "No search result for \"o\" appeared.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784271822180_6 status= COMPLETED message= Nu am reușit să-l sun pe o pe WhatsApp (No search result for "o" appeared.).
+ LOG  [MissionOrchestrator] rawText= suntem mama pe WhatsApp normalizedText= suntem mama pe whatsapp
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 50ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= Sun o pe WhatsApp pe mama normalizedText= Sun o pe whatsapp pe mama
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784271953878_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784271953878_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe mama pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": null, "step": "done", "success": true}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"outcome": "app_switch_observed", "via": "accessibility_native_state_machine"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784271953878_2 status= COMPLETED message= L-am sunat pe mama pe WhatsApp.
+ LOG  [MissionOrchestrator] rawText= mulțumesc normalizedText= mulțumesc
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= L am sunat normalizedText= L am sunat
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= Cine a câștigat meciurile din semifinală la Campionatul Mondial normalizedText= Cine a câștigat meciurile din semifinală la Campionatul Mondial
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 51ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= penson Sun o pe WhatsApp pe mama normalizedText= Sun o pe whatsapp pe mama
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784272365589_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784272365589_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe mama pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "Found a search result but could not tap it.", "step": "tap_result", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "Found a search result but could not tap it.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784272365589_2 status= COMPLETED message= Nu am reușit să-l sun pe mama pe WhatsApp (Found a search result but could not tap it.).
+ LOG  [MissionOrchestrator] rawText= Benson Sună pe mama pe WhatsApp normalizedText= Sună pe mama pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784272457307_4 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784272457307_4 status= WAITING_FOR_CONFIRMATION message= Îl sun pe mama pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": null, "step": "done", "success": true}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"outcome": "app_switch_observed", "via": "accessibility_native_state_machine"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784272457307_4 status= COMPLETED message= L-am sunat pe mama pe WhatsApp.
+ LOG  [MissionOrchestrator] rawText= L am sunat pe mama pe WhatsApp vrem să am Cine a câștigat semifinalele la Campionatul Mondial de Fotbal normalizedText= L am sunat pe mama pe whatsapp vrem să am Cine a câștigat semifinalele la Campionatul Mondial de Fotbal
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= să cauți tu în Google și să îmi spui rezultatele normalizedText= să cauți tu în Google și să îmi spui rezultatele
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= vreau să cauți în Google rezultatele din semifinalele Campionatului Mondial normalizedText= vreau să cauți în Google rezultatele din semifinalele Campionatului Mondial
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= pență deschide YouTube și pune muzică românească normalizedText= pență deschide youtube și pune muzică românească
+ LOG  [MissionOrchestrator] problemType= MEDIA_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784273099111_6 tasks= ["PLAY_MEDIA"]
+ LOG  [AppLauncherExecutor] execute MEDIA_PLAY {"mediaType": "music", "stationName": undefined}
+ LOG  [AppLauncherExecutor] MEDIA_PLAY music lookup -> null
+ LOG  [MissionOrchestrator] mission= mission_1784273099111_6 status= FAILED message= Nu am găsit nicio aplicație muzicală instalată.
+Android node_modules\expo-router\entry.js ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android Bundled 52ms node_modules\expo-router\entry.js (1 module)
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/appLauncherExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/navigationExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/phoneCallExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/whatsappExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/stubExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  Require cycle: src/core/action-engine/index.ts -> src/core/action-engine/actionDispatcher.ts -> src/executors/index.ts -> src/executors/helpExecutor.ts -> src/core/action-engine/index.ts
+
+Require cycles are allowed, but can result in uninitialized values. Consider refactoring to remove the need for a cycle.
+ WARN  [expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.
+ LOG  [MissionOrchestrator] rawText= Benson caută te rog frumos în Google rezultatele sportive de la Campionatul Mondial din semifinale normalizedText= caută te rog frumos în Google rezultatele sportive de la Campionatul Mondial din semifinale
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= pe WhatsApp normalizedText= pe whatsapp
+ LOG  [MissionOrchestrator] mission= undefined status= undefined message= Pentru cine?
+ LOG  [MissionOrchestrator] rawText= Benson Sun o pe Hanna pe WhatsApp normalizedText= Sun o pe Hanna pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784273215334_2 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784273215334_2 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Hanna pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "No search result for \"Hanna\" appeared.", "step": "find_result", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "No search result for \"Hanna\" appeared.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784273215334_2 status= COMPLETED message= Nu am reușit să-l sun pe Hanna pe WhatsApp (No search result for "Hanna" appeared.).
+ LOG  [MissionOrchestrator] rawText= Hannah normalizedText= Hannah
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= Benson Sun o pe Hanna pe WhatsApp normalizedText= Sun o pe Hanna pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784273311936_4 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784273311936_4 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Hanna pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "No search result for \"Hanna\" appeared.", "step": "find_result", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "No search result for \"Hanna\" appeared.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784273311936_4 status= COMPLETED message= Nu am reușit să-l sun pe Hanna pe WhatsApp (No search result for "Hanna" appeared.).
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= nu am reușit să normalizedText= nu am reușit să
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= o pe Ana te rog normalizedText= o pe Ana te rog
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= Sun o pe Ana pe WhatsApp te rog normalizedText= Sun o pe Ana pe whatsapp te rog
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784273970935_6 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784273970935_6 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Ana pe WhatsApp. Confirmi?
+ LOG  [MissionOrchestrator] rawText= nu trebuie să o suni pe Hanna nu pe Ana normalizedText= nu trebuie să o suni pe Hanna nu pe Ana
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784273987684_8 tasks= ["PREPARE_CALL"]
+ LOG  [MissionOrchestrator] mission= mission_1784273987684_8 status= FAILED message= Nu găsesc contactul Hanna nu pe Ana. Vrei să alegi manual?
+ LOG  [MissionOrchestrator] rawText= Hannah normalizedText= Hannah
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= dar nu pe Hana acum Master normalizedText= dar nu pe Hana acum Master
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= Contactul este Hannah normalizedText= Contactul este Hannah
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= penson Sun o pe Hanna pe WhatsApp normalizedText= Sun o pe Hanna pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784274058595_10 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784274058595_10 status= WAITING_FOR_CONFIRMATION message= Îl sun pe Hanna pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "No search result for \"Hanna\" appeared.", "step": "find_result", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "No search result for \"Hanna\" appeared.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784274058595_10 status= COMPLETED message= Nu am reușit să-l sun pe Hanna pe WhatsApp (No search result for "Hanna" appeared.).
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [MissionOrchestrator] rawText= nu am reușit normalizedText= nu am reușit
+ LOG  [MissionOrchestrator] problemType= UNKNOWN inferredGoals= 0 missingInfo= []
+ LOG  [MissionOrchestrator] rawText= bem să l sun o pe Hanna pe WhatsApp normalizedText= bem să l sun o pe Hanna pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784274251072_12 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784274251072_12 status= WAITING_FOR_CONFIRMATION message= Îl sun pe HANNAH pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": null, "step": "done", "success": true}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"outcome": "app_switch_observed", "via": "accessibility_native_state_machine"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784274251072_12 status= COMPLETED message= L-am sunat pe HANNAH pe WhatsApp.
+ LOG  [MissionOrchestrator] rawText= nu ai sunat o pe Ana bem să l sun o pe Hanna pe WhatsApp normalizedText= nu ai sunat o pe Ana bem să l sun o pe Hanna pe whatsapp
+ LOG  [MissionOrchestrator] problemType= COMMUNICATION_PROBLEM inferredGoals= 1 missingInfo= []
+ LOG  [MissionOrchestrator] mission planned mission_1784274521637_14 tasks= ["PREPARE_MESSAGE"]
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [MissionExecutor] needs confirmation whatsapp placeCall
+ LOG  [MissionOrchestrator] mission= mission_1784274521637_14 status= WAITING_FOR_CONFIRMATION message= Îl sun pe HANNAH pe WhatsApp. Confirmi?
+ LOG  [AndroidActionExecutor] isPackageInstalled com.whatsapp -> true
+ LOG  [AccessibilityGuard] state= enabled_connected
+ LOG  [WhatsAppTool] placeCall (native): {"error": "Found a search result but could not tap it.", "step": "tap_result", "success": false}
+ LOG  [MissionExecutor] tool result whatsapp placeCall {"error": "Found a search result but could not tap it.", "outcome": "opened_manual_action_required"}
+ LOG  [MissionOrchestrator] resumed mission= mission_1784274521637_14 status= COMPLETED message= Nu am reușit să-l sun pe HANNAH pe WhatsApp (Found a search result but could not tap it.).
+ ERROR  [TypeError: 0, _bensonAppRegistry.addPipModeListener is not a function (it is undefined)] 
+
+Call Stack
+  useEffect$argument_0 (app\index.tsx)
+  callCreate.reactStackBottomFrame (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  runWithFiberInDEV (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitHookEffectListMount (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitHookPassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  recursivelyTraversePassiveMountEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitPassiveMountOnFiber (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  flushPassiveEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  flushPendingEffects (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  flushSpawnedWork (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitRoot (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  commitRootWhenReady (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  performWorkOnRoot (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  performSyncWorkOnRoot (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  flushSyncWorkAcrossRoots_impl (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  flushSyncWork (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  scheduleRefresh (node_modules\react-native\Libraries\Renderer\implementations\ReactFabric-dev.js)
+  apply (<native>)
+  renderer.scheduleRefresh (node_modules\react-devtools-core\dist\backend.js)
+  mountedRootsSnapshot.forEach$argument_0 (node_modules\react-refresh\cjs\react-refresh-runtime.development.js)
+  forEach (<native>)
+  performReactRefresh (node_modules\react-refresh\cjs\react-refresh-runtime.development.js)
+  Refresh.performReactRefresh (node_modules\react-native\Libraries\Core\setUpReactRefresh.js)
+  setTimeout$argument_0 (node_modules\expo\node_modules\@expo\cli\build\metro-require\require.js) 
+
+Call Stack
+  BaseRoute (node_modules\expo-router\build\useScreens.js)
+  SceneView (node_modules\@react-navigation\core\lib\module\SceneView.js)
+  render (node_modules\@react-navigation\core\lib\module\useDescriptors.js)
+  routes.reduce$argument_0 (node_modules\@react-navigation\core\lib\module\useDescriptors.js)
+  reduce (<native>)
+  useDescriptors (node_modules\@react-navigation\core\lib\module\useDescriptors.js)
+  useNavigationBuilder (node_modules\@react-navigation\core\lib\module\useNavigationBuilder.js)
+  NativeStackNavigator (node_modules\expo-router\build\fork\native-stack\createNativeStackNavigator.js)
+  <anonymous> (node_modules\expo-router\build\layouts\withLayoutContext.js)
+  Object.assign$argument_0 (node_modules\expo-router\build\layouts\StackClient.js)
+  RootLayout (app\_layout.tsx)
+  BaseRoute (node_modules\expo-router\build\useScreens.js)
+  SceneView (node_modules\@react-navigation\core\lib\module\SceneView.js)
+  render (node_modules\@react-navigation\core\lib\module\useDescriptors.js)
+  routes.reduce$argument_0 (node_modules\@react-navigation\core\lib\module\useDescriptors.js)
+  reduce (<native>)
+  useDescriptors (node_modules\@react-navigation\core\lib\module\useDescriptors.js)
+  useNavigationBuilder (node_modules\@react-navigation\core\lib\module\useNavigationBuilder.js)
+  Content (node_modules\expo-router\build\ExpoRoot.js)
+  ContextNavigator (node_modules\expo-router\build\ExpoRoot.js)
+  ExpoRoot (node_modules\expo-router\build\ExpoRoot.js)
+  App (node_modules\expo-router\build\qualified-entry.js)
+  WithDevTools (node_modules\expo\src\launch\withDevTools.tsx)
+C:\Users\lenovo\Desktop\BENSON-Android\node_modules\expo\node_modules\@expo\cli\build\src\utils\errors.js:130
+    throw error;
+    ^
+
+Error: ENOENT: no such file or directory, watch 'C:\Users\lenovo\Desktop\BENSON-Android\node_modules\react-native-reanimated\android\.cxx\Debug\501f4a14\x86\CMakeFiles\CMakeTmp\CMakeFiles\cmTC_94f34.dir'
+    at FSWatcher.<computed> (node:internal/fs/watchers:316:19)
+    at Object.watch (node:fs:2538:36)
+    at FallbackWatcher._watchdir (C:\Users\lenovo\Desktop\BENSON-Android\node_modules\metro-file-map\src\watchers\FallbackWatcher.js:119:33)
+    at C:\Users\lenovo\Desktop\BENSON-Android\node_modules\metro-file-map\src\watchers\FallbackWatcher.js:219:22
+    at Walker.<anonymous> (C:\Users\lenovo\Desktop\BENSON-Android\node_modules\metro-file-map\src\watchers\FallbackWatcher.js:358:5)
+    at Walker.emit (node:events:509:28)
+    at C:\Users\lenovo\Desktop\BENSON-Android\node_modules\walker\lib\walker.js:69:16
+    at FSReqCallback.oncomplete (node:fs:185:23) {
+  errno: -4058,
+  syscall: 'watch',
+  code: 'ENOENT',
+  path: 'C:\\Users\\lenovo\\Desktop\\BENSON-Android\\node_modules\\react-native-reanimated\\android\\.cxx\\Debug\\501f4a14\\x86\\CMakeFiles\\CMakeTmp\\CMakeFiles\\cmTC_94f34.dir',
+  filename: 'C:\\Users\\lenovo\\Desktop\\BENSON-Android\\node_modules\\react-native-reanimated\\android\\.cxx\\Debug\\501f4a14\\x86\\CMakeFiles\\CMakeTmp\\CMakeFiles\\cmTC_94f34.dir'
+}
+
+Node.js v24.15.0
