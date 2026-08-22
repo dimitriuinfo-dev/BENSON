@@ -90,7 +90,28 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
 
-## 2026-06 (fork) — SILENT / FULLY-OFF kill switch (critical usability)
+## 2026-06 (fork) — Notification full toggle (d) + "Doar Mut" mode
+- Reaffirmed: wake word "Benson" hands-free stays the PRIMARY feature — silent/mute are opt-in and
+  off by default; when neither is active, wake word works exactly as before.
+- NOTIFICATION TOGGLE (option d, JS-only, no rebuild): the foreground-service notification already
+  exposes STOP + LISTEN actions. STOP → enterSilentMode (done earlier); LISTEN now → exitSilentMode
+  when silenced (else the usual manual-activation fallback). So the top-bar notification is a full
+  off/on toggle reachable outside the app. (Quick Settings Tile / option a was NOT chosen.)
+- "DOAR MUT" (mute-only) mode: NEW muted state + mutedRef + AsyncStorage 'bensonMuted'. Keeps ALL
+  listening (wake word + commands) but suppresses ALL sound: speak() & speakText() bail on
+  (silenced||muted); the wake chime is skipped when muted; toggleMute() cuts any in-progress TTS on,
+  speaks a short confirm on off. Restored in init. Distinct from silenced (which stops listening).
+- ENTRY POINTS for mute: (1) on-screen — BensonMainScreen TopControls now shows two top-right pills
+  when active: "MUT"/"MUT PORNIT" (gold-filled when on) + "OPREȘTE" (full off); the big red
+  "BENSON E OPRIT" banner still replaces them while silenced. New props muted/onToggleMute. (2) voice —
+  MUTE_ON_PATTERN ("mod mut"/"fără sunet"/"oprește sunetul"/"nu mai vorbi"/"taci dar ascultă"/"mute")
+  & MUTE_OFF_PATTERN ("pornește sunetul"/"cu sunet"/"vorbește din nou"/"unmute"), both directions
+  (mic stays on in mute). Checked before SILENCE_ON so "taci dar ascultă" ≠ full-off "taci".
+- Learn Mode (behavior training via conversation: editable facts + personalized behavior rules,
+  local) — user-requested, DEFERRED to backlog (do after this + phone test), per user 2026-06.
+- tsc 0 errors; eslint at pre-existing baseline (no new errors). NATIVE-ONLY → user verifies on build.
+
+
 - PROBLEM (user): BENSON wouldn't fully stop on demand — kept making mic clicks/pops + TTS/chimes
   even when the user needed total silence (meetings/public). Needed an easy, sticky "off".
 - FIX: global silent/off kill switch. index.tsx: silenced state + silencedRef (set synchronously),

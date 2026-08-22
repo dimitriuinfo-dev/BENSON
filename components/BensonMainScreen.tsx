@@ -46,16 +46,17 @@ function useContinuousRotation(durationMs: number, clockwise: boolean) {
   return value.interpolate({ inputRange: [0, 1], outputRange: clockwise ? ['0deg', '360deg'] : ['0deg', '-360deg'] });
 }
 
-// Global "Silent / Fully Off" control — top-right, always visible. One tap fully silences BENSON
-// (stops listening, wake word, and all sound) and it STAYS off until tapped again. When off it turns
-// into a large, unmistakable red pill so the user always knows BENSON is muted and how to bring it
-// back — critical for meetings / public places.
-function SilenceButton({ silenced, onToggle }: { silenced: boolean; onToggle: () => void }) {
+// Global "Silent / Fully Off" + "Mute-only" controls — top-right, always visible. Silent fully
+// stops listening AND sound (turns into a big red banner while off). Mute keeps listening but makes
+// no sound. Critical for meetings / public places.
+function TopControls({ silenced, muted, onToggleSilence, onToggleMute }: {
+  silenced: boolean; muted: boolean; onToggleSilence: () => void; onToggleMute: () => void;
+}) {
   if (silenced) {
     return (
       <TouchableOpacity
         style={s.silencedBanner}
-        onPress={() => { tap(); onToggle(); }}
+        onPress={() => { tap(); onToggleSilence(); }}
         accessibilityLabel="Benson este oprit complet. Atinge pentru a porni." accessibilityRole="button">
         <Ionicons name="volume-mute" size={20} color="#fff" />
         <Text style={s.silencedBannerText}>BENSON E OPRIT · atinge ca să pornești</Text>
@@ -63,14 +64,25 @@ function SilenceButton({ silenced, onToggle }: { silenced: boolean; onToggle: ()
     );
   }
   return (
-    <TouchableOpacity
-      style={s.silencePill}
-      hitSlop={12}
-      onPress={() => { tap(); onToggle(); }}
-      accessibilityLabel="Oprește complet Benson, mod silențios" accessibilityRole="button">
-      <Ionicons name="volume-mute-outline" size={16} color={GOLD} />
-      <Text style={s.silencePillText}>SILENȚIOS</Text>
-    </TouchableOpacity>
+    <View style={s.topControls}>
+      <TouchableOpacity
+        style={[s.silencePill, muted && s.silencePillActive]}
+        hitSlop={10}
+        onPress={() => { tap(); onToggleMute(); }}
+        accessibilityLabel={muted ? 'Pornește sunetul' : 'Mod mut, ascultă fără sunet'} accessibilityRole="button"
+        accessibilityState={{ selected: muted }}>
+        <Ionicons name={muted ? 'volume-off' : 'volume-low-outline'} size={16} color={muted ? '#2E3742' : GOLD} />
+        <Text style={[s.silencePillText, muted && s.silencePillTextActive]}>{muted ? 'MUT PORNIT' : 'MUT'}</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={s.silencePill}
+        hitSlop={10}
+        onPress={() => { tap(); onToggleSilence(); }}
+        accessibilityLabel="Oprește complet Benson, mod silențios" accessibilityRole="button">
+        <Ionicons name="power" size={16} color={GOLD} />
+        <Text style={s.silencePillText}>OPREȘTE</Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -291,9 +303,9 @@ function Dashboard({ listening, micVolume }: { listening: boolean; micVolume: nu
 
 export function BensonMainScreen({
   listening, micVolume, loading, speaking, showQuickContacts,
-  lastReply, quickContacts, isInPip, silenced,
+  lastReply, quickContacts, isInPip, silenced, muted,
   onToggleConvMode, onOpenSettings, onToggleQuickContacts,
-  onQuickContactsChange, onSubmitText, onToggleSilence,
+  onQuickContactsChange, onSubmitText, onToggleSilence, onToggleMute,
 }: {
   listening: boolean;
   micVolume: number;
@@ -307,6 +319,7 @@ export function BensonMainScreen({
   quickContacts: QuickContact[];
   isInPip?: boolean;
   silenced: boolean;
+  muted: boolean;
   onToggleConvMode: () => void;
   onOpenSettings: () => void;
   onToggleQuickContacts: () => void;
@@ -316,12 +329,13 @@ export function BensonMainScreen({
   onQuickContactsChange: (contacts: QuickContact[]) => void;
   onSubmitText: (text: string) => void;
   onToggleSilence: () => void;
+  onToggleMute: () => void;
 }) {
   if (isInPip) return <PipLogoView />;
 
   return (
     <View style={s.root}>
-      <SilenceButton silenced={silenced} onToggle={onToggleSilence} />
+      <TopControls silenced={silenced} muted={muted} onToggleSilence={onToggleSilence} onToggleMute={onToggleMute} />
 
       <SettingsGear onOpenSettings={onOpenSettings} />
 
@@ -348,14 +362,16 @@ const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG },
   pipRoot: { alignItems: 'center', justifyContent: 'center' },
 
-  // Silent/off control — floats top-right, above everything.
+  // Silent/off + mute controls — float top-right, above everything.
+  topControls: { position: 'absolute', top: 48, right: 16, zIndex: 20, flexDirection: 'row', gap: 8 },
   silencePill: {
-    position: 'absolute', top: 48, right: 16, zIndex: 20,
     flexDirection: 'row', alignItems: 'center', gap: 5,
     borderWidth: 1, borderColor: LINE, borderRadius: 20,
     paddingVertical: 6, paddingHorizontal: 12, backgroundColor: BG_RAISED,
   },
+  silencePillActive: { backgroundColor: GOLD, borderColor: GOLD },
   silencePillText: { color: GOLD, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  silencePillTextActive: { color: '#2E3742' },
   silencedBanner: {
     position: 'absolute', top: 44, left: 16, right: 16, zIndex: 20,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
