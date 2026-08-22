@@ -90,7 +90,30 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
 
-## 2026-06 (fork) — RECENTS voice command + REMINDER INTERVAL setting
+## 2026-06 (fork) — SILENT / FULLY-OFF kill switch (critical usability)
+- PROBLEM (user): BENSON wouldn't fully stop on demand — kept making mic clicks/pops + TTS/chimes
+  even when the user needed total silence (meetings/public). Needed an easy, sticky "off".
+- FIX: global silent/off kill switch. index.tsx: silenced state + silencedRef (set synchronously),
+  AsyncStorage 'bensonSilenced'. enterSilentMode() stops ALL listening (stopWakeScan, stopRecognition,
+  pauseHotword, clears wake/conv/listening flags) and ALL sound (stopSpeaking, stopOpenAITTS,
+  setSpeaking false). exitSilentMode() persists off, restarts service + resumePassiveWake + one spoken
+  "Am revenit". Guards added (bail while silenced) to: speak, speakText, doStartListening,
+  startLocalWakeLoop, resumePassiveWake, handleWakeDetected, handleMedallionTap, wake-chime preview,
+  the boot service-start effect, and enterChatMode (no greet/listen on boot if left muted) — so NO
+  auto-resume path (endSub, AppState 'active', wake events, a11y reminder) can turn it back on. Never
+  self-reactivates; only an explicit user action clears it.
+- ENTRY POINTS (easy access): (1) on-screen control — components/BensonMainScreen.tsx SilenceButton:
+  top-right gold "SILENȚIOS" pill when active; big red full-width "BENSON E OPRIT · atinge ca să
+  pornești" banner when silenced (new props silenced/onToggleSilence). (2) notification STOP action
+  now calls enterSilentMode (was a partial stop). (3) voice command SILENCE_ON_PATTERN
+  ("taci"/"liniște"/"mod silențios"/"oprește-te complet"/"gura" + EN/DE) handled in
+  trySettingsVoiceCommand — ENTER only (exit needs the tap/notification since mic is off). Entering is
+  silent by design (no TTS ack); exiting speaks the confirmation.
+- Also this batch: RECENTS voice command (native openRecents, needs rebuild) + REMINDER INTERVAL 5/15/30.
+- tsc 0 errors; eslint at pre-existing baseline (no new issues). NATIVE-ONLY app → user verifies on
+  the Android build; testing_agent cannot exercise it (native module imports throw on web/Expo Go).
+
+
 - RECENTS ("arată aplicațiile recente"): NEEDS NATIVE REBUILD (Kotlin). Added openRecents() mirroring
   goHome — BensonAccessibilityService.kt fun openRecents()=performGlobalAction(GLOBAL_ACTION_RECENTS)
   (no canPerformGestures needed, stays false); BensonAccessibilityModule.kt AsyncFunction("openRecents");

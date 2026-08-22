@@ -46,6 +46,34 @@ function useContinuousRotation(durationMs: number, clockwise: boolean) {
   return value.interpolate({ inputRange: [0, 1], outputRange: clockwise ? ['0deg', '360deg'] : ['0deg', '-360deg'] });
 }
 
+// Global "Silent / Fully Off" control — top-right, always visible. One tap fully silences BENSON
+// (stops listening, wake word, and all sound) and it STAYS off until tapped again. When off it turns
+// into a large, unmistakable red pill so the user always knows BENSON is muted and how to bring it
+// back — critical for meetings / public places.
+function SilenceButton({ silenced, onToggle }: { silenced: boolean; onToggle: () => void }) {
+  if (silenced) {
+    return (
+      <TouchableOpacity
+        style={s.silencedBanner}
+        onPress={() => { tap(); onToggle(); }}
+        accessibilityLabel="Benson este oprit complet. Atinge pentru a porni." accessibilityRole="button">
+        <Ionicons name="volume-mute" size={20} color="#fff" />
+        <Text style={s.silencedBannerText}>BENSON E OPRIT · atinge ca să pornești</Text>
+      </TouchableOpacity>
+    );
+  }
+  return (
+    <TouchableOpacity
+      style={s.silencePill}
+      hitSlop={12}
+      onPress={() => { tap(); onToggle(); }}
+      accessibilityLabel="Oprește complet Benson, mod silențios" accessibilityRole="button">
+      <Ionicons name="volume-mute-outline" size={16} color={GOLD} />
+      <Text style={s.silencePillText}>SILENȚIOS</Text>
+    </TouchableOpacity>
+  );
+}
+
 // Small settings gear above the medallion — replaces the old bottom SYSTEM box. Spins slowly,
 // continuously, independent of the medallion's own rotation.
 function SettingsGear({ onOpenSettings }: { onOpenSettings: () => void }) {
@@ -263,9 +291,9 @@ function Dashboard({ listening, micVolume }: { listening: boolean; micVolume: nu
 
 export function BensonMainScreen({
   listening, micVolume, loading, speaking, showQuickContacts,
-  lastReply, quickContacts, isInPip,
+  lastReply, quickContacts, isInPip, silenced,
   onToggleConvMode, onOpenSettings, onToggleQuickContacts,
-  onQuickContactsChange, onSubmitText,
+  onQuickContactsChange, onSubmitText, onToggleSilence,
 }: {
   listening: boolean;
   micVolume: number;
@@ -278,6 +306,7 @@ export function BensonMainScreen({
   lastReply: string;
   quickContacts: QuickContact[];
   isInPip?: boolean;
+  silenced: boolean;
   onToggleConvMode: () => void;
   onOpenSettings: () => void;
   onToggleQuickContacts: () => void;
@@ -286,11 +315,14 @@ export function BensonMainScreen({
   onClearCompletedTodo: () => void;
   onQuickContactsChange: (contacts: QuickContact[]) => void;
   onSubmitText: (text: string) => void;
+  onToggleSilence: () => void;
 }) {
   if (isInPip) return <PipLogoView />;
 
   return (
     <View style={s.root}>
+      <SilenceButton silenced={silenced} onToggle={onToggleSilence} />
+
       <SettingsGear onOpenSettings={onOpenSettings} />
 
       <Medallion onToggleConvMode={onToggleConvMode} />
@@ -315,6 +347,21 @@ export function BensonMainScreen({
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG },
   pipRoot: { alignItems: 'center', justifyContent: 'center' },
+
+  // Silent/off control — floats top-right, above everything.
+  silencePill: {
+    position: 'absolute', top: 48, right: 16, zIndex: 20,
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    borderWidth: 1, borderColor: LINE, borderRadius: 20,
+    paddingVertical: 6, paddingHorizontal: 12, backgroundColor: BG_RAISED,
+  },
+  silencePillText: { color: GOLD, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  silencedBanner: {
+    position: 'absolute', top: 44, left: 16, right: 16, zIndex: 20,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: '#B23A3A', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 16,
+  },
+  silencedBannerText: { color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
 
   // Gear sits above the medallion, centered — replaces the old bottom SYSTEM box.
   gearRow: { alignItems: 'center', paddingTop: 48, paddingHorizontal: 20 },

@@ -198,6 +198,10 @@ const VOICE_SLOWER_PATTERN = /\bvorbe[șs]te\s+mai\s+(?:încet|incet)\b|\bspeak\
 // meaning to avoid false hits: "aplicații recente/deschise", bare "recente", "multitasking",
 // "comutator (de) aplicații", plus EN/DE fallbacks.
 const SHOW_RECENTS_PATTERN = /\baplica[țt]ii(?:le)?\s+recente\b|\baplica[țt]ii(?:le)?\s+deschise\b|\b(?:arat[ăa]|deschide|comut[ăa](?:\s+la)?|mergi\s+la|vreau)\s+recente\b|\bmultitasking\b|\bcomutator(?:ul)?\s+(?:de\s+)?aplica[țt]ii\b|\brecent\s+apps\b|\bapp\s+switcher\b|\bletzte\s+apps\b/i;
+// Voice command → enter Silent / Fully-Off mode. Deliberately only ENTER (exit needs the on-screen
+// tap / notification, since the mic is off once silenced). "taci", "liniște", "mod silențios",
+// "oprește-te complet", "gura", "fă liniște" + EN/DE fallbacks.
+const SILENCE_ON_PATTERN = /\btaci\b|\blini[șs]te\b|\bf[ăa]\s+lini[șs]te\b|\bmod\s+silen[țt]ios\b|\bfii\s+silen[țt]ios\b|\bopre[șs]te-te\s+complet\b|\bgura\b|\bbe\s+quiet\b|\bshut\s+up\b|\bstop\s+listening\b|\bsei\s+still\b/i;
 const DELETE_MEMORY_PATTERN = /\b[șs]terge\s+memoria\b|\bdelete\s+(?:my\s+)?memory\b|\bwipe\s+memory\b|\bl[öo]sche\s+(?:den\s+)?speicher\b/i;
 const ADD_FAMILY_PATTERN =
   /\badaug[ăa]\s+(?:un\s+membru\s+(?:al\s+familiei\s+)?)?(?:numit\s+)?(.+)$/i.source +
@@ -247,6 +251,13 @@ export default function BensonApp() {
   // silently auto-disabled service is impossible to miss (spoken alert + notification alone can be
   // dismissed/unheard).
   const [accessibilityDown, setAccessibilityDown] = useState(false);
+  // "Silent / Fully Off" kill switch — when true, BENSON does not listen (no wake word, no active
+  // capture) and makes NO sound (TTS, chimes, confirmations all suppressed). Persisted, and it
+  // never self-reactivates: only an explicit user action (the on-screen toggle, the notification
+  // STOP action, or the "taci" voice command to enter) changes it. Critical for meetings/public.
+  const [silenced, setSilenced] = useState(false);
+  const silencedRef = useRef(false);
+  silencedRef.current = silenced;
   // Gentle-reminder bookkeeping — while the service stays off, re-speak a short cue periodically
   // (not every poll, that would nag), only when BENSON is idle in the foreground.
   const a11yLastReminderRef = useRef(0);
@@ -636,9 +647,9 @@ export default function BensonApp() {
     // including passive wake word (the native side already tears down the service, and its
     // hotword loop with it).
     const stopReqSub = addStopRequestedListener(() => {
-      serviceActiveRef.current = false;
-      try { hideWakeRing(); } catch {}
-      if (convModeRef.current) toggleConvMode();
+      // Notification STOP = the same hard "silent / fully off" the on-screen toggle does, so both
+      // routes behave identically and it stays off until explicitly turned back on.
+      enterSilentMode();
     });
 
     // notification "LISTEN" action — manual activation fallback.
@@ -809,6 +820,7 @@ export default function BensonApp() {
   useEffect(() => {
     if (phase !== 'chat') return;
     (async () => {
+      if (silencedRef.current) return; // fully off — don't start the listening service
       const granted = await checkMicPermission();
       if (!granted) return;
       if (!serviceActiveRef.current) await startBackgroundService();
@@ -863,6 +875,10 @@ export default function BensonApp() {
     Location.requestForegroundPermissionsAsync().catch(() => {});
     // Warm the wake-confirmation chime so the first "Benson" gets an instant sound, no decode lag.
     preloadWakeChime();
+    // Restore the silent/off kill switch FIRST and awaited — enterChatMode() below must see it so
+    // it skips the greeting/listening when the user left BENSON muted.
+    const silencedStored = (await AsyncStorage.getItem('bensonSilenced')) === 'true';
+    if (silencedStored) { setSilenced(true); silencedRef.current = true; }
     // Restore the user's wake-chime volume (0 = off). Read separately from the big Promise.all below
     // to avoid touching that long destructuring; applied to the audio module immediately.
     AsyncStorage.getItem('bensonWakeChimeVolume').then((wv) => {
@@ -1163,6 +1179,7 @@ export default function BensonApp() {
   // TTS with onFinished callback — drives conv loop. Uses OpenAI TTS when selected,
   // falling back to the on-device voice automatically if it fails (no key/network).
   function speakText(text: string, onFinished?: () => void, instructions?: string) {
+    if (silencedRef.current) { onFinished?.(); return; }
     if (!voiceEnabledRef.current) { onFinished?.(); return; }
     rememberSpoken(text);
     bumpSessionKeepAwake();
@@ -1182,6 +1199,7 @@ export default function BensonApp() {
   // Fire-and-forget TTS (used outside conv loop)
   function speak(text: string, l = replyLangRef.current, enabled = voiceEnabledRef.current,
     rate = voiceRateRef.current, pitch = voicePitchRef.current) {
+    if (silencedRef.current) return;
     if (!enabled) return;
     rememberSpoken(text);
     bumpSessionKeepAwake();
@@ -1251,6 +1269,8 @@ export default function BensonApp() {
   // Conversation mode is on by default — no button needed. Called whenever the
   // app enters the main 'chat' screen, so it's always listening after the greeting.
   function enterChatMode(name: string, l: string, enabled: boolean, rate: number, pitch: number) {
+    // If the user left BENSON in silent/off mode, respect it on boot: no greeting, no listening.
+    if (silencedRef.current) { convModeRef.current = false; setConvMode(false); return; }
     convModeRef.current = true;
     setConvMode(true);
     if (backgroundModeRef.current) startBackgroundService();
@@ -1333,7 +1353,7 @@ export default function BensonApp() {
     setWakeVolume(v);
     setWakeChimeVolume(v);
     await AsyncStorage.setItem('bensonWakeChimeVolume', v.toString());
-    if (v > 0) playWakeChime();
+    if (v > 0 && !silencedRef.current) playWakeChime();
   }
 
   // How often the gentle spoken accessibility reminder repeats (5/15/30 min). Applied live via ref.
@@ -1659,6 +1679,7 @@ export default function BensonApp() {
   // Single reusable wake handler — invoked by BOTH the native hotword listener AND the local
   // Whisper scan loop, so there is exactly ONE wake-handling path (no duplication).
   async function handleWakeDetected(commandTail: string) {
+    if (silencedRef.current) return; // fully off — ignore wake events entirely
     // Immediate non-verbal "I heard you" — plays the instant "Benson" is recognized, before the
     // mic is handed off, so the user knows they were heard even if the spoken prompt is a beat away.
     playWakeChime();
@@ -1683,6 +1704,7 @@ export default function BensonApp() {
   // command flow, otherwise scan again. Self-restarting. Guarded so it never overlaps a command
   // capture, TTS, or an in-flight session.
   function startLocalWakeLoop() {
+    if (silencedRef.current) return;
     if (wakeEngineRef.current !== 'local') return;
     if (!serviceActiveRef.current) return;
     if (wakeScanningRef.current) return;
@@ -1707,6 +1729,7 @@ export default function BensonApp() {
   // Hand the mic back to passive listening after a command/return. Chooses the engine: local
   // Whisper loop (free, works on this device) or the native hotword loop (fallback).
   function resumePassiveWake() {
+    if (silencedRef.current) return;
     if (wakeEngineRef.current === 'local') {
       try { pauseHotword(); } catch {} // make sure the native SpeechRecognizer loop is off
       startLocalWakeLoop();
@@ -1716,6 +1739,7 @@ export default function BensonApp() {
   }
 
   async function doStartListening() {
+    if (silencedRef.current) return;
     if (listeningRef.current || loadingRef.current || speakingRef.current) return;
     try { stopWakeScan(); } catch {}
     wakeScanningRef.current = false;
@@ -1788,6 +1812,45 @@ export default function BensonApp() {
     setListening(false); listeningRef.current = false;
   }
 
+  // ── Silent / Fully-Off kill switch ────────────────────────────────────────
+  // Hard stop: no listening (wake word or active), no sound (TTS/chimes/confirmations). Persisted,
+  // and it never self-reactivates — the guards in speak/speakText/doStartListening/startLocalWakeLoop/
+  // resumePassiveWake/handleWakeDetected all bail out while silencedRef is true, so none of the
+  // auto-resume paths (endSub, AppState 'active', wake events) can turn anything back on.
+  async function enterSilentMode() {
+    setSilenced(true); silencedRef.current = true;
+    await AsyncStorage.setItem('bensonSilenced', 'true');
+    convModeRef.current = false; setConvMode(false);
+    // stop everything that listens
+    try { stopWakeScan(); } catch {}
+    wakeScanningRef.current = false;
+    wakeTriggeredRef.current = false;
+    try { stopRecognition(); } catch {}
+    try { await pauseHotword(); } catch {}
+    setListening(false); listeningRef.current = false;
+    // stop everything that makes sound
+    try { stopSpeaking(); } catch {}
+    try { stopOpenAITTS(); } catch {}
+    speakingRef.current = false; setSpeaking(false);
+    try { setSystemSoundsMuted(false); } catch {}
+    try { hideWakeRing(); } catch {}
+    logAudioDiag('SILENT_MODE', 'state=on');
+  }
+
+  async function exitSilentMode() {
+    setSilenced(false); silencedRef.current = false;
+    await AsyncStorage.setItem('bensonSilenced', 'false');
+    logAudioDiag('SILENT_MODE', 'state=off');
+    if (!serviceActiveRef.current) await startBackgroundService();
+    try { resumePassiveWake(); } catch {} // back to hands-free wake-word listening
+    speak(`Am revenit, ${getAddress()}.`); // sound is allowed again — confirm the return
+  }
+
+  function toggleSilence() {
+    if (silencedRef.current) exitSilentMode();
+    else enterSilentMode();
+  }
+
   // ── Background Mode: foreground service control ──────────────────────────
   async function startBackgroundService() {
     try {
@@ -1851,6 +1914,7 @@ export default function BensonApp() {
   // toggle. If already in conv mode, start a listening session directly instead of flipping it
   // off; only fall back to toggleConvMode() when conv mode is genuinely off.
   async function handleMedallionTap() {
+    if (silencedRef.current) return; // fully off — the red banner is the way back on
     if (convModeRef.current) {
       if (!listeningRef.current && !loadingRef.current && !speakingRef.current) {
         doStartListening();
@@ -1873,6 +1937,13 @@ export default function BensonApp() {
       const delta = VOICE_FASTER_PATTERN.test(text) ? 0.15 : -0.15;
       const next = Math.max(0.5, Math.min(2.0, voiceRateRef.current + delta));
       await updateRate(next); // updateRate already speaks its own confirmation
+      return true;
+    }
+
+    // "taci" / "mod silențios" — full silent/off. No spoken confirmation (silence is the point);
+    // enterSilentMode stops all listening + sound and it stays off until an explicit tap to return.
+    if (SILENCE_ON_PATTERN.test(text)) {
+      await enterSilentMode();
       return true;
     }
 
@@ -2340,6 +2411,7 @@ export default function BensonApp() {
         lastReply={lastReply}
         quickContacts={quickContacts}
         isInPip={isInPip}
+        silenced={silenced}
         onToggleConvMode={() => { tap(); handleMedallionTap(); }}
         onOpenSettings={() => { tap(); openSettings(); }}
         onToggleQuickContacts={() => { tap(); setShowQuickContacts(v => !v); }}
@@ -2348,6 +2420,7 @@ export default function BensonApp() {
         onClearCompletedTodo={handleClearCompletedTodo}
         onQuickContactsChange={setQuickContacts}
         onSubmitText={handleIncomingText}
+        onToggleSilence={toggleSilence}
       />
 
       {/* ── Accessibility-down banner ── persistent, tappable, over the main screen. Shown only on
