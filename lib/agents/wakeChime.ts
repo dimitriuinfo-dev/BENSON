@@ -25,6 +25,14 @@ export function preloadWakeChime(): void {
   loading = load().catch(() => { /* fall back to lazy load on first play */ }).finally(() => { loading = null; });
 }
 
+// Unload the chime entirely — used when BENSON goes fully silent/off so it can't hold any audio
+// focus. Re-preload on the way back. Never throws.
+export async function unloadWakeChime(): Promise<void> {
+  const s = sound;
+  sound = null;
+  if (s) { try { await s.unloadAsync(); } catch {} }
+}
+
 // Settings control — set the chime volume (0 disables it). Persisted by the caller; applied live to
 // the already-loaded sound so a preview plays at the new level immediately.
 export function setWakeChimeVolume(volume: number): void {

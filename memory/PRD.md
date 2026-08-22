@@ -90,7 +90,30 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
 
-## 2026-06 (fork) — Notification full toggle (d) + "Doar Mut" mode
+## 2026-06 (fork) — CRITICAL FIX: system-wide audio focus permanently killed other apps' sound
+- SYMPTOM (user): after BENSON listened/spoke, OTHER apps' audio (video/radio) cut after a fraction
+  of a second and never recovered — only a full phone restart fixed it. STOP in-app didn't help.
+- ROOT CAUSE: lib/agents/openaiTTS.ts set the GLOBAL expo-av audio mode to
+  InterruptionModeAndroid.DoNotMix (→ AUDIOFOCUS_GAIN, permanent EXCLUSIVE focus) with
+  staysActiveInBackground:true. Once set, every expo-av playback (TTS + the wake chime, which fires
+  on every wake) grabbed exclusive focus and held it for the whole process — starving all other apps'
+  audio until the process was killed. Native capture (benson-audio-capture, VOICE_RECOGNITION
+  AudioRecord) does NOT touch audio focus — confirmed not the cause.
+- FIX: new lib/agents/audioMode.ts — NORMAL_MODE = InterruptionModeAndroid.DuckOthers +
+  shouldDuckAndroid:true (transient GAIN_TRANSIENT_MAY_DUCK: only briefly lowers other audio while
+  BENSON speaks, then releases so the other app resumes on its own). RELEASED_MODE = same but
+  staysActiveInBackground:false to force expo-av to abandon focus. openaiTTS.ts now uses
+  setNormalAudioMode() (was DoNotMix). index.tsx: setNormalAudioMode() at init (so device-TTS/chime
+  users get the safe mode from the start); enterSilentMode() + notification STOP now unloadWakeChime()
+  + releaseAudioFocusMode() → guaranteed focus release WITHOUT a restart (fixes "STOP didn't help");
+  exitSilentMode() restores setNormalAudioMode()+preloadWakeChime; toggleMute() releases focus on
+  (lets you watch video while BENSON listens silently) and restores on off. wakeChime.ts gained
+  unloadWakeChime().
+- tsc 0 errors; eslint clean on new/edited lib files, index.tsx at pre-existing baseline. NATIVE +
+  OS-runtime behavior → user verifies on device (play music → trigger wake/command → music resumes,
+  no restart). testing_agent cannot exercise audio focus (native-only app won't load on web).
+
+
 - Reaffirmed: wake word "Benson" hands-free stays the PRIMARY feature — silent/mute are opt-in and
   off by default; when neither is active, wake word works exactly as before.
 - NOTIFICATION TOGGLE (option d, JS-only, no rebuild): the foreground-service notification already

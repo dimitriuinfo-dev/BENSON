@@ -40,7 +40,8 @@ import {
   type Voice, type SttEngine,
 } from '../lib/agents/voiceAgent';
 import { preloadLocalWhisper } from '../lib/agents/localWhisperEngine';
-import { preloadWakeChime, playWakeChime, setWakeChimeVolume } from '../lib/agents/wakeChime';
+import { preloadWakeChime, playWakeChime, setWakeChimeVolume, unloadWakeChime } from '../lib/agents/wakeChime';
+import { setNormalAudioMode, releaseAudioFocusMode } from '../lib/agents/audioMode';
 import { speakWithOpenAI, stopOpenAITTS } from '../lib/agents/openaiTTS';
 import { buildVoiceInstructions, currentTimeOfDay } from '../lib/agents/voiceInstructions';
 import { startCarAutoDetection, type CarAutoDetectHandle } from '../lib/carAutoDetect';
@@ -888,6 +889,9 @@ export default function BensonApp() {
     Location.requestForegroundPermissionsAsync().catch(() => {});
     // Warm the wake-confirmation chime so the first "Benson" gets an instant sound, no decode lag.
     preloadWakeChime();
+    // Set a SAFE, non-exclusive audio mode up front (DuckOthers) so BENSON never grabs permanent
+    // exclusive audio focus and starves other apps' sound. Critical bug fix — see audioMode.ts.
+    setNormalAudioMode();
     // Restore the silent/off kill switch FIRST and awaited — enterChatMode() below must see it so
     // it skips the greeting/listening when the user left BENSON muted.
     const silencedStored = (await AsyncStorage.getItem('bensonSilenced')) === 'true';
@@ -1850,6 +1854,10 @@ export default function BensonApp() {
     speakingRef.current = false; setSpeaking(false);
     try { setSystemSoundsMuted(false); } catch {}
     try { hideWakeRing(); } catch {}
+    // Hard-release system audio focus so other apps' sound (video/radio) recovers immediately,
+    // WITHOUT a phone restart — unload the chime + drop expo-av's background audio session.
+    try { await unloadWakeChime(); } catch {}
+    try { await releaseAudioFocusMode(); } catch {}
     logAudioDiag('SILENT_MODE', 'state=on');
   }
 
@@ -1857,6 +1865,8 @@ export default function BensonApp() {
     setSilenced(false); silencedRef.current = false;
     await AsyncStorage.setItem('bensonSilenced', 'false');
     logAudioDiag('SILENT_MODE', 'state=off');
+    try { await setNormalAudioMode(); } catch {} // restore normal (ducking) playback mode
+    preloadWakeChime();
     if (!serviceActiveRef.current) await startBackgroundService();
     try { resumePassiveWake(); } catch {} // back to hands-free wake-word listening
     speak(`Am revenit, ${getAddress()}.`); // sound is allowed again — confirm the return
@@ -1877,8 +1887,10 @@ export default function BensonApp() {
       try { stopSpeaking(); } catch {}
       try { stopOpenAITTS(); } catch {}
       speakingRef.current = false; setSpeaking(false);
+      try { await releaseAudioFocusMode(); } catch {} // no sound while muted → let other apps play freely
       logAudioDiag('MUTE_MODE', 'state=on');
     } else {
+      try { await setNormalAudioMode(); } catch {}
       logAudioDiag('MUTE_MODE', 'state=off');
       speak(`Sonorul e pornit din nou, ${getAddress()}.`);
     }
