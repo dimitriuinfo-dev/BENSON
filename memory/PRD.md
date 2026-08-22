@@ -90,7 +90,20 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
 - Do NOT re-add 49 speculative files. Minimal, isolated changes only.
 - Cannot promise Accessibility Service self-reactivation (Android forbids it) — never claim it.
 
-## 2026-06 (fork) — CRITICAL FIX: system-wide audio focus permanently killed other apps' sound
+## 2026-06 (fork) — DEPLOY BLOCKER FIX: missing backend/ (backend/.env + minimal server)
+- Deploy stopped at the first gate: no backend/.env. Root cause: repo is frontend-only (native Expo)
+  but the platform image is expo_mongo_base_image, which requires a backend service — the whole
+  backend/ dir was absent (supervisor `backend` = FATAL: uvicorn server:app in /app/backend, no dir).
+- FIX: created /app/backend with:
+  * .env — MONGO_URL="mongodb://localhost:27017", DB_NAME="benson_database", CORS_ORIGINS="*"
+  * server.py — minimal FastAPI, /api/ + /api/health, CORS; no business logic (BENSON is 100%
+    on-device, this only satisfies the deploy health-check contract).
+  * requirements.txt — pip freeze after installing fastapi + uvicorn[standard] + python-dotenv.
+- VERIFIED: `supervisorctl restart backend` → RUNNING; curl /api/health → {"status":"ok"}, /api/ →
+  {"message":"BENSON backend online"}. Deploy first-gate unblocked; user can re-Publish.
+- (expo dev-server still FATAL — unrelated fork infra path /app/frontend; does not affect deploy.)
+
+
 - SYMPTOM (user): after BENSON listened/spoke, OTHER apps' audio (video/radio) cut after a fraction
   of a second and never recovered — only a full phone restart fixed it. STOP in-app didn't help.
 - ROOT CAUSE: lib/agents/openaiTTS.ts set the GLOBAL expo-av audio mode to
