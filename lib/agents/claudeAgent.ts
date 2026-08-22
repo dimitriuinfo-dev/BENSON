@@ -2,7 +2,7 @@ import { fetch as expoFetch } from 'expo/fetch';
 import type { AnthropicMsg, Character, FamilyMember } from './types';
 import { buildLearnedContext } from './learningAgent';
 import { AGENT_TOOLS, executeTool, type ToolContext } from './tools';
-import { LLM_PROXY_URL, SUPABASE_ANON_KEY } from '../supabaseConfig';
+import { ANTHROPIC_URL, anthropicHeaders } from '../llmConfig';
 
 export const SONNET_MODEL = 'claude-sonnet-5';
 
@@ -100,10 +100,7 @@ export async function askClaude(params: {
     params.character, params.address, params.lang, params.facts,
     learnedContext, family, params.drivingContext ?? '',
   );
-  const headers = {
-    'Content-Type':  'application/json',
-    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-  };
+  const headers = anthropicHeaders(params.apiKey);
 
   // Sonnet 5 runs adaptive thinking by default when the field is omitted — disable it here since
   // max_tokens is a tight 600-token budget for a concise reply and this is a latency-sensitive
@@ -111,20 +108,20 @@ export async function askClaude(params: {
   const thinking = model === SONNET_MODEL ? { thinking: { type: 'disabled' } } : {};
 
   if (!params.onSentence) {
-    const res = await fetch(LLM_PROXY_URL, {
+    const res = await fetch(ANTHROPIC_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ provider: 'anthropic', model, max_tokens: 600, system, messages: params.messages, ...thinking }),
+      body: JSON.stringify({ model, max_tokens: 600, system, messages: params.messages, ...thinking }),
     });
     const data = await res.json();
     return data.content?.[0]?.text || `I did not quite catch that, ${params.address}.`;
   }
 
   // Streaming path — expo/fetch exposes a real ReadableStream body, unlike RN's default fetch.
-  const res = await expoFetch(LLM_PROXY_URL, {
+  const res = await expoFetch(ANTHROPIC_URL, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ provider: 'anthropic', model, max_tokens: 600, system, messages: params.messages, stream: true, ...thinking }),
+    body: JSON.stringify({ model, max_tokens: 600, system, messages: params.messages, stream: true, ...thinking }),
   });
   if (!res.ok || !res.body) {
     return askClaude({ ...params, onSentence: undefined });
@@ -201,19 +198,16 @@ export async function askClaudeWithTools(params: {
     params.character, params.address, params.lang, params.facts,
     learnedContext, family, params.drivingContext ?? '', true,
   );
-  const headers = {
-    'Content-Type':  'application/json',
-    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-  };
+  const headers = anthropicHeaders(params.apiKey);
   const thinking = model === SONNET_MODEL ? { thinking: { type: 'disabled' } } : {};
 
   let messages: { role: 'user' | 'assistant'; content: any }[] = [...params.messages];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    const res = await fetch(LLM_PROXY_URL, {
+    const res = await fetch(ANTHROPIC_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ provider: 'anthropic', model, max_tokens: 600, system, messages, tools: AGENT_TOOLS, ...thinking }),
+      body: JSON.stringify({ model, max_tokens: 600, system, messages, tools: AGENT_TOOLS, ...thinking }),
     });
     const data = await res.json();
     const content: any[] = data.content ?? [];

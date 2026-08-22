@@ -39,7 +39,7 @@ import {
   isOnDeviceLocaleInstalled, triggerOfflineModelDownload,
   type Voice, type SttEngine,
 } from '../lib/agents/voiceAgent';
-import { preloadLocalWhisper } from '../lib/agents/localWhisperEngine';
+import { preloadLocalWhisper, subscribeWhisperStatus, type WhisperStatus } from '../lib/agents/localWhisperEngine';
 import { preloadWakeChime, playWakeChime, setWakeChimeVolume, unloadWakeChime } from '../lib/agents/wakeChime';
 import { setNormalAudioMode, releaseAudioFocusMode } from '../lib/agents/audioMode';
 import { speakWithOpenAI, stopOpenAITTS } from '../lib/agents/openaiTTS';
@@ -256,6 +256,8 @@ export default function BensonApp() {
   // silently auto-disabled service is impossible to miss (spoken alert + notification alone can be
   // dismissed/unheard).
   const [accessibilityDown, setAccessibilityDown] = useState(false);
+  // First-launch voice-model download status (ggml-base is fetched once at runtime, not bundled).
+  const [whisperStatus, setWhisperStatus] = useState<WhisperStatus>({ state: 'idle' });
   // "Silent / Fully Off" kill switch — when true, BENSON does not listen (no wake word, no active
   // capture) and makes NO sound (TTS, chimes, confirmations all suppressed). Persisted, and it
   // never self-reactivates: only an explicit user action (the on-screen toggle, the notification
@@ -500,6 +502,10 @@ export default function BensonApp() {
     const sub = AppState.addEventListener('change', (next) => logAudioDiag('APP_STATE', `state=${next}`));
     return () => sub.remove();
   }, []);
+
+  // Reflect the local voice-model download/load status into a banner (first launch downloads the
+  // ~141MB Whisper model once; a fresh install shows progress instead of appearing frozen).
+  useEffect(() => subscribeWhisperStatus(setWhisperStatus), []);
 
   // ── Boot: init + STT listeners ────────────────────────────────────────────
   // Splash-screen gating + safety timeout (product-owner-directed 2026-08-01) — the audit that
@@ -1034,11 +1040,12 @@ export default function BensonApp() {
 
     if (name) {
       setMasterName(name); masterNameRef.current = name;
-      // Anthropic key is no longer required client-side — chat goes through the server-side
-      // llm-proxy (lib/supabaseConfig.ts) — but keep restoring it if an old install still has one
-      // stored, harmless dead plumbing rather than a forced migration tonight.
       if (key) { setApiKey(key); apiKeyRef.current = key; }
-      if (consent === null) {
+      // Anthropic key is required again (direct calls, no Supabase relay). If it's missing (e.g. an
+      // install from the proxy era that never stored one), collect it before entering chat.
+      if (!key) {
+        setPhase('key');
+      } else if (consent === null) {
         setPhase('consent');
       } else {
         setPhase('chat');
@@ -1302,8 +1309,9 @@ export default function BensonApp() {
     if (!inputName.trim()) return;
     await AsyncStorage.setItem('masterName', inputName.trim());
     setMasterName(inputName.trim()); masterNameRef.current = inputName.trim();
-    // No Anthropic key needed anymore (server-side llm-proxy) — go straight to consent/chat,
-    // same as saveKey() used to once the key screen was filled in.
+    // BENSON now calls Anthropic directly with the user's OWN key (Supabase relay removed), so the
+    // key is required again — collect it if we don't have one stored yet.
+    if (!apiKeyRef.current) { setPhase('key'); return; }
     if (analyticsConsent === null) {
       setPhase('consent');
     } else {
@@ -1345,10 +1353,9 @@ export default function BensonApp() {
     ]);
     let accessibility = false;
     try { accessibility = await isAccessibilityEnabled(); } catch {}
-    // Claude/OpenAI both go through the server-side Supabase proxy now — no client-side API key
-    // required, so "is a key set" (apiKeyRef, dead since that migration) no longer means anything.
-    // Always true: the proxy URL/anon key are fixed constants, not user-configured.
-    setServiceStatus({ mic, accessibility, gps, ai: true });
+    // BENSON calls Anthropic/OpenAI directly with the user's own key now (Supabase relay removed),
+    // so "AI ready" means an Anthropic key is actually stored.
+    setServiceStatus({ mic, accessibility, gps, ai: !!apiKeyRef.current });
   }
 
   function openSettings() {
@@ -2295,6 +2302,7 @@ export default function BensonApp() {
       const result = await routeCommand(msg, {
         address:   getAddress(),
         apiKey:    apiKeyRef.current,
+        openaiKey: openaiKeyRef.current,
         tavilyKey: tavilyKeyRef.current,
         modelProvider: modelProviderRef.current,
         character: characterRef.current,
@@ -2398,12 +2406,12 @@ export default function BensonApp() {
   if (phase === 'key') return (
     <View style={s.center}>
       <View style={s.seal}><Text style={s.sealB}>B</Text></View>
-      <Text style={s.question}>Welcome, {masterName}.</Text>
-      <Text style={s.bootSub}>Enter your Anthropic API key.</Text>
+      <Text style={s.question}>Bine ai venit, {masterName}.</Text>
+      <Text style={s.bootSub}>Introdu cheia ta Anthropic API. Rămâne doar pe telefonul tău.</Text>
       <TextInput style={s.input} placeholder="sk-ant-..." placeholderTextColor={MUTED}
         value={inputKey} onChangeText={setInputKey} secureTextEntry autoFocus />
-      <TouchableOpacity style={s.btn} onPress={saveKey} accessibilityLabel="Activate Benson" accessibilityRole="button">
-        <Text style={s.btnText}>ACTIVATE BENSON</Text>
+      <TouchableOpacity style={s.btn} onPress={saveKey} accessibilityLabel="Activează Benson" accessibilityRole="button">
+        <Text style={s.btnText}>ACTIVEAZĂ BENSON</Text>
       </TouchableOpacity>
     </View>
   );
@@ -2501,6 +2509,33 @@ export default function BensonApp() {
           </TouchableOpacity>
         </View>
       )}
+      {/* ── Voice-model download banner ── the ggml Whisper model is fetched once at first launch
+          (it is not bundled in the APK). Show clear progress so a fresh install never looks frozen,
+          and offer a retry if the download fails (e.g. no Wi-Fi). */}
+      {phase === 'chat' && !setupWizardOpen && !appPermOpen && whisperStatus.state === 'downloading' && (
+        <View style={s.dlBanner}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.dlBannerTitle}>Se descarcă modelul de voce…</Text>
+            <Text style={s.dlBannerBody}>
+              O singură dată, ca Benson să te audă offline. {Math.round(whisperStatus.progress * 100)}%
+            </Text>
+          </View>
+        </View>
+      )}
+      {phase === 'chat' && !setupWizardOpen && !appPermOpen && whisperStatus.state === 'error' && (
+        <View style={s.dlBanner}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.dlBannerTitle}>Descărcarea modelului de voce a eșuat</Text>
+            <Text style={s.dlBannerBody}>Conectează-te la internet și reîncearcă.</Text>
+          </View>
+          <TouchableOpacity
+            style={s.dlBannerBtn}
+            onPress={() => { tap(); preloadLocalWhisper(); }}
+            accessibilityLabel="Reîncearcă descărcarea modelului" accessibilityRole="button">
+            <Text style={s.dlBannerBtnText}>REÎNCEARCĂ</Text>
+          </TouchableOpacity>
+        </View>
+      )}
       {/* ── Settings Modal ── */}
       <Modal visible={settingsOpen} animationType="slide" transparent>
         <View style={s.modalBg}>
@@ -2575,12 +2610,14 @@ export default function BensonApp() {
                 <Text style={[s.dangerTxt, { color: GOLD }]}>Enable Floating Bubble</Text>
               </TouchableOpacity>
 
-              {/* API Keys — chat with both Claude and OpenAI now goes through a server-side proxy
-                  (Supabase Edge Function), so no Anthropic key lives here anymore. */}
+              {/* API Keys — BENSON calls Anthropic/OpenAI directly with the user's own key (kept
+                  on-device only). The Supabase relay was removed for deploy compatibility. */}
               <Text style={s.label}>API KEYS</Text>
-              <TextInput style={s.input} placeholder="Tavily key (tvly-...) — for web search" placeholderTextColor={MUTED}
+              <TextInput style={s.input} placeholder="Cheie Anthropic (sk-ant-...) — creierul lui Benson" placeholderTextColor={MUTED}
+                value={apiKey} onChangeText={setApiKey} secureTextEntry />
+              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="Tavily key (tvly-...) — for web search" placeholderTextColor={MUTED}
                 value={tavilyKey} onChangeText={setTavilyKey} secureTextEntry />
-              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="OpenAI key (sk-...) — for OpenAI voice (TTS) only" placeholderTextColor={MUTED}
+              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="OpenAI key (sk-...) — for OpenAI chat model + voice" placeholderTextColor={MUTED}
                 value={openaiKey} onChangeText={setOpenaiKey} secureTextEntry />
               <TouchableOpacity style={[s.btn, { marginTop: 10 }]} onPress={() => { tap(); saveApiKeys(); }}
                 accessibilityLabel="Save API keys" accessibilityRole="button">
@@ -3032,6 +3069,13 @@ const s = StyleSheet.create({
   a11yBannerBody:  { color: 'rgba(255,255,255,0.92)', fontSize: 12, lineHeight: 16 },
   a11yBannerBtn:   { backgroundColor: '#fff', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 6 },
   a11yBannerBtnText: { color: RED, fontWeight: '800', fontSize: 11, letterSpacing: 0.5 },
+
+  dlBanner:      { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center',
+                   backgroundColor: '#2E3742', paddingTop: 44, paddingBottom: 12, paddingHorizontal: 14, gap: 12 },
+  dlBannerTitle: { color: GOLD, fontWeight: '800', fontSize: 13, letterSpacing: 0.5, marginBottom: 2 },
+  dlBannerBody:  { color: 'rgba(255,255,255,0.92)', fontSize: 12, lineHeight: 16 },
+  dlBannerBtn:   { backgroundColor: GOLD, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 6 },
+  dlBannerBtnText: { color: '#2E3742', fontWeight: '800', fontSize: 11, letterSpacing: 0.5 },
 
   seal:          { width: 100, height: 100, borderRadius: 50, backgroundColor: PANEL, borderWidth: 2, borderColor: GOLD, alignItems: 'center', justifyContent: 'center', marginBottom: 24 },
   sealB:         { fontSize: 48, color: GOLD, fontWeight: '300' },

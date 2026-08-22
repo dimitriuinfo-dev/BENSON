@@ -256,5 +256,27 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
   provide: (1) Picovoice AccessKey (console.picovoice.ai), (2) custom Benson_android.ppn keyword
   file. Best arch = integrate Porcupine into existing BensonForegroundService (single AudioRecord,
   fan out PCM to Porcupine + recognizer). Not built yet — needs key+ppn + native rebuild.
-- VERIFIED: tsc 0 errors, eslint clean on all touched JS, Metro Android graph 1800 modules resolve
-  (Hermes binary step is a container-only limitation).
+## 2026-06 (fork) — WHISPER MODEL: bundled → RUNTIME DOWNLOAD (deploy-readiness fix)
+- CONTEXT: deployment_agent readiness check before user's "Publish" found the real blocker: local
+  Whisper STT (default engine + the wake-word VAD loop) loaded a BUNDLED asset
+  (android/app/src/main/assets/models/ggml-base.bin) via isBundleAsset:true, but the ~141MB model is
+  git-ignored (/whisper-models) and ABSENT from the Emergent build container. plugins/withBundledAssets.js
+  silently skips a missing source → a "Publish"-built APK would ship WITHOUT the model → on-device
+  listening (commands AND wake word) silently broken. User builds via Emergent Publish and no longer
+  has the model file → chose RUNTIME DOWNLOAD (2026-06).
+- FIX (lib/agents/localWhisperEngine.ts): model is now fetched ONCE at first launch to the app's
+  writable doc dir and opened from there (isBundleAsset:false). URL =
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin (exact 147,951,465 bytes,
+  verified — size check forces a clean re-download of a partial/corrupt file). Uses
+  expo-file-system/legacy createDownloadResumable (progress). New subscribeWhisperStatus() broadcasts
+  idle/downloading{progress}/ready/error; ensureModel() is idempotent + single in-flight; getContext()
+  = ensureModel → initWhisper(filePath,isBundleAsset:false). preloadLocalWhisper unchanged signature
+  (auto-runs at boot when engine='local', the default, so download starts on first launch).
+- UI (app/index.tsx): subscribeWhisperStatus → whisperStatus state → top banner (mirrors a11y banner):
+  "Se descarcă modelul de voce… N%" while downloading, and an error banner with a REÎNCEARCĂ button
+  (calls preloadLocalWhisper) on failure. So a fresh install never looks frozen.
+- IMPACT: withBundledAssets.js Whisper entry is now dead-but-harmless (still safely skips). Porcupine
+  is NOT active (no Picovoice key/.ppn) → wake word uses the local Whisper VAD loop, so this one
+  download covers BOTH wake word + command capture. Emergent-Publish APKs are now self-sufficient.
+- VERIFIED: tsc 0 errors; eslint localWhisperEngine.ts clean; index.tsx at its pre-existing 15-item
+  baseline (no new). Native-only → user verifies on the built APK (needs Wi-Fi on first launch).

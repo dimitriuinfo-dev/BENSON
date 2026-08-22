@@ -20,10 +20,10 @@ import { addFeedbackItem } from '../notepad/feedbackList';
 export type OrchestratorContext = {
   address: string;
   apiKey: string;
+  openaiKey: string;
   tavilyKey: string;
-  // Which chat model backs the tool-use fallback (default 'claude' when unset). Both providers
-  // go through the same Supabase llm-proxy (lib/supabaseConfig.ts) — see [[project_next_feature]]
-  // / the OpenAI dual-model plan.
+  // Which chat model backs the tool-use fallback (default 'claude' when unset). Each provider is
+  // called directly with the user's own key (lib/llmConfig.ts) — Supabase relay removed.
   modelProvider?: ModelProvider;
   character: Character;
   lang: string;
@@ -214,7 +214,7 @@ export async function routeCommand(
     toolContext,
   };
   const reply = ctx.modelProvider === 'openai'
-    ? await askOpenAIWithTools(commonParams)
+    ? await askOpenAIWithTools({ ...commonParams, apiKey: ctx.openaiKey })
     : await askClaudeWithTools({
         ...commonParams,
         apiKey: ctx.apiKey,

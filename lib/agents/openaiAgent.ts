@@ -3,7 +3,7 @@ import type { AnthropicMsg, Character, FamilyMember } from './types';
 import { buildLearnedContext } from './learningAgent';
 import { buildSystemPrompt } from './claudeAgent';
 import { AGENT_TOOLS, executeTool, type ToolContext } from './tools';
-import { LLM_PROXY_URL, SUPABASE_ANON_KEY } from '../supabaseConfig';
+import { OPENAI_URL, openaiHeaders } from '../llmConfig';
 
 // Mirrors lib/agents/claudeAgent.ts's two entry points (askClaude, askClaudeWithTools) with the
 // identical onSentence streaming contract, so lib/agents/orchestrator.ts can branch on the
@@ -17,11 +17,6 @@ const SENTENCE_SPLIT = /(?<=[.!?…])\s+/;
 // readScreen/act cycles. The loop still exits as soon as the model stops requesting tools.
 const MAX_TOOL_ITERATIONS = 10;
 
-const headers = {
-  'Content-Type': 'application/json',
-  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-};
-
 function toOpenAITools() {
   return AGENT_TOOLS.map(t => ({
     type: 'function' as const,
@@ -30,6 +25,7 @@ function toOpenAITools() {
 }
 
 export async function askOpenAI(params: {
+  apiKey: string;
   character: Character;
   address: string;
   lang: string;
@@ -43,6 +39,7 @@ export async function askOpenAI(params: {
   const family = params.family ?? [];
   const learnedContext = buildLearnedContext(params.messages, family.map(f => f.name));
   const model = params.model ?? GPT4O_MODEL;
+  const headers = openaiHeaders(params.apiKey);
   const system = buildSystemPrompt(
     params.character, params.address, params.lang, params.facts,
     learnedContext, family, params.drivingContext ?? '',
@@ -53,20 +50,20 @@ export async function askOpenAI(params: {
   ];
 
   if (!params.onSentence) {
-    const res = await fetch(LLM_PROXY_URL, {
+    const res = await fetch(OPENAI_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ provider: 'openai', model, max_tokens: 600, messages }),
+      body: JSON.stringify({ model, max_tokens: 600, messages }),
     });
     const data = await res.json();
     return data.choices?.[0]?.message?.content || `I did not quite catch that, ${params.address}.`;
   }
 
   // Streaming path — expo/fetch exposes a real ReadableStream body, same as claudeAgent.ts.
-  const res = await expoFetch(LLM_PROXY_URL, {
+  const res = await expoFetch(OPENAI_URL, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ provider: 'openai', model, max_tokens: 600, messages, stream: true }),
+    body: JSON.stringify({ model, max_tokens: 600, messages, stream: true }),
   });
   if (!res.ok || !res.body) {
     return askOpenAI({ ...params, onSentence: undefined });
@@ -112,6 +109,7 @@ export async function askOpenAI(params: {
 }
 
 export async function askOpenAIWithTools(params: {
+  apiKey: string;
   character: Character;
   address: string;
   lang: string;
@@ -126,6 +124,7 @@ export async function askOpenAIWithTools(params: {
   const family = params.family ?? [];
   const learnedContext = buildLearnedContext(params.messages, family.map(f => f.name));
   const model = params.model ?? GPT4O_MODEL;
+  const headers = openaiHeaders(params.apiKey);
   const system = buildSystemPrompt(
     params.character, params.address, params.lang, params.facts,
     learnedContext, family, params.drivingContext ?? '', true,
@@ -141,10 +140,10 @@ export async function askOpenAIWithTools(params: {
   ];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    const res = await fetch(LLM_PROXY_URL, {
+    const res = await fetch(OPENAI_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ provider: 'openai', model, max_tokens: 600, messages, tools, tool_choice: 'auto' }),
+      body: JSON.stringify({ model, max_tokens: 600, messages, tools, tool_choice: 'auto' }),
     });
     const data = await res.json();
     const message = data.choices?.[0]?.message;
