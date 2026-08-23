@@ -304,3 +304,26 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
   expo_backend_reachable=true, dockerignore_blocks=false, dependency_manifests_valid=true. Only
   remaining deployment_agent findings are iOS-only (Android-only app by design → not blockers for the
   user's Android APK). READY to re-Publish for Android.
+
+## 2026-06 (fork) — "ÎNCHIDE COMPLET" full-stop button + hearing root-cause clarified
+- USER (frustrated, uninstalled the app): (1) Benson doesn't stop — couldn't FIND the stop control;
+  wants a clear "ÎNCHIDE COMPLET" button that stops everything. (2) Benson can't close other apps.
+  (3) Primary demand restated: "Benson doesn't HEAR — did you fix it?"
+- HEARING root cause (honest): on Emergent-Publish APKs Benson heard NOTHING because the offline
+  Whisper model was a BUNDLED asset that is git-ignored / absent from the build → no model → no
+  transcription → "no sound heard, no listening animation". Fixed earlier this session by the RUNTIME
+  DOWNLOAD change. User's failing test was on an OLD APK without this fix → needs ONE new build to
+  confirm. (No further code change needed for hearing; it's a rebuild-and-verify.)
+- FULL STOP button (built, JS-only): enterSilentMode() now ALSO calls stopListeningService()
+  (tears down the native foreground service → kills the persistent notification, wake-lock and any
+  residual mic clicks/pops), sets serviceActiveRef=false, and hideBubble(). exitSilentMode() already
+  restarts the service, so it's fully reversible in one tap. Added import stopListeningService.
+  BensonMainScreen TopControls: the subtle gold "OPREȘTE" pill → a prominent RED "ÎNCHIDE COMPLET"
+  button (new stopPill/stopPillText styles) so it's impossible to miss; the big red
+  "BENSON E OPRIT · atinge ca să pornești" banner still replaces it while stopped.
+- CLOSE OTHER APPS: NOT built this round (user was angry at the "theory"; the honest Android
+  limitation stands — the only reliable no-gesture method is navigating to Settings→App info→Force
+  stop, which needs a native rebuild + on-device label tuning for OxygenOS RO/EN). Left the existing
+  honest "nu pot închide complet" message. Revisit if user asks.
+- VERIFIED: tsc 0 errors; BensonMainScreen lint has only its pre-existing durationMs warning.
+  Native-only → user verifies on a NEW Android build.

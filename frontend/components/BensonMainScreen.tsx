@@ -75,12 +75,12 @@ function TopControls({ silenced, muted, onToggleSilence, onToggleMute }: {
         <Text style={[s.silencePillText, muted && s.silencePillTextActive]}>{muted ? 'MUT PORNIT' : 'MUT'}</Text>
       </TouchableOpacity>
       <TouchableOpacity
-        style={s.silencePill}
+        style={s.stopPill}
         hitSlop={10}
         onPress={() => { tap(); onToggleSilence(); }}
-        accessibilityLabel="Oprește complet Benson, mod silențios" accessibilityRole="button">
-        <Ionicons name="power" size={16} color={GOLD} />
-        <Text style={s.silencePillText}>OPREȘTE</Text>
+        accessibilityLabel="Închide complet Benson — oprește ascultarea și sunetul" accessibilityRole="button">
+        <Ionicons name="power" size={16} color="#fff" />
+        <Text style={s.stopPillText}>ÎNCHIDE COMPLET</Text>
       </TouchableOpacity>
     </View>
   );
@@ -372,6 +372,13 @@ const s = StyleSheet.create({
   silencePillActive: { backgroundColor: GOLD, borderColor: GOLD },
   silencePillText: { color: GOLD, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
   silencePillTextActive: { color: '#2E3742' },
+  // Prominent, unmistakable full-stop button (red) — "ÎNCHIDE COMPLET" stops the service,
+  // listening and sound in one tap. Kept visually distinct from the subtle MUT pill.
+  stopPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    borderRadius: 20, paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#B23A3A',
+  },
+  stopPillText: { color: '#fff', fontSize: 11, fontWeight: '800', letterSpacing: 0.8 },
   silencedBanner: {
     position: 'absolute', top: 44, left: 16, right: 16, zIndex: 20,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,

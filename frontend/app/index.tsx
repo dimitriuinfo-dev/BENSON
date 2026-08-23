@@ -14,7 +14,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as SplashScreen from 'expo-splash-screen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
-  startListeningService, addStopRequestedListener,
+  startListeningService, stopListeningService, addStopRequestedListener,
   addListenRequestedListener, addWakeWordDetectedListener, bringToForeground,
   isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations,
   pauseHotword, resumeHotword, setSystemSoundsMuted, consumeRecoveryFlag, logAudioDiag,
@@ -1865,6 +1865,12 @@ export default function BensonApp() {
     // WITHOUT a phone restart — unload the chime + drop expo-av's background audio session.
     try { await unloadWakeChime(); } catch {}
     try { await releaseAudioFocusMode(); } catch {}
+    // TRUE full stop: tear down the native foreground service (kills the persistent notification,
+    // the wake-lock and any residual mic activity → no more clicks/pops) and hide the floating
+    // bubble. exitSilentMode() restarts the service, so this is fully reversible with one tap.
+    try { stopListeningService(); } catch {}
+    serviceActiveRef.current = false;
+    try { hideBubble(); } catch {}
     logAudioDiag('SILENT_MODE', 'state=on');
   }
 
