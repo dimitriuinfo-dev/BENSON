@@ -280,3 +280,27 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
   download covers BOTH wake word + command capture. Emergent-Publish APKs are now self-sufficient.
 - VERIFIED: tsc 0 errors; eslint localWhisperEngine.ts clean; index.tsx at its pre-existing 15-item
   baseline (no new). Native-only → user verifies on the built APK (needs Wi-Fi on first launch).
+
+## 2026-06 (fork) — DEPLOY BLOCKER #2 FIXED: repo layout drift (app at root → /app/frontend)
+- SYMPTOM: user's Publish failed at the FIRST build step:
+  "[BUILD] prepare build context: read envs: read env file frontend\.env: open ... (no such file)".
+  Also expo preview supervisor was FATAL ("couldn't chdir to /app/frontend: ENOENT").
+- ROOT CAUSE: the BENSON repo was imported with the Expo app at the /app ROOT, but the entire
+  platform (/, entrypoint.sh, supervisor `directory=/app/frontend`, and the deploy build context)
+  is hardcoded to expect the Expo app at /app/frontend (reads /app/frontend/.env, app.json,
+  node_modules, scripts/sync-shims.sh). Structural mismatch → deploy + preview both broken.
+- FIX (with explicit user approval): relocated the whole Expo app from /app into /app/frontend
+  (app/, assets/, components/, constants/, hooks/, lib/, modules/, plugins/, scripts/, src/, tools/,
+  app.json, package.json, tsconfig.json, eslint.config.js, node_modules/, .gitignore, docs). Kept
+  /app/backend, /app/memory, /app/.git, /app/.emergent at root. Relative imports unaffected (whole
+  tree moved together). Created /app/frontend/.env with placeholder EXPO_PACKAGER_HOSTNAME /
+  EXPO_PACKAGER_PROXY_URL / EXPO_PUBLIC_BACKEND_URL / EXPO_TUNNEL_SUBDOMAIN lines (entrypoint sed +
+  deploy manage_secrets populate them). Fixed /app/frontend/.gitignore (removed broad
+  .env/.env.*/*.env ignores → keep only .env*.local) so the deploy build context can read .env.
+- ALSO: generated /app/frontend/yarn.lock (via `yarn install`) and removed the mismatched npm
+  package-lock.json — the pipeline installs with `yarn --frozen-lockfile`, which needs a yarn.lock.
+- VERIFIED: tsc 0 errors from /app/frontend; no hardcoded /app/ paths in source; backend health ok;
+  expo + backend + mongodb all RUNNING; deployment_agent: frontend/.env blocker GONE,
+  expo_backend_reachable=true, dockerignore_blocks=false, dependency_manifests_valid=true. Only
+  remaining deployment_agent findings are iOS-only (Android-only app by design → not blockers for the
+  user's Android APK). READY to re-Publish for Android.

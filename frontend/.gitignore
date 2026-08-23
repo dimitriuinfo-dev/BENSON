@@ -55,8 +55,8 @@ modules/*/android/.cxx/
 /porcupine-model
 /whisper-models
 *.apk 
-.env
-.env.*
-*.env
+# Only ignore truly-local env overrides; the deploy build context must be able to read
+# frontend/.env (the platform rewrites EXPO_PUBLIC_* / packager vars into it at deploy time).
+.env*.local
 credentials.json
 .credentials
