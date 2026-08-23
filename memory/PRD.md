@@ -327,3 +327,26 @@ orchestrator. Device: OnePlus Nord 4, OxygenOS 15.
   honest "nu pot închide complet" message. Revisit if user asks.
 - VERIFIED: tsc 0 errors; BensonMainScreen lint has only its pre-existing durationMs warning.
   Native-only → user verifies on a NEW Android build.
+
+## 2026-06 (fork) — CLOSE OTHER APPS (real force-stop via Settings) — NEEDS NATIVE REBUILD
+- USER: "Dacă-i spun lui Benson să închidă aplicația, trebuie s-o închidă. Benson e degetul meu." →
+  build a real close, not the honest "can't" message.
+- METHOD (only reliable, gesture-free path on Android/OxygenOS): open the target's system App-info
+  screen, then Accessibility-tap the OEM "Forțează oprirea"/"Force stop" button + its confirmation.
+  No force-stop API exists for a normal app; canPerformGestures (Recents-swipe) stays OFF (triggers
+  OxygenOS anti-spyware). 
+- NATIVE (BensonCommandExecutor.kt, needs rebuild — cannot gradle-compile here, mirrors doLaunchApp):
+  new step action "open_app_settings" → fires Intent(ACTION_APPLICATION_DETAILS_SETTINGS,
+  package:<pkg>) via service.startActivity. Added imports android.net.Uri + android.provider.Settings.
+  No module change (executeCommand already dispatches the when-block).
+- JS (src/executors/appLauncherExecutor.ts): rewrote the CLOSE_APP branch → new closeApp(): checks
+  accessibility connected (honest ask to enable if not) → resolveTargetPackage() (findAppRegistryEntry
+  then getInstalledApps fuzzy) → executeCommand open_app_settings+wait → tryClickAny(FORCE_STOP_LABELS)
+  (RO t-comma/t-cedilla + EN variants) → best-effort tryClickAny(CONFIRM_LABELS) for the dialog →
+  bringBensonBack("Am închis X"). If the force-stop button isn't found, honest fallback message.
+  Routing already works: planner DEVICE_CONTROL+CLOSE_APP → RETURN_TO_BENSON+appName →
+  missionOrchestrator maps appName→intent 'CLOSE_APP' → AppLauncherExecutor CLOSE_APP → closeApp().
+  Node label matching is case-insensitive (nodeLabel lowercases). tsc 0 errors; eslint clean.
+- HONEST LIMITS: button labels differ by OEM/locale — may need tuning after the first OxygenOS test
+  (add the exact on-screen label to FORCE_STOP_LABELS/CONFIRM_LABELS). Force-stop briefly shows the
+  Settings screen (unavoidable — that's where the button lives). User verifies on the NEW build.

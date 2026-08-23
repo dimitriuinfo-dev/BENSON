@@ -8,6 +8,7 @@
 // BENSON back to the front" — and the reply must say exactly that, never "I closed X".
 
 import { getInstalledApps } from 'benson-app-registry';
+import { executeCommand, isServiceEnabled as isAccessibilityConnected } from 'benson-accessibility';
 import {
   isPackageInstalled,
   launchPackage,
@@ -207,6 +208,84 @@ function bringBensonBack(requestId: string, successMessage: string): ActionResul
   });
 }
 
+// ── CLOSE_APP (real close, not just "return to Benson") ──────────────────────────────────────
+// Android gives a normal app NO force-stop API and the Recents-swipe trick needs
+// canPerformGestures (which OxygenOS anti-spyware auto-disables the whole service for). The one
+// reliable, gesture-free path is: open the target's system "App info" screen, then tap the OEM's
+// "Force stop"/"Forțează oprirea" button + its confirmation via Accessibility. Labels differ by
+// OEM/locale, so we try several (both Romanian t-comma/t-cedilla spellings + English).
+const FORCE_STOP_LABELS = [
+  'forțează oprirea', 'forţează oprirea', 'oprire forțată', 'oprire forţată',
+  'închide forțat', 'oprește forțat', 'force stop',
+];
+const CONFIRM_LABELS = [
+  'forțează oprirea', 'forţează oprirea', 'force stop', 'ok', 'da',
+];
+
+async function resolveTargetPackage(name: string): Promise<{ name: string; packageName: string } | null> {
+  const entry = findAppRegistryEntry(name);
+  if (entry?.packageName) return { name: entry.name, packageName: entry.packageName };
+  const q = name.toLowerCase().trim();
+  if (!q) return null;
+  try {
+    const installed = await getInstalledApps();
+    const hit =
+      installed.find((a) => a.appName.toLowerCase() === q) ||
+      installed.find((a) => a.appName.toLowerCase().includes(q)) ||
+      installed.find((a) => q.includes(a.appName.toLowerCase()));
+    return hit ? { name: hit.appName, packageName: hit.packageName } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Tries each candidate label in turn (own executeCommand each) — returns true on the first tap
+// that lands. Best-effort: a label simply not being on screen is not an error here.
+async function tryClickAny(labels: string[], timeoutMs: number): Promise<boolean> {
+  for (const label of labels) {
+    try {
+      const command = { steps: [{ action: 'click', match: { textContains: label, clickable: true, clickableAncestor: true }, timeoutMs }] };
+      const r = await executeCommand(command as any);
+      if ((r as { success?: boolean })?.success) return true;
+    } catch {
+      // try the next label
+    }
+  }
+  return false;
+}
+
+async function closeApp(requestId: string, targetName: string): Promise<ActionResult> {
+  const label = targetName || 'aplicația';
+  let connected = false;
+  try { connected = await isAccessibilityConnected(); } catch {}
+  if (!connected) {
+    return bringBensonBack(requestId, `Ca să închid ${label}, activează întâi Serviciul de Accesibilitate. Am revenit la tine.`);
+  }
+  const resolved = await resolveTargetPackage(targetName);
+  if (!resolved) {
+    return bringBensonBack(requestId, `Nu găsesc ${label} pe telefon ca să o închid. Am revenit la tine.`);
+  }
+  devLog('CLOSE_APP via force-stop, pkg=', resolved.packageName);
+  // 1) open the app's system App-info screen
+  try {
+    const openCmd = { steps: [{ action: 'open_app_settings', package: resolved.packageName }, { action: 'wait', ms: 1100 }] };
+    await executeCommand(openCmd as any);
+  } catch {}
+  // 2) tap "Force stop"
+  const tapped = await tryClickAny(FORCE_STOP_LABELS, 5000);
+  if (!tapped) {
+    return bringBensonBack(
+      requestId,
+      `Am deschis setările pentru ${resolved.name}, dar nu am găsit butonul de oprire forțată. Apasă tu „Forțează oprirea". Am revenit la tine.`,
+    );
+  }
+  // 3) confirm the dialog (best-effort — some phones stop immediately, no dialog)
+  await new Promise((res) => setTimeout(res, 500));
+  await tryClickAny(CONFIRM_LABELS, 2500);
+  // 4) come back to BENSON with an honest success message
+  return bringBensonBack(requestId, `Am închis ${resolved.name}.`);
+}
+
 export const AppLauncherExecutor: Executor = {
   name: 'AppLauncherExecutor',
 
@@ -222,16 +301,9 @@ export const AppLauncherExecutor: Executor = {
     }
 
     if (request.intent === 'CLOSE_APP') {
-      const target = typeof request.parameters.appName === 'string' ? request.parameters.appName : 'unknown';
-      devLog('CLOSE_APP target=', target, 'method=OPEN_BENSON');
-      // Honest scope (per product owner, 2026-06): Android gives an accessibility app no way to
-      // force-stop another app, and the one Recents-swipe technique needs canPerformGestures — which
-      // on this OnePlus/OxygenOS device triggered the OEM anti-spyware auto-disable of the whole
-      // service, so it must stay off. Best we can safely do is leave that app (bring BENSON to
-      // front) and say so plainly, rather than pretend it was closed.
-      const label = target && target !== 'unknown' ? target : 'aplicația';
-      const msg = `Nu pot închide complet ${label} — Android nu-mi permite asta. Am revenit la tine.`;
-      return bringBensonBack(request.id, msg);
+      const target = typeof request.parameters.appName === 'string' ? request.parameters.appName : '';
+      devLog('CLOSE_APP target=', target, 'method=FORCE_STOP');
+      return closeApp(request.id, target);
     }
 
     if (request.intent === 'OPEN_WAZE') return launchAllowlisted(request.id, 'Waze', 'com.waze');

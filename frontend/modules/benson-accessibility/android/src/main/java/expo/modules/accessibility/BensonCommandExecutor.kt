@@ -2,7 +2,9 @@ package expo.modules.accessibility
 
 import android.content.Intent
 import android.graphics.Rect
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.delay
@@ -99,6 +101,7 @@ class BensonCommandExecutor(
 
             val result: CommandResult = when (action) {
                 "launch_app" -> doLaunchApp(i, step)
+                "open_app_settings" -> doOpenAppSettings(i, step)
                 "wait" -> { delay(step.optLong("ms", 500L).coerceIn(50L, 10_000L)); ok(i, action) }
                 "click" -> doClick(i, step)
                 "set_text" -> doSetText(i, step)
@@ -169,6 +172,24 @@ class BensonCommandExecutor(
             ok(i, "launch_app")
         } catch (e: Exception) {
             fail(i, "launch_app", "tap_rejected", "Launch failed: ${e.message}")
+        }
+    }
+
+    // Opens the system "App info" (Settings → Apps → <pkg>) screen for a package. This is the only
+    // reliable, gesture-free way BENSON can actually close another app: from here the JS step list
+    // taps the OEM's "Force stop"/"Forțează oprirea" button and its confirmation. No force-stop API
+    // exists for a normal app, so we drive the user-facing Settings UI via Accessibility instead.
+    private fun doOpenAppSettings(i: Int, step: JSONObject): CommandResult {
+        val pkg = step.optString("package", "")
+        if (pkg.isEmpty()) return fail(i, "open_app_settings", "invalid", "Missing \"package\".")
+        return try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.fromParts("package", pkg, null))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            service.startActivity(intent)
+            ok(i, "open_app_settings")
+        } catch (e: Exception) {
+            fail(i, "open_app_settings", "tap_rejected", "Opening app settings failed: ${e.message}")
         }
     }
 
