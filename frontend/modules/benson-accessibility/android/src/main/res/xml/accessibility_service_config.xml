@@ -21,10 +21,32 @@
   still disables the service with only this one flag on, that combination isn't the sole
   trigger and this needs revisiting.
 -->
+<!--
+  RUNDA B (2026-09-07): typeWindowContentChanged adăugat. Cauza confirmată a „arborele vine gol
+  pentru WhatsApp": rezultatele căutării WhatsApp se populează prin TYPE_WINDOW_CONTENT_CHANGED,
+  iar serviciul nu era abonat la acel tip — Android nu ține `rootInActiveWindow` proaspăt pentru
+  o fereastră ale cărei content-change events nu le cere nimeni, deci waitForNode citea un arbore
+  stale/gol. Costul CPU/termic din 2026-07-09 (75-105% CPU) a fost al SETULUI COMPLET
+  (+typeViewClicked/typeViewFocused/typeViewTextChanged). Aici e adăugat DOAR
+  typeWindowContentChanged, iar onAccessibilityEvent tratează content-change ieftin (throttle,
+  fără walk de snapshot decât în timpul unei automatizări WhatsApp). Revert: scoate
+  „|typeWindowContentChanged".
+-->
+<!--
+  RUNDA WA-FIX-1 (2026-09-08): flagRetrieveInteractiveWindows adăugat. Cauza: assert_package
+  trebuie să enumere AccessibilityService.getWindows() ca să vadă fereastra WhatsApp când bula
+  BENSON e deasupra; fără acest flag getWindows() întoarce listă goală (dovedit în log:
+  "ASSERT_PACKAGE ... windows=0"). Este DOAR o citire de listă de ferestre — nu canPerformGestures,
+  nu injecție de input. Riscul ColorOS documentat mai sus a fost pentru combinația
+  canRetrieveWindowContent + canPerformGestures; acesta e un flag separat, de rang inferior.
+  DE VERIFICAT după instalare: serviciul rămâne ENABLED (Setări → Accesibilitate). Dacă ColorOS
+  îl dezactivează, scoate "|flagRetrieveInteractiveWindows" și revino la calea lastForegroundPackage
+  (WAFIX1_WINDOW_SCAN = false în BensonCommandExecutor). Revert: scoate flag-ul.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagReportViewIds"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="false"
     android:canRequestFilterKeyEvents="false"

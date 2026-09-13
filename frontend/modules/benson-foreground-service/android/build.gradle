@@ -49,4 +49,17 @@ dependencies {
   // IS a Context, so this needs no RN bridge at all — unlike whisper.rn, which is why that path
   // was blocked. See WAKE_ENGINE in BensonForegroundService.kt for the runtime fallback.
   implementation "ai.picovoice:porcupine-android:3.0.1"
+
+  // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — on-device wake-word inference. LiteRT (TensorFlow Lite)
+  // core runtime only, no select-TF-ops. Apache-2.0. Runs on a plain Context inside the
+  // foreground service (no RN bridge) — the whole point: wake detection survives JS suspension.
+  implementation "org.tensorflow:tensorflow-lite:2.16.1"
+
+  // ROUND_WAKE_NATIVE_GENERIC_1 — NOT a new library: OkHttp 4.9.2 is already resolved on this
+  // module's own release dependency graph transitively via React Native's networking stack
+  // (confirmed via the resolved lint dependency report before this round). This line only makes
+  // `okhttp3.*` resolvable at COMPILE time for NativeCloudWake.kt's direct import — pinned to the
+  // exact version already present everywhere else in the app to avoid duplicate-class/version
+  // skew. Used for the native cloud wake loop's STT request (Groq's OpenAI-compatible endpoint).
+  implementation "com.squareup.okhttp3:okhttp:4.9.2"
 }

@@ -1,10 +1,12 @@
 import { Linking } from 'react-native';
 import * as Location from 'expo-location';
 import { launchApp as launchInstalledApp } from 'benson-app-registry';
+import { logAudioDiag } from 'benson-foreground-service';
 import { geocodePlace, fetchWeather, haversineKm } from '../contextEngine';
 import { APP_REGISTRY, type AppEntry, type AppCategory } from '../appRegistry';
 import { loadApprovedAppIds, loadLastUsedByCategory, recordAppUsed } from '../appLauncherMemory';
-import { getAllowedApps, type AppPermission } from '../appPermissions';
+import { getAllowedApps } from '../appPermissions';
+import { resolveAppQuery, listAppNames } from '../appIndex';
 import type { ContentCard } from './contentTypes';
 
 // Navigation-to-destination patterns
@@ -13,13 +15,19 @@ import type { ContentCard } from './contentTypes';
 export const NAV_PATTERN =
   /(?:navigate|navigheaza|navigiere|navigue|naviga|get me to|take me to|du[- ]?ma la|du[- ]?mă la|directions to|fahre zu|emmène-moi à)\s+(?:to\s+)?(.+)/i;
 
-// "pune/deschide/rezervă/găsește/caută X pe/on/în Y" — a query aimed at a specific named app,
-// e.g. "pune Breaking Bad pe Netflix", "rezervă masă italian vineri seara pe TheFork". Trigger
-// words use word-stem matching (\w*) instead of enumerating exact suffixes — Romanian verb
+// "pune/deschide/rezervă/găsește/caută/find/search X pe/on/în Y" — a query aimed at a specific
+// named app, e.g. "pune Breaking Bad pe Netflix", "rezervă masă italian vineri seara pe TheFork".
+// Trigger words use word-stem matching (\w*) instead of enumerating exact suffixes — Romanian verb
 // conjugations vary a lot ("caută"/"cauta"/"caute"/"căutăm"...) and an exact-suffix regex missed
 // valid phrasings like "să caute" (subjunctive), silently falling through to a worse fallback.
+// "find"/"search" added (2026-08-24, confirmed live bug): lib/agents/tools.ts's openApp handler
+// templates Claude's query param as literally `find ${query} on ${appName}` — that English "find"
+// was never in this trigger list, so EVERY query-prefilled openApp call from Claude's tool loop
+// silently matched nothing here and fell through to a plain "open the app" with the search term
+// dropped entirely, no matter what Claude asked for. Confirmed live: "open YouTube, [search] Inna"
+// opened YouTube only, the search never happened, and nothing here ever surfaced the failure.
 const SEARCH_IN_APP_PATTERN =
-  /\b(?:play|pune|red[ăa]\w*|joacă|book|rezerv\w*|g[ăa]se\w*|caut\w*)\b\s+(.+?)\s+(?:on|pe|în|in)\s+(.+)$/i;
+  /\b(?:play|pune|red[ăa]\w*|joacă|book|rezerv\w*|g[ăa]se\w*|caut\w*|find|search)\b\s+(.+?)\s+(?:on|pe|în|in)\s+(.+)$/i;
 
 // "Find & pre-fill" intents that don't need the app named explicitly — Benson already knows
 // which app handles hotels/restaurant tables/parking. Extraction stays lightweight (whatever
@@ -53,15 +61,6 @@ function findAppByName(name: string): AppEntry | undefined {
   return APP_REGISTRY.find(a => n.includes(a.name.toLowerCase()) || a.name.toLowerCase().includes(n));
 }
 
-// BENSON 4 — second-tier resolution against the dynamic, full-device allowlist (benson-app-registry
-// + the App Permissions onboarding), for apps that aren't in the curated APP_REGISTRY above. Only
-// ever checks the user's already-approved list (a cheap AsyncStorage read) — never re-enumerates
-// every installed app on a voice command, which would mean re-encoding every app icon each time.
-function findAllowedDynamicApp(name: string, allowed: AppPermission[]): AppPermission | undefined {
-  const n = name.toLowerCase().trim();
-  return allowed.find(a => n.includes(a.appName.toLowerCase()) || a.appName.toLowerCase().includes(n));
-}
-
 // A curated-registry app is approved if either permission system says so — the older per-app
 // toggle in Settings (`approved`/loadApprovedAppIds) OR the newer BENSON 4 App Permissions
 // onboarding (dynamic, matched by packageName). Without this OR, an app the user approved through
@@ -75,11 +74,49 @@ async function isApprovedAnywhere(entry: AppEntry, approved: string[]): Promise<
   return dynamic.some(a => a.packageName === entry.packageName);
 }
 
-async function suggestForCategory(category: AppCategory, approved: string[]): Promise<AppEntry | undefined> {
-  const lastUsed = await loadLastUsedByCategory();
+// Category ("open something to watch", "muzică", ...) — NEVER auto-picks (directive 4). A choice
+// the user already made once (loadLastUsedByCategory) is treated as a settled fact and opened
+// directly; otherwise the candidates are proposed. Returns null so the caller can fall through to
+// the device-index match when the category has no approved candidates at all.
+async function proposeForCategory(
+  category: AppCategory, approved: string[], address: string,
+): Promise<LauncherResult | null> {
   const candidates = APP_REGISTRY.filter(a => a.category === category && approved.includes(a.id));
-  if (!candidates.length) return undefined;
-  return candidates.find(a => a.id === lastUsed[category]) ?? candidates[0];
+  if (!candidates.length) return null;
+  const lastUsed = await loadLastUsedByCategory();
+  const remembered = candidates.find(a => a.id === lastUsed[category]);
+  if (remembered) {
+    const opened = await openAppEntry(remembered);
+    if (opened) {
+      await recordAppUsed(remembered.id, remembered.category);
+      logAudioDiag('APP_MATCH', `intent=category:${category} query="" candidates=1 chosen=${JSON.stringify(remembered.name)} asked=false`);
+      return { reply: `Opening ${remembered.name}, ${address}.`, appId: remembered.id };
+    }
+  }
+  const shortlist = candidates.slice(0, 3);
+  logAudioDiag('APP_MATCH', `intent=category:${category} query="" candidates=${candidates.length} chosen=${JSON.stringify(shortlist.map(a => a.name).join('|'))} asked=true`);
+  return {
+    reply: shortlist.length === 1
+      ? `Am găsit ${shortlist[0].name}. O deschid?`
+      : `Am găsit mai multe: ${shortlist.map(a => a.name).join(', ')}. Pe care s-o deschid?`,
+  };
+}
+
+// Primary resolution: the device's real launcher list (lib/appIndex — fuzzy, diacritic- and
+// case-insensitive, over label AND package name). A concrete name opens directly; a close match
+// is proposed; nothing similar is stated honestly. Never "nu găsesc aplicația", never a silent
+// Play Store redirect.
+async function resolveOpenViaIndex(phrase: string, address: string): Promise<LauncherResult> {
+  const m = await resolveAppQuery(phrase, 'open');
+  if (m.kind === 'exact') {
+    try {
+      if (launchInstalledApp(m.app.packageName)) return { reply: `Deschid ${m.app.appName}, ${address}.`, appId: m.app.packageName };
+    } catch {}
+    return { reply: `Am încercat să deschid ${m.app.appName}, dar n-a pornit, ${address}.` };
+  }
+  if (m.kind === 'single') return { reply: `Am găsit ${m.app.appName}. O deschid?` };
+  if (m.kind === 'multiple') return { reply: `Am găsit mai multe: ${listAppNames(m.apps)}. Pe care s-o deschid?` };
+  return { reply: `Nu am nicio aplicație instalată care să semene cu ${phrase}, ${address}.` };
 }
 
 // Three-tier open: known scheme (or search scheme with a query) → best-effort package-name
@@ -222,15 +259,16 @@ export async function launchApp(text: string, address: string): Promise<Launcher
     }
   }
 
-  // Plain "open X" — a named registry app, or a category phrase ("open something to watch").
+  // Plain "open X" — concrete app name or a category phrase.
   const openMatch = lower.match(OPEN_PATTERN);
   if (openMatch) {
     const phrase = openMatch[1].trim();
+
+    // Curated registry is now ONLY an alias layer (deep-link schemes / known package). A hit the
+    // user has approved opens through the scheme-aware path; every other case — unknown alias,
+    // unapproved, or no alias at all — goes to the device index below, never to a dead end.
     const entry = findAppByName(phrase);
-    if (entry) {
-      if (!(await isApprovedAnywhere(entry, approved))) {
-        return { reply: `You haven't allowed me to open ${entry.name} yet, ${address}. Add it in Settings.` };
-      }
+    if (entry && (await isApprovedAnywhere(entry, approved))) {
       const opened = await openAppEntry(entry);
       if (opened) {
         await recordAppUsed(entry.id, entry.category);
@@ -239,33 +277,16 @@ export async function launchApp(text: string, address: string): Promise<Launcher
       return { reply: `I couldn't open ${entry.name}, ${address}.` };
     }
 
+    // Category phrase ("open something to watch", "muzică", ...) — propose, never auto-pick.
+    // Falls through to the index when the category has no approved candidate.
     const category = matchCategory(phrase);
     if (category) {
-      const suggestion = await suggestForCategory(category, approved);
-      if (suggestion) {
-        const opened = await openAppEntry(suggestion);
-        if (opened) {
-          await recordAppUsed(suggestion.id, suggestion.category);
-          return { reply: `Opening ${suggestion.name}, ${address}.`, appId: suggestion.id };
-        }
-      }
+      const proposal = await proposeForCategory(category, approved, address);
+      if (proposal) return proposal;
     }
 
-    // Not in the curated registry — try the dynamic, user-approved full-device list before
-    // giving up to the Play Store search.
-    const dynamicMatch = findAllowedDynamicApp(phrase, await getAllowedApps());
-    if (dynamicMatch) {
-      const opened = launchInstalledApp(dynamicMatch.packageName);
-      if (opened) {
-        return { reply: `Opening ${dynamicMatch.appName} for you, ${address}.`, appId: dynamicMatch.packageName };
-      }
-      return { reply: `I couldn't open ${dynamicMatch.appName}, ${address}.` };
-    }
-
-    await Linking.openURL(
-      `https://play.google.com/store/search?q=${encodeURIComponent(phrase)}&c=apps`
-    ).catch(() => {});
-    return { reply: `I don't have ${phrase} set up yet, ${address}. Searching the Play Store instead.` };
+    // Primary path — the device's real launcher list (fuzzy, diacritic-insensitive).
+    return resolveOpenViaIndex(phrase, address);
   }
 
   return null;

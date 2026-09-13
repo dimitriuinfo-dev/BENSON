@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
 import Svg, { Circle } from 'react-native-svg';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { QuickContactsWidget } from './canvas/QuickContactsWidget';
 import { fetchWeatherData, type WeatherData } from '../lib/contextEngine';
 import type { QuickContact } from '../lib/quickContacts';
@@ -46,41 +47,50 @@ function useContinuousRotation(durationMs: number, clockwise: boolean) {
   return value.interpolate({ inputRange: [0, 1], outputRange: clockwise ? ['0deg', '360deg'] : ['0deg', '-360deg'] });
 }
 
-// Global "Silent / Fully Off" + "Mute-only" controls — top-right, always visible. Silent fully
-// stops listening AND sound (turns into a big red banner while off). Mute keeps listening but makes
-// no sound. Critical for meetings / public places.
-function TopControls({ silenced, muted, onToggleSilence, onToggleMute }: {
-  silenced: boolean; muted: boolean; onToggleSilence: () => void; onToggleMute: () => void;
+// "Silent / Fully Off" — the only thing TopControls still renders is the way BACK on: a full-width
+// red banner shown only while silenced. Its own trigger button ("ÎNCHIDE COMPLET") moved into
+// Settings (user-directed 2026-08-23: invisible/easy to miss floating over the medallion) — this
+// component now only ever appears once already off, and always as this unmistakable banner.
+function TopControls({ silenced, onToggleSilence }: {
+  silenced: boolean; onToggleSilence: () => void;
 }) {
-  if (silenced) {
-    return (
-      <TouchableOpacity
-        style={s.silencedBanner}
-        onPress={() => { tap(); onToggleSilence(); }}
-        accessibilityLabel="Benson este oprit complet. Atinge pentru a porni." accessibilityRole="button">
-        <Ionicons name="volume-mute" size={20} color="#fff" />
-        <Text style={s.silencedBannerText}>BENSON E OPRIT · atinge ca să pornești</Text>
-      </TouchableOpacity>
-    );
-  }
+  if (!silenced) return null;
   return (
-    <View style={s.topControls}>
+    <TouchableOpacity
+      style={s.silencedBanner}
+      onPress={() => { tap(); onToggleSilence(); }}
+      accessibilityLabel="Benson este oprit complet. Atinge pentru a porni." accessibilityRole="button">
+      <Ionicons name="volume-mute" size={20} color="#fff" />
+      <Text style={s.silencedBannerText}>BENSON E OPRIT · atinge ca să pornești</Text>
+    </TouchableOpacity>
+  );
+}
+
+// Mute-only toggle — user-directed 2026-08-23: first tried anchored near the bottom, but on this
+// device that landed right on top of the system nav bar/gesture area (the app renders edge-to-edge
+// with no other safe-area handling). Moved to the top-left corner instead — floating, icon-only (a
+// megaphone the user just taps, no pill/label) — using the REAL top inset so it sits below the
+// status bar/notch on any phone, not a fixed guess. Keeps listening (wake word + commands still
+// work) but makes no sound; distinct from "fully off", which stops listening entirely and now
+// lives in Settings.
+function MuteButton({ muted, onToggleMute, silenced }: { muted: boolean; onToggleMute: () => void; silenced: boolean }) {
+  const insets = useSafeAreaInsets();
+  // Hidden while fully silenced — user-directed 2026-08-23: this button's top-left position
+  // physically overlapped the "BENSON E OPRIT" banner (same corner, same zIndex, painted after it),
+  // so tapping the banner was actually hitting this button instead — toggleMute() has no visible
+  // effect while already silenced (sound is already off), which read as "the banner does nothing".
+  // Mute is meaningless anyway when everything is already off, so hiding it removes the conflict
+  // entirely instead of just nudging positions further apart.
+  if (silenced) return null;
+  return (
+    <View style={[s.muteButtonCorner, { top: insets.top + 8 }]}>
       <TouchableOpacity
-        style={[s.silencePill, muted && s.silencePillActive]}
-        hitSlop={10}
+        style={[s.muteButton, muted && s.muteButtonActive]}
+        hitSlop={14}
         onPress={() => { tap(); onToggleMute(); }}
         accessibilityLabel={muted ? 'Pornește sunetul' : 'Mod mut, ascultă fără sunet'} accessibilityRole="button"
         accessibilityState={{ selected: muted }}>
-        <Ionicons name={muted ? 'volume-off' : 'volume-low-outline'} size={16} color={muted ? '#2E3742' : GOLD} />
-        <Text style={[s.silencePillText, muted && s.silencePillTextActive]}>{muted ? 'MUT PORNIT' : 'MUT'}</Text>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={s.stopPill}
-        hitSlop={10}
-        onPress={() => { tap(); onToggleSilence(); }}
-        accessibilityLabel="Închide complet Benson — oprește ascultarea și sunetul" accessibilityRole="button">
-        <Ionicons name="power" size={16} color="#fff" />
-        <Text style={s.stopPillText}>ÎNCHIDE COMPLET</Text>
+        <Ionicons name={muted ? 'megaphone' : 'megaphone-outline'} size={22} color={muted ? '#2E3742' : GOLD} />
       </TouchableOpacity>
     </View>
   );
@@ -335,7 +345,9 @@ export function BensonMainScreen({
 
   return (
     <View style={s.root}>
-      <TopControls silenced={silenced} muted={muted} onToggleSilence={onToggleSilence} onToggleMute={onToggleMute} />
+      <TopControls silenced={silenced} onToggleSilence={onToggleSilence} />
+
+      <MuteButton muted={muted} onToggleMute={onToggleMute} silenced={silenced} />
 
       <SettingsGear onOpenSettings={onOpenSettings} />
 
@@ -362,29 +374,24 @@ const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG },
   pipRoot: { alignItems: 'center', justifyContent: 'center' },
 
-  // Silent/off + mute controls — float top-right, above everything.
-  topControls: { position: 'absolute', top: 48, right: 16, zIndex: 20, flexDirection: 'row', gap: 8 },
-  silencePill: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    borderWidth: 1, borderColor: LINE, borderRadius: 20,
-    paddingVertical: 6, paddingHorizontal: 12, backgroundColor: BG_RAISED,
-  },
-  silencePillActive: { backgroundColor: GOLD, borderColor: GOLD },
-  silencePillText: { color: GOLD, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
-  silencePillTextActive: { color: '#2E3742' },
-  // Prominent, unmistakable full-stop button (red) — "ÎNCHIDE COMPLET" stops the service,
-  // listening and sound in one tap. Kept visually distinct from the subtle MUT pill.
-  stopPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    borderRadius: 20, paddingVertical: 8, paddingHorizontal: 14, backgroundColor: '#B23A3A',
-  },
-  stopPillText: { color: '#fff', fontSize: 11, fontWeight: '800', letterSpacing: 0.8 },
+  // "Fully off" way-back-on banner — the only thing left up top; its trigger button now lives in
+  // Settings (see app/index.tsx).
   silencedBanner: {
     position: 'absolute', top: 44, left: 16, right: 16, zIndex: 20,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     backgroundColor: '#B23A3A', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 16,
   },
   silencedBannerText: { color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
+
+  // Mute-only icon button — alone, near the bottom, below the listening indicator. Icon-only by
+  // design (a megaphone the user just taps), no pill/label.
+  // Top-left, floating — `top` set inline from real safe-area insets (see MuteButton).
+  muteButtonCorner: { position: 'absolute', left: 16, zIndex: 20 },
+  muteButton: {
+    width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: LINE, backgroundColor: BG_RAISED,
+  },
+  muteButtonActive: { backgroundColor: GOLD, borderColor: GOLD },
 
   // Gear sits above the medallion, centered — replaces the old bottom SYSTEM box.
   gearRow: { alignItems: 'center', paddingTop: 48, paddingHorizontal: 20 },

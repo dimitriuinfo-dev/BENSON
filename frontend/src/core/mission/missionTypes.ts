@@ -31,7 +31,10 @@ export type MissionState =
   | 'WaitingUser'
   | 'Completed'
   | 'Failed'
-  | 'Cancelled';
+  | 'Cancelled'
+  // MISSION-FIX-1 — terminal: a still-unconfirmed mission was outranked by a concrete new user
+  // command. Never executable, never re-confirmable. Treated exactly like Cancelled downstream.
+  | 'Superseded';
 
 // launch_requested: Android accepted the intent/deep link without throwing — the only claim
 // BENSON is ever allowed to make on its own. app_switch_observed: additionally corroborated by an

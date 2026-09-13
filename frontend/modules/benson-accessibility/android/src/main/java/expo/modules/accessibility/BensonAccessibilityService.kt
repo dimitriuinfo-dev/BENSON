@@ -10,12 +10,15 @@ import android.os.PowerManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -66,6 +69,25 @@ class BensonAccessibilityService : AccessibilityService() {
     }
 
     data class WhatsAppCallResult(val success: Boolean, val step: String, val error: String? = null)
+
+    // WA-NATIVE-FINAL contract — one native call runs the whole WhatsApp voice-call sequence.
+    data class WhatsAppCallNativeResult(
+        val success: Boolean,
+        val step: String,      // stage enum: VALIDATE|LAUNCH|PACKAGE|SEARCH_NOT_FOUND|SEARCH_CLICK|
+                               // SEARCH_NOT_OPEN|SET_TEXT|TEXT_MISMATCH|CONTACT_NOT_FOUND|CONTACT_CLICK|
+                               // CHAT_NOT_OPEN|CHAT_VERIFY|CHAT_WRONG_CONTACT|CALL_NOT_FOUND|CALL_BLOCKED|
+                               // CALL_CLICK|CALL_NOT_STARTED|CALL_WRONG_CONTACT|CALL_VERIFIED|EXCEPTION|SERVICE
+        val error: String?,
+        val contact: String,
+        val elapsedMs: Long,
+        // ROUND_VERIFIED_IDENTITY_BRIDGE_1 — additive only, both default so every existing call
+        // site (constructing this with the original 5-arg shape) still compiles unchanged.
+        // Populated ONLY at the exact point a real on-screen header comparison already ran
+        // (WA_WRITE_CHAT_VERIFIED / WA_DIRECT_CONVERSATION_VERIFY) — never guessed, never set on
+        // an idempotent-reentry shortcut that skipped fresh verification, never on failure/abort.
+        val verifiedHeaderText: String? = null,
+        val nameMatch: Boolean = false,
+    )
 
     data class AutomationProfileResult(val success: Boolean, val step: String, val error: String? = null)
 
@@ -170,6 +192,11 @@ class BensonAccessibilityService : AccessibilityService() {
         private const val KEY_RECOVERY_EVENTS = "recovery_events"
         private const val HEARTBEAT_STALE_MS = 90_000L
         private const val RESURRECTION_THROTTLE_MS = 60_000L
+        // E1-1 / E1-0 (2026-09-07, product-owner-directed): Guardian repornește serviciul foreground
+        // (mic + wake word se auto-repară în fundal, tăcut) DAR nu mai aduce Activity-ul BENSON pe
+        // ecran singur — nicio aducere în prim-plan fără o rostire recunoscută sau o atingere directă
+        // a utilizatorului. "BENSON nu se mai ridică singur." Revert: pune true.
+        private const val GUARDIAN_BRING_ACTIVITY_TO_FRONT = false
         private const val FOREGROUND_SERVICE_CLASS = "expo.modules.foregroundservice.BensonForegroundService"
         private const val MAX_RECOVERY_EVENTS = 20
 
@@ -211,6 +238,128 @@ class BensonAccessibilityService : AccessibilityService() {
             if (whatsappAutomationActiveInternal) return true
             return System.currentTimeMillis() - whatsappAutomationLastActiveAt < WHATSAPP_AUTOMATION_COOLDOWN_MS
         }
+
+        // WA-CALL-STAYS-LIVE (2026-09-08, product-owner-directed): the moment runWhatsAppCallNative
+        // verifies the WhatsApp call screen is up, it stamps this to now + 180s. BENSON's JS side
+        // reads whatsAppCallMicHoldActive() at every mic/wake entry point and, while it's true,
+        // does NOT open the mic or restart the wake-word loop — the concurrent mic grab / audio-focus
+        // request was ending the fresh WhatsApp call on this device. Source of truth is native (only
+        // the native executor actually knows the call started), so EVERY JS trigger path — voice,
+        // debug panel, conversation-mode self-heal — is covered by one check. Cleared early by JS the
+        // moment BENSON's own Activity is foregrounded again (clearWhatsAppCallMicHold).
+        @Volatile
+        var whatsappCallMicHoldUntilMs: Long = 0L
+        // Held for the WHOLE native call automation (from WA_NATIVE_START, while whatsappAutomationActive
+        // is true) AND for 180s after the call is verified live. A run that FAILS clears
+        // whatsappAutomationActive in its finally and never stamps the 180s window, so the hold releases
+        // at once and BENSON resumes listening — the hold only outlives the automation on success.
+        // The call-lifecycle watcher (watchWhatsAppCallLifecycle) sets this to 0 the moment it
+        // structurally verifies the call ended, so the 180s is a failsafe, not the primary release.
+        fun whatsAppCallMicHoldActive(): Boolean =
+            whatsappAutomationActiveInternal || System.currentTimeMillis() < whatsappCallMicHoldUntilMs
+
+        // AUTO-RETURN-AFTER-CALL (2026-09-08, product-owner-directed): the call-lifecycle watcher
+        // sets this true right before it fires the explicit Intent back to BENSON's MainActivity.
+        // The JS AppState 'active' handler consumes it on the next foreground transition and re-arms
+        // WAKE mode only (never conversation mode / general STT), logging WAKE_MODE_RESTORED.
+        @Volatile
+        var callEndedReturnPending: Boolean = false
+        fun consumeCallEndedReturnPending(): Boolean {
+            val v = callEndedReturnPending
+            callEndedReturnPending = false
+            return v
+        }
+
+        // ── WA-LIFECYCLE-FIX-1 (2026-09-09) — restart-recoverable WhatsApp call lifecycle ─────────
+        // watchWhatsAppCallLifecycle() runs on serviceScope; when OxygenOS kills/revives the
+        // AccessibilityService the coroutine dies mid-call and CALL_ENDED is never committed — the
+        // mic hold survives to the 180s watchdog and the wake loop stays dead
+        // (ROUND_WA_FIX_4_REPORT.md POST_CALL_WAKE=FAIL). Fix: a *persisted* minimal lifecycle state
+        // in benson_watchdog_prefs that a fresh service instance reads in onServiceConnected and
+        // finalizes. No conversation content is persisted — only state + timestamps + contact name
+        // (already logged everywhere). Values: IDLE | CALL_VERIFIED_ACTIVE | CALL_ENDING_PENDING.
+        const val WA_CALL_STATE_IDLE = "IDLE"
+        const val WA_CALL_STATE_ACTIVE = "CALL_VERIFIED_ACTIVE"
+        const val WA_CALL_STATE_ENDING = "CALL_ENDING_PENDING"
+        private const val KEY_WA_CALL_STATE = "wa_call_lifecycle_state"
+        private const val KEY_WA_CALL_STARTED_AT = "wa_call_started_at"
+        private const val KEY_WA_CALL_UPDATED_AT = "wa_call_updated_at"
+        private const val KEY_WA_CALL_CONTACT = "wa_call_contact"
+        // Monotonic-ish "a verified call just ended" marker. Survives a process kill (prefs). JS
+        // polls it in its self-heal loop and clears the JS mic hold + re-arms wake — independent of
+        // any AppState 'active' transition.
+        private const val KEY_WA_CALL_ENDED_SIGNAL_AT = "wa_call_ended_signal_at"
+
+        private fun waPrefs(ctx: Context) = ctx.getSharedPreferences(GUARDIAN_PREFS_NAME, Context.MODE_PRIVATE)
+
+        fun waCallPersistState(ctx: Context, state: String, contact: String) {
+            val now = System.currentTimeMillis()
+            val ed = waPrefs(ctx).edit()
+            ed.putString(KEY_WA_CALL_STATE, state)
+            ed.putString(KEY_WA_CALL_CONTACT, contact)
+            ed.putLong(KEY_WA_CALL_UPDATED_AT, now)
+            if (state == WA_CALL_STATE_ACTIVE) ed.putLong(KEY_WA_CALL_STARTED_AT, now)
+            if (state == WA_CALL_STATE_IDLE) ed.putLong(KEY_WA_CALL_ENDED_SIGNAL_AT, now)
+            ed.apply()
+            Log.i("BENSON_AUDIO", "WA_CALL_PERSIST state=$state")
+        }
+
+        data class WaCallPersisted(val state: String, val startedAt: Long, val updatedAt: Long, val contact: String)
+        fun waCallReadState(ctx: Context): WaCallPersisted {
+            val p = waPrefs(ctx)
+            return WaCallPersisted(
+                p.getString(KEY_WA_CALL_STATE, WA_CALL_STATE_IDLE) ?: WA_CALL_STATE_IDLE,
+                p.getLong(KEY_WA_CALL_STARTED_AT, 0L),
+                p.getLong(KEY_WA_CALL_UPDATED_AT, 0L),
+                p.getString(KEY_WA_CALL_CONTACT, "") ?: "",
+            )
+        }
+
+        // JS bridge — the persisted "call just ended" timestamp; 0 = none. JS keeps its own
+        // last-handled value and acts when this is newer.
+        fun getWhatsAppCallEndedSignalAt(): Long =
+            instance?.let { waPrefs(it).getLong(KEY_WA_CALL_ENDED_SIGNAL_AT, 0L) } ?: 0L
+
+        // ── ROUND_WA_GOVERNANCE_WRITE_1 — persisted idempotency for a WhatsApp message write.
+        // A single pending write at a time, keyed by the JS mission id. State machine:
+        // NOT_TYPED → TYPED_VERIFIED → WAITING_CONFIRMATION → SEND_ATTEMPTED → SENT_VERIFIED.
+        // SEND is pressed at most once per mission id: SEND_ATTEMPTED is written BEFORE the tap,
+        // so a crash/interruption after it can only re-VERIFY, never re-press. Nothing of the
+        // message body is stored — only its hashCode(), to detect a changed payload.
+        const val WA_WRITE_NOT_TYPED = "NOT_TYPED"
+        const val WA_WRITE_TYPED_VERIFIED = "TYPED_VERIFIED"
+        const val WA_WRITE_WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
+        const val WA_WRITE_SEND_ATTEMPTED = "SEND_ATTEMPTED"
+        const val WA_WRITE_SENT_VERIFIED = "SENT_VERIFIED"
+        private const val KEY_WA_WRITE_MISSION = "wa_write_mission_id"
+        private const val KEY_WA_WRITE_STATE = "wa_write_state"
+        private const val KEY_WA_WRITE_MSG_HASH = "wa_write_msg_hash"
+        private const val KEY_WA_WRITE_UPDATED_AT = "wa_write_updated_at"
+
+        fun waWritePersist(ctx: Context, missionId: String, state: String, msgHash: Int) {
+            val ed = waPrefs(ctx).edit()
+            ed.putString(KEY_WA_WRITE_MISSION, missionId)
+            ed.putString(KEY_WA_WRITE_STATE, state)
+            ed.putInt(KEY_WA_WRITE_MSG_HASH, msgHash)
+            ed.putLong(KEY_WA_WRITE_UPDATED_AT, System.currentTimeMillis())
+            ed.apply()
+            Log.i("BENSON_AUDIO", "WA_WRITE_STATE mission=$missionId state=$state")
+        }
+
+        data class WaWritePersisted(val missionId: String, val state: String, val msgHash: Int, val updatedAt: Long)
+        fun waWriteRead(ctx: Context): WaWritePersisted {
+            val p = waPrefs(ctx)
+            return WaWritePersisted(
+                p.getString(KEY_WA_WRITE_MISSION, "") ?: "",
+                p.getString(KEY_WA_WRITE_STATE, WA_WRITE_NOT_TYPED) ?: WA_WRITE_NOT_TYPED,
+                p.getInt(KEY_WA_WRITE_MSG_HASH, 0),
+                p.getLong(KEY_WA_WRITE_UPDATED_AT, 0L),
+            )
+        }
+
+        // JS bridge — read the current write state ("<missionId>|<state>" or "|NOT_TYPED").
+        fun getWhatsAppWriteState(): String =
+            instance?.let { val r = waWriteRead(it); "${r.missionId}|${r.state}" } ?: "|$WA_WRITE_NOT_TYPED"
     }
 
     override fun onServiceConnected() {
@@ -218,7 +367,70 @@ class BensonAccessibilityService : AccessibilityService() {
         instance = this
         connectionEpoch++
         Log.i(TAG, "Benson accessibility service connected, epoch=$connectionEpoch")
+        Log.i("BENSON_AUDIO", "WA_SERVICE_LIFECYCLE event=connected epoch=$connectionEpoch")
         maybeResurrect("onServiceConnected")
+        registerAcc1TestReceiver()
+        // WA-LIFECYCLE-FIX-1 — a previous instance may have died mid-call; recover the persisted
+        // WhatsApp call lifecycle before anything else can assume the mic hold is stale.
+        try { recoverWhatsAppCallLifecycle() } catch (e: Exception) { Log.w(TAG, "recoverWhatsAppCallLifecycle threw: ${e.message}") }
+    }
+
+    // ── RUNDA ACC-1 — declanșator de diagnostic, DOAR prin broadcast explicit ─────────────────────
+    // `adb shell am broadcast -a com.benson.acc1.RUN [--es calc <package>]` → rulează
+    // AccessibilityFoundationTest pe serviceScope. NU e legat de nicio rețetă / feature. Dinamic
+    // (fără intrare de manifest). Se dezînregistrează în onDestroy.
+    private var acc1Receiver: android.content.BroadcastReceiver? = null
+    private fun registerAcc1TestReceiver() {
+        if (acc1Receiver != null) return
+        val r = object : android.content.BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    "com.benson.acc1.RUN" -> {
+                        val calc = intent.getStringExtra("calc")
+                        Log.i("BENSON_AUDIO", "ACC_TEST trigger received calc=${calc ?: "auto"}")
+                        serviceScope.launch {
+                            try { AccessibilityFoundationTest(this@BensonAccessibilityService).run(calc) }
+                            catch (e: Exception) { Log.i("BENSON_AUDIO", "ACC_TEST harness_exception=${e.message}") }
+                        }
+                    }
+                    "com.benson.wafix1.RUN" -> {
+                        Log.i("BENSON_AUDIO", "WAFIX1_PROBE trigger received")
+                        serviceScope.launch {
+                            try { AccessibilityFoundationTest(this@BensonAccessibilityService).runWaFix1Probe() }
+                            catch (e: Exception) { Log.i("BENSON_AUDIO", "WAFIX1_PROBE harness_exception=${e.message}") }
+                        }
+                    }
+                    // WA-FIX-1 diagnostic trigger (same pattern as ACC-1): exercises ONLY the new
+                    // Chats-state normalisation + search-open helpers, from whatever state WhatsApp
+                    // is in now. No typing, no contact match, no call placed.
+                    // `adb shell am broadcast -a com.benson.wasearch.RUN`
+                    "com.benson.wasearch.RUN" -> {
+                        Log.i("BENSON_AUDIO", "WA_SEARCH_SELFTEST trigger received")
+                        serviceScope.launch {
+                            try {
+                                val norm = ensureWhatsAppChatsSearchAvailable()
+                                val input = if (norm) openWhatsAppSearch() else null
+                                Log.i("BENSON_AUDIO", "WA_SEARCH_SELFTEST result normalize=$norm searchOpen=${input != null}")
+                            } catch (e: Exception) {
+                                Log.i("BENSON_AUDIO", "WA_SEARCH_SELFTEST harness_exception=${e.message}")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction("com.benson.acc1.RUN")
+            addAction("com.benson.wafix1.RUN")
+            addAction("com.benson.wasearch.RUN")
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(r, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(r, filter)
+        }
+        acc1Receiver = r
     }
 
     // Defense-in-depth: onServiceConnected only fires once per (re)bind, but the foreground
@@ -264,8 +476,16 @@ class BensonAccessibilityService : AccessibilityService() {
         // attempted (see FINAL_BUILD_REPORT.md). Waking the screen and bringing MainActivity
         // forward reuses the exact mechanism wake-word detection already relies on, so the JS
         // layer boots through its normal, already-proven init path instead of an unverified one.
-        wakeScreenForRecovery()
-        bringBensonToForegroundForRecovery()
+        //
+        // E1-1 (2026-09-07): gated OFF by default — the foreground service (mic + wake word) has
+        // been restarted above; that alone keeps BENSON reachable by the wake word without
+        // hijacking the screen. The Activity is only surfaced again by a wake word or a touch.
+        if (GUARDIAN_BRING_ACTIVITY_TO_FRONT) {
+            wakeScreenForRecovery()
+            bringBensonToForegroundForRecovery()
+        } else {
+            Log.i(TAG, "Guardian: foreground service restarted; Activity NOT brought to front (E1-1)")
+        }
     }
 
     private fun recordRecoveryEvent(prefs: SharedPreferences, now: Long, reason: String) {
@@ -311,18 +531,36 @@ class BensonAccessibilityService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
+    // RUNDA B — content-change events are cheap by default: subscribing to them is what keeps
+    // rootInActiveWindow fresh (see the config xml comment), but WALKING the tree + bridging a
+    // snapshot to JS on every system-wide content change is the 2026-07-09 thermal problem. So the
+    // snapshot walk on content-change runs ONLY during a WhatsApp automation, throttled.
+    private var lastContentSnapshotAt = 0L
+    private val CONTENT_SNAPSHOT_MIN_INTERVAL_MS = 250L
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val packageName = event.packageName?.toString() ?: return
-                if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                    lastForegroundPackage = packageName
-                    onForegroundChanged?.invoke(packageName)
-                }
+                lastForegroundPackage = packageName
+                onForegroundChanged?.invoke(packageName)
                 maybeResurrect("onAccessibilityEvent")
                 emitScreenSnapshot(packageName)
+                maybePushImeStateToBubble()
+                pushForegroundPackageToBubble(packageName)
+            }
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                // Just receiving this event keeps the node cache current for waitForNode — that's
+                // the whole point. maybeResurrect is internally throttled to 60s so it's ~free.
+                maybeResurrect("onAccessibilityEvent")
+                if (whatsappAutomationActive) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastContentSnapshotAt >= CONTENT_SNAPSHOT_MIN_INTERVAL_MS) {
+                        lastContentSnapshotAt = now
+                        event.packageName?.toString()?.let { emitScreenSnapshot(it) }
+                    }
+                }
             }
             else -> { /* ignorat — reduce zgomotul */ }
         }
@@ -334,6 +572,9 @@ class BensonAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.i("BENSON_AUDIO", "WA_SERVICE_LIFECYCLE event=destroyed epoch=$connectionEpoch")
+        acc1Receiver?.let { try { unregisterReceiver(it) } catch (_: Exception) {} }
+        acc1Receiver = null
         serviceScope.cancel()
         instance = null
         connectionEpoch++
@@ -402,6 +643,54 @@ class BensonAccessibilityService : AccessibilityService() {
             walk(child, depth + 1, counter, out)
             child.recycle()
         }
+    }
+
+    // On-demand snapshot (2026-08-29) — reads rootInActiveWindow FRESH right now, so the caller
+    // never gets a stale tree. The pushed onScreenUpdate cache (emitScreenSnapshot above) only
+    // fires on TYPE_WINDOW_STATE_CHANGED — the only event type this service subscribes to for
+    // CPU/thermal reasons (see res/xml/accessibility_service_config.xml). WhatsApp's search
+    // results populate via TYPE_WINDOW_CONTENT_CHANGED, which never reaches JS — so anything that
+    // must read the CURRENT screen after typing (whatsappTool.ts) has to pull it on demand here.
+    // Retries up to 3× @150ms when the tree is momentarily null/empty (normal right after a
+    // transition). Runs on serviceScope via runOnServiceScope() — survives JS-thread throttling.
+    suspend fun captureSnapshot(): String {
+        var retries = 0
+        var pkg = ""
+        var nodes = JSONArray()
+        while (true) {
+            // RUNDA B — the tree walk + AccessibilityNodeInfo.getChild() IPC used to run on
+            // Dispatchers.Main and could STALL the whole JS bridge (r.txt: "hung ~60s") while
+            // WhatsApp was still launching. Now: off the main thread, with a HARD per-attempt cap
+            // so getScreenSnapshot() always returns promptly — empty if it had to — never hangs
+            // the caller. Retries 3×@150ms while the tree is momentarily empty.
+            val attempt = withTimeoutOrNull(1200L) {
+                withContext(Dispatchers.Default) {
+                    val root = rootInActiveWindow ?: return@withContext null
+                    val p = root.packageName?.toString() ?: ""
+                    val fresh = JSONArray()
+                    try { walk(root, 0, intArrayOf(0), fresh) } catch (_: Exception) {}
+                    finally { try { root.recycle() } catch (_: Exception) {} }
+                    p to fresh
+                }
+            }
+            if (attempt != null) {
+                pkg = attempt.first
+                nodes = attempt.second
+                if (nodes.length() > 0) break
+            }
+            if (retries >= 3) break
+            retries++
+            delay(150)
+        }
+        val capturedAt = System.currentTimeMillis()
+        Log.i("BENSON_AUDIO", "SNAPSHOT pkg=$pkg nodes=${nodes.length()} ageMs=0 retries=$retries")
+        return JSONObject().apply {
+            put("packageName", pkg)
+            put("timestamp", capturedAt)   // back-compat with the pushed-cache shape
+            put("capturedAt", capturedAt)
+            put("nodeCount", nodes.length())
+            put("nodes", nodes)
+        }.toString()
     }
 
     // ---------------------------------------------------------------
@@ -673,24 +962,105 @@ class BensonAccessibilityService : AccessibilityService() {
         return null
     }
 
-    // Polls the live accessibility tree (native delay(), not a JS timer) until `predicate` finds
-    // a match or timeoutMs elapses. This is the one thing that made the JS version of this flow
-    // unreliable — this loop lives entirely inside the service process and keeps running
-    // regardless of whether BENSON's own Activity currently has foreground focus.
+    // RUNDA B — the single wait primitive. Polls the LIVE accessibility tree (native delay(), not
+    // a JS timer) until `predicate` matches or `timeoutMs` elapses. No fixed sleep is left on the
+    // execution path — every step of the call recipe below is gated on one of these instead.
+    // `anchor` is a human label for the log line only. Default pollMs=100.
+    // Log: WAIT_NODE predicate=<anchor> foundAfterMs=<ms> result=found|timeout
     private suspend fun waitForNode(
-        timeoutMs: Long,
-        intervalMs: Long = 250,
+        timeoutMs: Long = 3000,
+        pollMs: Long = 100,
         requirePackage: String? = null,
+        anchor: String = "node",
         predicate: (AccessibilityNodeInfo) -> Boolean,
     ): AccessibilityNodeInfo? {
-        val deadline = System.currentTimeMillis() + timeoutMs
+        val startedAt = System.currentTimeMillis()
+        val deadline = startedAt + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (requirePackage == null || rootInActiveWindow?.packageName?.toString() == requirePackage) {
-                findNodeMatching(predicate)?.let { return it }
+                findNodeMatching(predicate)?.let {
+                    Log.i("BENSON_AUDIO", "WAIT_NODE predicate=$anchor foundAfterMs=${System.currentTimeMillis() - startedAt} result=found")
+                    return it
+                }
             }
-            delay(intervalMs)
+            delay(pollMs)
         }
+        Log.i("BENSON_AUDIO", "WAIT_NODE predicate=$anchor foundAfterMs=${System.currentTimeMillis() - startedAt} result=timeout")
         return null
+    }
+
+    // ── RUNDA B — potrivire fonetică de nume, insensibilă la diacritice ───────────────────────────
+    private fun normPhon(s: String?): String =
+        java.text.Normalizer.normalize(s ?: "", java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "")
+
+    private fun collapseDoubles(s: String): String {
+        val sb = StringBuilder()
+        for (c in s) if (sb.isEmpty() || sb.last() != c) sb.append(c)
+        return sb.toString()
+    }
+
+    private fun consSkeleton(s: String): String = s.replace(Regex("[aeiou]"), "")
+
+    // Bounded Levenshtein with early exit — same tolerance the JS row matcher (B-fix2 /
+    // lib/appIndex.ts) uses. "hana" ~ "hannah" = 2 edits; the token checks below can't catch that
+    // (skeleton "hn" vs "hnnh", collapseDoubles "hana" vs "hanah").
+    private fun boundedLevenshtein(a: String, b: String, max: Int): Int {
+        if (kotlin.math.abs(a.length - b.length) > max) return max + 1
+        if (a == b) return 0
+        val prev = IntArray(b.length + 1) { it }
+        val cur = IntArray(b.length + 1)
+        for (i in 1..a.length) {
+            cur[0] = i
+            var rowMin = cur[0]
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+                if (cur[j] < rowMin) rowMin = cur[j]
+            }
+            if (rowMin > max) return max + 1
+            System.arraycopy(cur, 0, prev, 0, cur.size)
+        }
+        return prev[b.length]
+    }
+
+    // True if a WhatsApp row label phonetically matches the FULL spoken name. Anchored on whole
+    // tokens — never a mid-word substring (the Ana/Adriana lesson: "adriana" must NOT match "ana").
+    // Tolerates: diacritics, a doubled/'dropped letter ("Hanna" ~ "Hannah"), vowel slips, and up
+    // to 2 edits on a same-first-letter, close-length token ("Hana" ~ "Hannah").
+    private fun phoneticNameMatch(rowLabel: String, fullName: String): Boolean {
+        val target = normPhon(fullName)
+        if (target.length < 2) return false
+        val tokens = rowLabel.split(Regex("\\s+")).map { normPhon(it) }.filter { it.length >= 2 }
+        if (tokens.isEmpty()) return false
+        val tCol = collapseDoubles(target)
+        val tSkel = consSkeleton(target)
+        val editBudget = if (target.length <= 3) 1 else 2
+        for (w in tokens) {
+            if (w == target) return true
+            if (collapseDoubles(w) == tCol) return true
+            if (tSkel.length >= 2 && consSkeleton(w) == tSkel) return true
+            if (w.length >= 3 && (w.startsWith(target) || target.startsWith(w))) return true
+            if (w.isNotEmpty() && w[0] == target[0] && kotlin.math.abs(w.length - target.length) <= 3 &&
+                boundedLevenshtein(w, target, editBudget) <= editBudget) return true
+        }
+        return false
+    }
+
+    // Whole-label phonetic equality — used as the FIRST tier so that a contact whose name merely
+    // ends in the spoken word (the "…Davids Mama" lesson) never wins over the real "Mama".
+    private fun wholeLabelPhoneticEquals(rowLabel: String, fullName: String): Boolean {
+        val a = normPhon(rowLabel)
+        val b = normPhon(fullName)
+        if (b.length < 2) return false
+        return a == b || collapseDoubles(a) == collapseDoubles(b)
+    }
+
+    private var recipeStepIndex = 0
+    private fun recipeStep(name: String, anchor: String, found: Boolean, elapsedMs: Long) {
+        Log.i("BENSON_AUDIO", "RECIPE_STEP index=${recipeStepIndex++} name=$name anchor=$anchor found=$found elapsedMs=$elapsedMs")
     }
 
     private fun launchWhatsApp(): Boolean {
@@ -720,6 +1090,184 @@ class BensonAccessibilityService : AccessibilityService() {
         } catch (e: Exception) {
             Log.e(TAG, "returnToBenson failed: ${e.message}")
             false
+        }
+    }
+
+    // AUTO-RETURN-AFTER-CALL — the ONLY way BENSON comes back after a WhatsApp call: an explicit
+    // Intent to its own launch (MainActivity) component. Never BACK / GLOBAL_ACTION_BACK / HOME /
+    // a gesture / an Accessibility click. NEW_TASK|REORDER_TO_FRONT|SINGLE_TOP reuses the single
+    // existing Activity instead of stacking a new one.
+    private fun returnToBensonForeground(reason: String): Boolean {
+        return try {
+            val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return false
+            intent.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
+            startActivity(intent)
+            Log.i("BENSON_AUDIO", "WA_CALL_RETURN_INTENT_SENT reason=$reason ok=true")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "returnToBensonForeground failed: ${e.message}")
+            Log.i("BENSON_AUDIO", "WA_CALL_RETURN_INTENT_SENT reason=$reason ok=false error=${e.message}")
+            false
+        }
+    }
+
+    // READ-ONLY. True while a WhatsApp call screen is on screen — the structural signal the
+    // lifecycle watcher debounces on. Same viewId set the CALL_VERIFY step used to confirm the
+    // call started, so "gone" here is the exact inverse of "started".
+    private fun callScreenPresent(): Boolean = try {
+        findNodeMatching { n ->
+            val vid = n.viewIdResourceName ?: ""
+            vid.contains("voip_") ||
+                vid.endsWith("/call_screen") || vid.endsWith("/end_call_button") ||
+                vid.endsWith("/audio_route_button") || vid.endsWith("/call_screen_header_view") ||
+                vid.endsWith("/call_controls_card")
+        } != null
+    } catch (e: Exception) {
+        false
+    }
+
+    // AUTO-RETURN-AFTER-CALL — runs on serviceScope after WA_NATIVE_CALL_VERIFY success=true, so it
+    // survives BENSON's Activity being backgrounded. Detection of call end is STRUCTURAL and
+    // debounced (call-screen accessibility nodes gone for END_DEBOUNCE_POLLS consecutive polls);
+    // the elapsed-time cap is a FAILSAFE only, never the primary mechanism. On a verified end it:
+    //   1. releases the mic/audio hold (whatsappCallMicHoldUntilMs = 0),
+    //   2. arms callEndedReturnPending + fires the explicit MainActivity Intent,
+    //   3. verifies BENSON actually reached the foreground.
+    // It performs NO other UI action — no BACK/HOME/gesture/click on WhatsApp.
+    private suspend fun watchWhatsAppCallLifecycle(contact: String, verifiedAt: Long) {
+        val pollMs = 700L
+        val endDebouncePolls = 3           // ~2.1s with no call screen == ended
+        val maxWatchMs = 30 * 60 * 1000L   // failsafe cap only
+        var heartbeat = 0
+        var goneStreak = 0
+        var ending = false
+        Log.i("BENSON_AUDIO", "WA_CALL_STATE state=CALL_ACTIVE contact=\"$contact\"")
+        while (System.currentTimeMillis() - verifiedAt < maxWatchMs) {
+            delay(pollMs)
+            if (callScreenPresent()) {
+                if (ending) Log.i("BENSON_AUDIO", "WA_CALL_STATE state=CALL_ACTIVE detail=call_screen_reappeared")
+                goneStreak = 0
+                ending = false
+                if (++heartbeat % 20 == 0) {
+                    Log.i("BENSON_AUDIO", "WA_CALL_STATE state=CALL_ACTIVE tMs=${System.currentTimeMillis() - verifiedAt}")
+                }
+                continue
+            }
+            // RUNTIME LAYER v1 — the call-screen nodes are not readable right now. Before counting
+            // that as "call ended", check the environment: a transient owner (SystemUI shade /
+            // notification / volume panel / IME / accessibility overlay) on top of a still-live
+            // WhatsApp window is NOT a call end — hold the streak and keep watching.
+            val env = observeEnvironment()
+            if (classifyInterruption(env, WA_PKG) == InterruptionClass.TEMPORARY_INTERRUPTION) {
+                Log.i("BENSON_AUDIO", "ENV_OBSERVE fg=${env.foregroundPackage ?: "?"} sysOverlay=${env.systemOverlayPresent} ime=${env.imePresent} a11yOverlay=${env.accessibilityOverlayPresent} wins=${env.visiblePackages.size}")
+                Log.i("BENSON_AUDIO", "INTERRUPTION_CLASS class=TEMPORARY_INTERRUPTION detail=call_watch")
+                continue
+            }
+            goneStreak++
+            if (!ending) {
+                ending = true
+                Log.i("BENSON_AUDIO", "WA_CALL_END_DETECTED tMs=${System.currentTimeMillis() - verifiedAt} fg=${lastForegroundPackage ?: "?"}")
+                Log.i("BENSON_AUDIO", "WA_CALL_STATE state=CALL_ENDING")
+                // Persist ENDING before this coroutine (or its whole service) can vanish. CALL_ENDING
+                // alone does NOT release the mic — a fresh instance still re-verifies absence.
+                try { waCallPersistState(this, WA_CALL_STATE_ENDING, contact) } catch (_: Exception) {}
+            }
+            if (goneStreak >= endDebouncePolls) break
+        }
+        val timedOut = System.currentTimeMillis() - verifiedAt >= maxWatchMs
+        val endReason = if (timedOut) "failsafe_timeout" else "call_screen_gone"
+        Log.i("BENSON_AUDIO", "WA_CALL_END_VERIFIED reason=$endReason tMs=${System.currentTimeMillis() - verifiedAt} fg=${lastForegroundPackage ?: "?"}")
+        finalizeWhatsAppCallEnded(if (timedOut) "watchdog" else "watcher")
+    }
+
+    // WA-LIFECYCLE-FIX-1 — the ONE authoritative "the WhatsApp call is over" path. Idempotent:
+    // guarded on the persisted state so the watcher AND a service-recovery pass can both call it and
+    // only the first takes effect (no duplicate hold release / return Intent / wake-restore).
+    private val waFinalizeLock = Any()
+    private fun finalizeWhatsAppCallEnded(reason: String) {
+        synchronized(waFinalizeLock) {
+            val prior = try { waCallReadState(this).state } catch (_: Exception) { WA_CALL_STATE_IDLE }
+            if (prior == WA_CALL_STATE_IDLE) return  // already finalized — do nothing
+            try { waCallPersistState(this, WA_CALL_STATE_IDLE, "") } catch (_: Exception) {}
+            whatsappCallMicHoldUntilMs = 0L
+            callEndedReturnPending = true
+            Log.i("BENSON_AUDIO", "WA_CALL_STATE state=CALL_ENDED reason=$reason")
+            Log.i("BENSON_AUDIO", "WA_CALL_AUDIO_HOLD state=released")
+            Log.i("BENSON_AUDIO", "WA_CALL_END_SIGNAL state=published")
+            Log.i("BENSON_AUDIO", "WA_WAKE_RESTORE_REQUEST reason=call_ended")
+        }
+        // Outside the lock — network/UI. Auto-return is best-effort and independent of wake restore
+        // (which the JS self-heal does off the published signal, foreground or not).
+        val sent = try { returnToBensonForeground("call_ended") } catch (_: Exception) { false }
+        serviceScope.launch {
+            var fgVerified = false
+            val deadline = System.currentTimeMillis() + 4000
+            while (System.currentTimeMillis() < deadline) {
+                if (lastForegroundPackage == packageName) { fgVerified = true; break }
+                delay(300)
+            }
+            Log.i("BENSON_AUDIO", "WA_CALL_RETURN_FOREGROUND_VERIFIED verified=$fgVerified sent=$sent fg=${lastForegroundPackage ?: "?"}")
+        }
+    }
+
+    // Called from onServiceConnected: a fresh AccessibilityService instance reads the persisted
+    // lifecycle and, if a call was active/ending when the previous instance died, re-verifies
+    // reality and either resumes the watcher or finalizes CALL_ENDED. The 180s watchdog is NOT the
+    // recovery path here.
+    private fun recoverWhatsAppCallLifecycle() {
+        val st = try { waCallReadState(this) } catch (_: Exception) { return }
+        if (st.state == WA_CALL_STATE_IDLE) return
+        Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_START persistedState=${st.state} ageMs=${System.currentTimeMillis() - st.updatedAt}")
+        serviceScope.launch {
+            // Give the freshly-connected service a beat to have a live window tree.
+            delay(600)
+            // A call cannot realistically outlive this unnoticed — treat as ended.
+            if (st.startedAt > 0 && System.currentTimeMillis() - st.startedAt > 30 * 60 * 1000L) {
+                Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_OBSERVE callPresent=false detail=stale")
+                Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_RESULT action=finalize_ended")
+                finalizeWhatsAppCallEnded("service_recovery")
+                return@launch
+            }
+            var present = 0
+            var absent = 0
+            val maxPolls = 8
+            for (i in 1..maxPolls) {
+                val p = try { callScreenPresent() } catch (_: Exception) { false }
+                if (p) { present++; absent = 0 } else { absent++; present = 0 }
+                if (present >= 2) {
+                    Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_OBSERVE callPresent=true")
+                    Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_RESULT action=resume_watch")
+                    waCallPersistState(this@BensonAccessibilityService, WA_CALL_STATE_ACTIVE, st.contact)
+                    watchWhatsAppCallLifecycle(st.contact, if (st.startedAt > 0) st.startedAt else System.currentTimeMillis())
+                    return@launch
+                }
+                if (absent >= 3) {
+                    Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_OBSERVE callPresent=false")
+                    Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_RESULT action=finalize_ended")
+                    finalizeWhatsAppCallEnded("service_recovery")
+                    return@launch
+                }
+                delay(600)
+            }
+            // Still uncertain after the budget — one short recheck, then default to finalize (never
+            // leave the mic held waiting on the 180s watchdog).
+            Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_RESULT action=retry")
+            delay(1200)
+            val stillPresent = try { callScreenPresent() } catch (_: Exception) { false }
+            if (stillPresent) {
+                Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_OBSERVE callPresent=true detail=retry")
+                Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_RESULT action=resume_watch")
+                waCallPersistState(this@BensonAccessibilityService, WA_CALL_STATE_ACTIVE, st.contact)
+                watchWhatsAppCallLifecycle(st.contact, if (st.startedAt > 0) st.startedAt else System.currentTimeMillis())
+            } else {
+                Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_OBSERVE callPresent=false detail=retry")
+                Log.i("BENSON_AUDIO", "WA_CALL_RECOVERY_RESULT action=finalize_ended")
+                finalizeWhatsAppCallEnded("service_recovery")
+            }
         }
     }
 
@@ -777,217 +1325,179 @@ class BensonAccessibilityService : AccessibilityService() {
         }
     }
 
+    // ── RUNDA B — rețeta de apel rescrisă ────────────────────────────────────────────────────────
+    // Fiecare pas: waitForNode(ancoră) → apasă → waitForNode(confirmarea că ecranul s-a schimbat).
+    // Niciun sleep fix pe calea de execuție (singura excepție: delay(2500) DUPĂ ce butonul de apel
+    // a fost deja apăsat — WhatsApp are nevoie de timp să-și stabilească sesiunea de apel, nu există
+    // niciun nod de așteptat pentru asta; nu e pe drumul spre reușită). Ancoră expirată → oprire cu
+    // mesaj care numește pasul, zero apăsări oarbe. Log per pas: RECIPE_STEP ...
     private suspend fun placeWhatsAppCallInner(contactName: String, autoPressCall: Boolean): WhatsAppCallResult {
+        recipeStepIndex = 0
         val name = contactName.trim()
         Log.i(TAG, "placeWhatsAppCall: starting for \"$name\"")
         if (name.isEmpty()) return WhatsAppCallResult(false, "validate", "Contact name is empty.")
 
+        val setTextArgs = { value: String -> android.os.Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+        } }
+
+        // ── Pas 0: WhatsApp în prim-plan ─────────────────────────────────────────────────────────
         if (!launchWhatsApp()) {
-            Log.e(TAG, "placeWhatsAppCall: launchWhatsApp failed")
             return WhatsAppCallResult(false, "launch", "Could not launch WhatsApp.")
         }
-        Log.i(TAG, "placeWhatsAppCall: launched WhatsApp, waiting for search icon")
-
-        // Confirmed live (2026-07-17): the recovery loop below was firing its FIRST check
-        // immediately after launchWhatsApp(), before WhatsApp's activity had actually rendered —
-        // rootInActiveWindow was still transiently stale/empty, so insideIndividualChat read false
-        // on attempt 1 and the loop broke out instantly, never getting a chance to detect (let
-        // alone fix) a real stuck individual-chat screen that only became visible a moment later.
-        // A short settle delay before the first check fixes that race.
-        delay(600)
-
-        // Confirmed live (2026-07-14): if WhatsApp is already running, getLaunchIntentForPackage
-        // resumes whatever screen it was last on (e.g. a previous contact's individual chat) —
-        // it does not reset to the main chat list, where the global search icon lives. An
-        // individual chat has no such icon, so step 2 below would time out for the wrong reason.
-        // Detect that case via the message-entry field's viewId and press back to return to the
-        // main list before searching.
-        //
-        // Confirmed live (2026-07-17): performGlobalAction(GLOBAL_ACTION_BACK) alone was NOT
-        // reliably escaping a stuck individual chat on this device — 3 attempts at 500ms each
-        // left the flow still inside the same chat every time. Tapping the toolbar's own visible
-        // back/home button (viewId "com.whatsapp:id/whatsapp_toolbar_home", confirmed present on
-        // an individual chat screen) is a more direct, targeted action than the global back
-        // gesture — tried first each attempt, falling back to the global action if that specific
-        // button isn't present. Attempts raised 3 -> 5 and delay 500ms -> 700ms for extra headroom.
-        for (attempt in 1..5) {
-            val onChatList = findNodeMatching { it.isClickable && matchesAny(it, SEARCH_KEYWORDS) } != null
-            if (onChatList) break
-            val insideIndividualChat = findNodeMatching { it.viewIdResourceName == "com.whatsapp:id/entry" } != null
-            if (!insideIndividualChat) break
-            val toolbarHome = findNodeMatching { it.viewIdResourceName == "com.whatsapp:id/whatsapp_toolbar_home" }
-            if (toolbarHome != null && toolbarHome.isClickable) {
-                Log.i(TAG, "placeWhatsAppCall: landed inside an individual chat (attempt $attempt), tapping the toolbar back button")
-                toolbarHome.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            } else {
-                Log.i(TAG, "placeWhatsAppCall: landed inside an individual chat (attempt $attempt), no toolbar back button found — using global back")
-                performGlobalAction(GLOBAL_ACTION_BACK)
-            }
-            delay(700)
+        var t = System.currentTimeMillis()
+        val whatsappReady = waitForNode(3000, 100, WHATSAPP_PACKAGE, "whatsapp_window") { true }
+        recipeStep("launch", "whatsapp_window", whatsappReady != null, System.currentTimeMillis() - t)
+        if (whatsappReady == null) {
+            return WhatsAppCallResult(false, "launch", "WhatsApp did not reach the foreground.")
         }
 
-        // Confirmed live (2026-07-17): a PREVIOUS placeWhatsAppCall attempt that failed to find a
-        // result (e.g. a mis-captured name, now fixed upstream) can leave WhatsApp sitting on the
-        // search screen with the OLD query still typed in — there's no separate search ICON to tap
-        // while search is already open, so trying to press back and re-open it via step 2 below
-        // was found to not reliably return to the plain chat list (GLOBAL_ACTION_BACK's effect on
-        // WhatsApp's search overlay is not consistent enough to depend on) — the earlier fix
-        // attempt for this exact bug still failed live. Simpler and more robust: if the search
-        // field is ALREADY open, reuse it directly — clear the stale text and type the new name —
-        // instead of trying to navigate away and back into a fresh one.
-        val alreadyOpenSearchField = findNodeMatching { it.viewIdResourceName == "com.whatsapp:id/search_input" }
-        val searchField: AccessibilityNodeInfo
-        if (alreadyOpenSearchField != null) {
-            Log.i(TAG, "placeWhatsAppCall: search already open with stale text, reusing the field directly")
-            searchField = alreadyOpenSearchField
-        } else {
-            // Step 2 — read the screen, find and tap the search icon.
-            val searchNode = waitForNode(4000, requirePackage = WHATSAPP_PACKAGE) {
+        // ── Pas 1: pe lista de chat-uri (nu blocați într-un chat individual) ──────────────────────
+        var searchField: AccessibilityNodeInfo? = null
+        var onChatList = false
+        for (attempt in 1..5) {
+            t = System.currentTimeMillis()
+            val searchIcon = waitForNode(1200, 100, WHATSAPP_PACKAGE, "chat_list_search_icon") {
                 it.isClickable && matchesAny(it, SEARCH_KEYWORDS)
             }
-            if (searchNode == null) {
-                dumpScreenForDebug("find_search")
-                return WhatsAppCallResult(false, "find_search", "Could not find the search icon in WhatsApp.")
+            if (searchIcon != null) {
+                recipeStep("reach_chat_list", "chat_list_search_icon", true, System.currentTimeMillis() - t)
+                onChatList = true
+                break
             }
-            Log.i(TAG, "placeWhatsAppCall: found search node label=\"${nodeLabel(searchNode)}\", tapping")
-            if (!searchNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                return WhatsAppCallResult(false, "tap_search", "Found the search icon but could not tap it.")
+            // O căutare rămasă deschisă cu text vechi dintr-o încercare anterioară — reia câmpul.
+            val staleSearch = findNodeMatching { it.viewIdResourceName == "com.whatsapp:id/search_input" }
+            if (staleSearch != null) {
+                recipeStep("reach_chat_list", "stale_search_input", true, System.currentTimeMillis() - t)
+                searchField = staleSearch
+                break
             }
+            val inChat = findNodeMatching { it.viewIdResourceName == "com.whatsapp:id/entry" }
+            if (inChat == null) {
+                // Nici pe listă, nici într-un chat — încă se încarcă; următoarea buclă re-așteaptă.
+                recipeStep("reach_chat_list", "chat_list_search_icon", false, System.currentTimeMillis() - t)
+                continue
+            }
+            // Blocați într-un chat individual — apasă înapoi (butonul din toolbar, altfel back global).
+            val toolbarHome = findNodeMatching {
+                it.viewIdResourceName == "com.whatsapp:id/whatsapp_toolbar_home" && it.isClickable
+            }
+            if (toolbarHome != null) toolbarHome.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            else performGlobalAction(GLOBAL_ACTION_BACK)
+            recipeStep("escape_individual_chat", "whatsapp_toolbar_home", toolbarHome != null, System.currentTimeMillis() - t)
+        }
+        if (!onChatList && searchField == null) {
+            dumpScreenForDebug("reach_chat_list")
+            return WhatsAppCallResult(false, "reach_chat_list", "Could not reach WhatsApp's chat list to search — stopped before any blind tap.")
+        }
 
-            // Step 3 — read the screen, find the now-visible search field.
-            val freshSearchField = waitForNode(3000, requirePackage = WHATSAPP_PACKAGE) { it.isEditable }
-            if (freshSearchField == null) {
-                dumpScreenForDebug("find_search_field")
-                return WhatsAppCallResult(false, "find_search_field", "The search field did not appear.")
+        // ── Pas 2: deschide căutarea ────────────────────────────────────────────────────────────
+        if (searchField == null) {
+            t = System.currentTimeMillis()
+            val searchIcon = waitForNode(3000, 100, WHATSAPP_PACKAGE, "search_icon") {
+                it.isClickable && matchesAny(it, SEARCH_KEYWORDS)
             }
-            searchField = freshSearchField
-        }
-        Log.i(TAG, "placeWhatsAppCall: typing \"$name\" into the search field")
-        val setTextArgs = android.os.Bundle()
-        setTextArgs.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, name)
-        if (!searchField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setTextArgs)) {
-            return WhatsAppCallResult(false, "type_name", "Found the search field but could not type into it.")
+            recipeStep("open_search", "search_icon", searchIcon != null, System.currentTimeMillis() - t)
+            if (searchIcon == null) {
+                dumpScreenForDebug("open_search")
+                return WhatsAppCallResult(false, "open_search", "Could not find WhatsApp's search icon.")
+            }
+            if (!searchIcon.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return WhatsAppCallResult(false, "tap_search", "Found the search icon but the tap was not accepted.")
+            }
+            t = System.currentTimeMillis()
+            val field = waitForNode(3000, 100, WHATSAPP_PACKAGE, "search_field") { it.isEditable }
+            recipeStep("search_field", "editable_field", field != null, System.currentTimeMillis() - t)
+            if (field == null) {
+                dumpScreenForDebug("search_field")
+                return WhatsAppCallResult(false, "search_field", "The search field did not appear after tapping search.")
+            }
+            searchField = field
         }
 
-        // Step 4 — read the screen, find the first matching result, tap it.
-        //
-        // Confirmed live (2026-07-14) that the naive "first clickable node whose own label
-        // contains the name" matched the SEARCH FIELD ITSELF an instant after typing (its own
-        // text is now "Hannah", and it's clickable) — long before real results render, and the
-        // flow proceeded as if a result had been tapped when nothing had actually happened.
-        // Two fixes: (1) exclude editable nodes and anything under a search_* viewId (WhatsApp's
-        // whole search-bar/filter-row UI) from matching at all; (2) the actual name text lives in
-        // a non-clickable child (conversations_row_contact_name) — walk up to the nearest
-        // clickable ancestor (contact_row_container) instead of requiring the match itself to be
-        // clickable, since tapping a peripheral clickable child (e.g. the avatar) may not open
-        // the chat the same way the row itself does.
-        // Prefer an EXACT label match over a whole-word substring match — confirmed live
-        // 2026-07-17: searching "Mama" surfaced a completely different contact whose display name
-        // merely ENDS in the word "mama" ("Fr. Batljan Slobodanka-Davids Mama") as a valid
-        // whole-word match, and this called them instead of the real "Mama" contact. Whole-word
-        // matching correctly stops "Ana" from matching mid-word inside "Adriana" (the earlier
-        // Ana/Adriana lesson), but it does NOT stop an entirely different, longer name that
-        // happens to literally end in the same word — only an exact match guarantees that's really
-        // the contact meant. Falls back to whole-word only when no exact match appears in time,
-        // same honest-search behavior as before.
-        val exactLabelNode = waitForNode(1500, requirePackage = WHATSAPP_PACKAGE) {
-            !it.isEditable && !isSearchUiNode(it) && !isAvatarNode(it) && !isRecentSuggestionNode(it) &&
-                nodeLabel(it) == name.lowercase()
+        // ── Pas 3: tastează un PREFIX de 3 caractere („Han" → „Hannah") ──────────────────────────
+        val prefix = normPhon(name).take(3).ifEmpty { name.take(3) }
+        Log.i(TAG, "placeWhatsAppCall: typing 3-char prefix \"$prefix\" for \"$name\"")
+        if (!searchField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setTextArgs(prefix))) {
+            return WhatsAppCallResult(false, "type_prefix", "Found the search field but could not type into it.")
         }
-        val resultLabelNode = exactLabelNode ?: waitForNode(3000, requirePackage = WHATSAPP_PACKAGE) {
-            !it.isEditable && !isSearchUiNode(it) && !isAvatarNode(it) && !isRecentSuggestionNode(it) &&
-                containsWholeWord(nodeLabel(it), name.lowercase())
+
+        // ── Pas 4: rândul rezultat — potrivire fonetică, insensibilă la diacritice, față de numele
+        //          rostit COMPLET. Tier 1: eticheta întreagă a rândului == numele (ca „…Davids Mama"
+        //          să nu bată „Mama"). Tier 2: potrivire fonetică pe token. Excluderile dovedite
+        //          (search UI / avatar / sugestie „recent") rămân. ────────────────────────────────
+        val rowFilter: (AccessibilityNodeInfo) -> Boolean = {
+            !it.isEditable && !isSearchUiNode(it) && !isAvatarNode(it) && !isRecentSuggestionNode(it)
         }
+        t = System.currentTimeMillis()
+        val exactRow = waitForNode(1800, 100, WHATSAPP_PACKAGE, "result_exact") {
+            rowFilter(it) && wholeLabelPhoneticEquals(nodeLabel(it), name)
+        }
+        val resultLabelNode = exactRow ?: waitForNode(2800, 100, WHATSAPP_PACKAGE, "result_phonetic") {
+            rowFilter(it) && phoneticNameMatch(nodeLabel(it), name)
+        }
+        recipeStep("find_result", if (exactRow != null) "result_exact" else "result_phonetic", resultLabelNode != null, System.currentTimeMillis() - t)
         if (resultLabelNode == null) {
             dumpScreenForDebug("find_result")
-            return WhatsAppCallResult(false, "find_result", "No search result for \"$name\" appeared.")
+            return WhatsAppCallResult(false, "find_result", "No phonetic search result for \"$name\" appeared — stopped before any blind tap.")
         }
-        // Always prefer the row-container ancestor over the matched node itself now that avatars
-        // (the one case where the match was directly clickable) are excluded — the name text is
-        // reliably non-clickable, so this should now always walk up to the real row.
-        val resultNode = findClickableAncestor(resultLabelNode) ?: resultLabelNode.takeIf { it.isClickable }
-        if (resultNode == null) {
-            dumpScreenForDebug("find_result")
-            return WhatsAppCallResult(false, "find_result", "Found \"$name\" in results but no tappable row around it.")
+
+        // ── Pas 5: apasă containerul-rând (strămoșul clickable al etichetei) ─────────────────────
+        var tapTarget = findClickableAncestor(resultLabelNode) ?: resultLabelNode.takeIf { it.isClickable }
+        if (tapTarget == null) {
+            dumpScreenForDebug("tap_result")
+            return WhatsAppCallResult(false, "tap_result", "Found \"$name\" in the results but no tappable row around it — stopped.")
         }
-        Log.i(TAG, "placeWhatsAppCall: found result node label=\"${nodeLabel(resultLabelNode)}\", tapping ancestor viewId=${resultNode.viewIdResourceName}")
-        // Confirmed live 2026-07-17: this exact tap on this exact node type ("mama"/"baby",
-        // ancestor recent_container) succeeded on some attempts and failed with an
-        // outright-rejected ACTION_CLICK on others, same day, same code path — the signature of a
-        // transient "not yet settled/interactive" window (e.g. still mid-animation into place)
-        // rather than a wrong target, since a genuinely wrong/non-clickable node fails every time,
-        // not intermittently. A single retry on the SAME cached node object was tried first and
-        // was not enough (confirmed live: it failed again on retry too) — AccessibilityNodeInfo
-        // references can themselves go stale within a couple hundred ms of the tree updating, so
-        // retrying is only meaningful against a FRESH node, not the same possibly-stale reference.
-        // Re-resolves the label + clickable ancestor from scratch on each retry instead.
-        var tapTarget = resultNode
         var tapped = tapTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         var tapAttempt = 1
         while (!tapped && tapAttempt < 3) {
-            delay(300L * tapAttempt)
-            val freshLabel = findNodeMatching {
-                !it.isEditable && !isSearchUiNode(it) && !isAvatarNode(it) && !isRecentSuggestionNode(it) &&
-                    (nodeLabel(it) == name.lowercase() || containsWholeWord(nodeLabel(it), name.lowercase()))
+            // Re-rezolvă FRESH (referințele de nod pot deveni stale la ~200ms după update de arbore)
+            // — nicio pauză fixă: waitForNode așteaptă un rând clickable proaspăt.
+            t = System.currentTimeMillis()
+            val fresh = waitForNode(700, 100, WHATSAPP_PACKAGE, "result_retry") {
+                rowFilter(it) && (wholeLabelPhoneticEquals(nodeLabel(it), name) || phoneticNameMatch(nodeLabel(it), name))
             }
-            val freshTarget = freshLabel?.let { findClickableAncestor(it) ?: it.takeIf { n -> n.isClickable } }
-            if (freshTarget == null) {
-                tapAttempt++
-                continue
-            }
+            val freshTarget = fresh?.let { findClickableAncestor(it) ?: it.takeIf { n -> n.isClickable } }
+            recipeStep("tap_result_retry", "result_retry", freshTarget != null, System.currentTimeMillis() - t)
+            if (freshTarget == null) { tapAttempt++; continue }
             tapTarget = freshTarget
             tapped = tapTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             tapAttempt++
         }
         if (!tapped) {
-            return WhatsAppCallResult(false, "tap_result", "Found a search result but could not tap it.")
-        }
-        if (tapAttempt > 1) {
-            Log.i(TAG, "placeWhatsAppCall: tap_result succeeded on retry attempt=$tapAttempt")
+            return WhatsAppCallResult(false, "tap_result", "Found the result row but the tap was not accepted after $tapAttempt attempts.")
         }
 
-        // Step 5 — wait for the chat to load. Matching "name text visible somewhere" alone
-        // false-positived here too (the search screen's own result row still shows the name) —
-        // require the search UI (search_input) to have actually disappeared as well, confirming
-        // we've genuinely navigated to a different screen, not just that the name is on-screen.
-        var chatConfirmed = false
-        run {
-            val deadline = System.currentTimeMillis() + 3000
-            while (System.currentTimeMillis() < deadline) {
-                val stillOnSearch = findNodeMatching { isSearchUiNode(it) } != null
-                val nameVisible = findNodeMatching { !isSearchUiNode(it) && containsWholeWord(nodeLabel(it), name.lowercase()) } != null
-                if (!stillOnSearch && nameVisible) {
-                    chatConfirmed = true
-                    break
-                }
-                delay(250)
-            }
+        // ── Pas 6: confirmă că s-a deschis chat-ul individual. Ancoră fiabilă = câmpul de mesaj
+        //          (com.whatsapp:id/entry) există DOAR într-un chat individual. ────────────────────
+        t = System.currentTimeMillis()
+        val chatOpen = waitForNode(3000, 100, WHATSAPP_PACKAGE, "chat_open") {
+            it.viewIdResourceName == "com.whatsapp:id/entry"
         }
-        if (!chatConfirmed) {
+        recipeStep("verify_chat", "message_entry_field", chatOpen != null, System.currentTimeMillis() - t)
+        if (chatOpen == null) {
             dumpScreenForDebug("verify_chat")
-            return WhatsAppCallResult(false, "verify_chat", "Could not confirm $name's chat opened.")
+            return WhatsAppCallResult(false, "verify_chat", "Could not confirm $name's chat opened (no message field).")
         }
-        Log.i(TAG, "placeWhatsAppCall: chat confirmed open, looking for call button")
 
         if (!autoPressCall) {
             Log.i(TAG, "placeWhatsAppCall: autoPressCall=false, stopping after chat_opened")
             return WhatsAppCallResult(true, "chat_opened", null)
         }
 
-        // Step 6 — find and tap the call-shaped button (never video), header region only, with
-        // the existing payment-safety blocklist still enforced on the final tap.
+        // ── Pas 7: butonul de apel (niciodată video), doar în zona de antet, blocklist de plată. ─
         val maxTop = headerRegionMaxTop()
-        val callNode = waitForNode(2500, requirePackage = WHATSAPP_PACKAGE) {
+        t = System.currentTimeMillis()
+        val callNode = waitForNode(2500, 100, WHATSAPP_PACKAGE, "call_button") {
             val bounds = Rect()
             it.getBoundsInScreen(bounds)
             it.isClickable && bounds.top <= maxTop && matchesAny(it, CALL_KEYWORDS) && !matchesAny(it, VIDEO_EXCLUDE_KEYWORDS)
         }
+        recipeStep("find_call_button", "call_button", callNode != null, System.currentTimeMillis() - t)
         if (callNode == null) {
             dumpScreenForDebug("find_call_button")
-            return WhatsAppCallResult(false, "find_call_button", "Could not find the call button on screen.")
+            return WhatsAppCallResult(false, "find_call_button", "Could not find the call button in $name's chat header.")
         }
-        Log.i(TAG, "placeWhatsAppCall: found call node label=\"${nodeLabel(callNode)}\", tapping")
-
         if (isPaymentSensitive(callNode)) {
             return WhatsAppCallResult(false, "call_button_blocked", "Blocked: call button node matched the payment-sensitive pattern.")
         }
@@ -995,21 +1505,1252 @@ class BensonAccessibilityService : AccessibilityService() {
             return WhatsAppCallResult(false, "tap_call_button", "Found the call button but the tap was not accepted.")
         }
 
-        // Product-owner-directed (2026-07-17, final flow): WhatsApp was full-screen (BENSON in
-        // PiP, entered from JS right before launchWhatsApp() above) WHILE this automation ran, so
-        // the user could watch it happen — now that it's actually done, WhatsApp disappears and
-        // BENSON returns to full-screen. Confirmed live (2026-07-17): calling returnToBenson()
-        // with NO delay right after the tap ended the call itself — WhatsApp's outgoing call
-        // hadn't yet established its own foreground call session at that instant, so forcibly
-        // pulling focus away that fast cancelled the dial instead of just backgrounding a
-        // stable call. A short settle delay lets WhatsApp's call session actually start before
-        // BENSON reclaims the foreground; the call keeps running in the background afterwards
-        // exactly as it would if the user switched apps themselves.
-        Log.i(TAG, "placeWhatsAppCall: call button tapped, settling before returning to BENSON")
+        // DUPĂ apăsare (nu pe calea spre reușită): WhatsApp are nevoie de ~2.5s ca să-și
+        // stabilească sesiunea de apel înainte ca BENSON să reia prim-planul — altfel focusul smuls
+        // prea repede anulează apelul (confirmat live 2026-07-17). Niciun nod de așteptat pentru asta.
+        Log.i(TAG, "placeWhatsAppCall: call button tapped, settling 2500ms before returning to BENSON")
         delay(2500)
-        Log.i(TAG, "placeWhatsAppCall: done, returning to BENSON")
         returnToBenson()
         return WhatsAppCallResult(true, "done")
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // WA-NATIVE-FINAL (2026-09-08) — executorul ACTIV de apel WhatsApp, complet nativ.
+    //
+    // Un singur apel JS → toată secvența (launch → verify package → search → set_text → verify text
+    // → contact match → verify chat header → call button → verify call screen) rulează AICI, pe
+    // Dispatchers.Default, cu delay() de coroutine. Zero JS / zero setTimeout între pași → BENSON
+    // Activity poate intra în background fără să întrerupă fluxul (serviciul de accesibilitate e
+    // independent de Activity). Selectori: viewId întâi, apoi contentDescription, apoi semantic +
+    // strămoș clickable. Niciun tap pe coordonate. Verificare reală la fiecare pas; un
+    // ACTION_CLICK=true NU e succes. Retries mărginite, timeout-uri mărginite, re-citire FRESH.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    private val WA_PKG = "com.whatsapp"
+
+    // Overlay-aware foreground check (portat din BensonCommandExecutor.resolveForegroundPackage):
+    // root_active → window_scan (getWindows(), trece de bula BENSON) → last_foreground.
+    private fun foregroundIsPackage(expected: String): Triple<Boolean, String, Int> {
+        val rootPkg = try { rootInActiveWindow?.packageName?.toString() } catch (_: Exception) { null }
+        if (rootPkg == expected) return Triple(true, "root_active", 0)
+        val wins: List<AccessibilityWindowInfo> = try { windows ?: emptyList() } catch (_: Exception) { emptyList() }
+        for (w in wins) {
+            val wp = try { w.root?.packageName?.toString() } catch (_: Exception) { null }
+            if (wp == expected && wp != packageName) return Triple(true, "window_scan", wins.size)
+        }
+        if ((rootPkg == null || rootPkg == packageName) && lastForegroundPackage == expected)
+            return Triple(true, "last_foreground", wins.size)
+        return Triple(false, "none", wins.size)
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // BENSON RUNTIME LAYER v1 (ROUND_RUNTIME_LAYER_1, 2026-09-10) — generic environment observation
+    // + interruption classification + bounded target reacquire. Extends the existing runtime
+    // (BensonAccessibilityService + BensonForegroundService + Guardian/START_STICKY); NO new
+    // service. A mission's "is my target app/window still there?" wait routes through
+    // awaitTargetReacquired() so a *transient* owner on top (SystemUI shade / notification / volume
+    // panel, the IME, an accessibility overlay — classified generically by window TYPE, never by a
+    // hardcoded third-party package) does NOT fail the mission; only a *different real app*
+    // foreground past a short generic grace does. No app-specific transient exceptions.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    enum class InterruptionClass { EXPECTED, TEMPORARY_INTERRUPTION, BLOCKING }
+
+    data class AppEnvironmentSnapshot(
+        val foregroundPackage: String?,
+        val visiblePackages: List<String>,
+        val systemOverlayPresent: Boolean,
+        val imePresent: Boolean,
+        val accessibilityOverlayPresent: Boolean,
+        val timestamp: Long,
+    )
+
+    // ROUND_BENSON_BUBBLE_IME_1 — the floating bubble (a separate module, no compile dependency
+    // either way) needs to know when the software keyboard is up so it can hop out of the way.
+    // The accessibility window list is the only cross-app IME signal available. Cheap: one
+    // `windows` scan on a window-state change, pushed only on an actual visible↔hidden transition,
+    // addressed to the overlay service by component-name string (no class dependency).
+    @Volatile private var lastImeVisibleForBubble: Boolean? = null
+    private fun maybePushImeStateToBubble() {
+        val visible = try {
+            (windows ?: emptyList()).any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } catch (_: Exception) { return }
+        if (visible == lastImeVisibleForBubble) return
+        lastImeVisibleForBubble = visible
+        try {
+            val i = Intent().apply {
+                component = android.content.ComponentName(packageName, "expo.modules.overlay.BensonBubbleService")
+                action = "expo.modules.overlay.ACTION_IME_VISIBILITY"
+                putExtra("ime_visible", visible)
+            }
+            startService(i)
+        } catch (_: Exception) { /* overlay service not startable right now — ignore */ }
+    }
+
+    // ROUND_BUBBLE_VISIBILITY_POLICY_1 — native, background-safe self-app suppression: the
+    // overlay must never show over BENSON's own Activity. Same idiom as
+    // maybePushImeStateToBubble() just above (dedup on actual transition, address the overlay
+    // service by component-name string, no Gradle dependency between the two modules) — reuses
+    // the SAME TYPE_WINDOW_STATE_CHANGED event stream that already computes lastForegroundPackage
+    // for JS's getForegroundPackage()/addForegroundChangeListener, rather than adding a second
+    // observation mechanism.
+    @Volatile private var lastForegroundIsSelfForBubble: Boolean? = null
+    private fun pushForegroundPackageToBubble(foregroundPackage: String) {
+        val isSelf = foregroundPackage == packageName
+        if (isSelf == lastForegroundIsSelfForBubble) return
+        lastForegroundIsSelfForBubble = isSelf
+        try {
+            val i = Intent().apply {
+                component = android.content.ComponentName(packageName, "expo.modules.overlay.BensonBubbleService")
+                action = "expo.modules.overlay.ACTION_FOREGROUND_PACKAGE_CHANGED"
+                putExtra("is_self_foreground", isSelf)
+            }
+            startService(i)
+        } catch (_: Exception) { /* overlay service not startable right now — ignore */ }
+    }
+
+    private fun observeEnvironment(): AppEnvironmentSnapshot {
+        val now = System.currentTimeMillis()
+        val wins: List<AccessibilityWindowInfo> = try { windows ?: emptyList() } catch (_: Exception) { emptyList() }
+        val pkgs = ArrayList<String>()
+        var ime = false
+        var sys = false
+        var a11yOverlay = false
+        var topAppPkg: String? = null
+        var topLayer = Int.MIN_VALUE
+        for (w in wins) {
+            val wp = try { w.root?.packageName?.toString() } catch (_: Exception) { null }
+            if (wp != null) pkgs.add(wp)
+            when (w.type) {
+                AccessibilityWindowInfo.TYPE_INPUT_METHOD -> ime = true
+                AccessibilityWindowInfo.TYPE_SYSTEM -> sys = true
+                AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> a11yOverlay = true
+                AccessibilityWindowInfo.TYPE_APPLICATION -> {
+                    val layer = try { w.layer } catch (_: Exception) { 0 }
+                    if (layer >= topLayer && wp != null && wp != packageName) { topLayer = layer; topAppPkg = wp }
+                }
+                else -> {}
+            }
+        }
+        if (pkgs.any { it.contains("systemui", ignoreCase = true) }) sys = true
+        val rootPkg = try { rootInActiveWindow?.packageName?.toString() } catch (_: Exception) { null }
+        val fg = topAppPkg
+            ?: rootPkg?.takeIf { it != packageName && !it.contains("systemui", ignoreCase = true) }
+            ?: lastForegroundPackage
+        return AppEnvironmentSnapshot(fg, pkgs.distinct(), sys, ime, a11yOverlay, now)
+    }
+
+    private fun classifyInterruption(env: AppEnvironmentSnapshot, expectedPackage: String): InterruptionClass {
+        if (env.foregroundPackage == expectedPackage) return InterruptionClass.EXPECTED
+        val targetStillVisible = env.visiblePackages.contains(expectedPackage)
+        val transientOwner =
+            env.foregroundPackage == null ||
+                env.foregroundPackage == packageName ||
+                env.foregroundPackage?.contains("systemui", ignoreCase = true) == true ||
+                env.systemOverlayPresent || env.imePresent || env.accessibilityOverlayPresent
+        // A generic transient system owner is up. If the target is still a live window underneath,
+        // it's clearly temporary; if it's momentarily not in the list either, still treat as
+        // temporary and let the grace/budget in awaitTargetReacquired decide.
+        if (transientOwner) return InterruptionClass.TEMPORARY_INTERRUPTION
+        // A different, real application owns the foreground with no transient owner on top.
+        return if (targetStillVisible) InterruptionClass.TEMPORARY_INTERRUPTION else InterruptionClass.BLOCKING
+    }
+
+    // Waits for `expectedPackage` to (re)own the environment. EXPECTED → true. TEMPORARY_INTERRUPTION
+    // → keep waiting. BLOCKING → fail only after `BLOCKING_GRACE_MS` of continuous BLOCKING. Overall
+    // `budgetMs` timeout → fail cleanly. Poll 300ms.
+    private suspend fun awaitTargetReacquired(expectedPackage: String, budgetMs: Long): Boolean {
+        val start = System.currentTimeMillis()
+        val blockingGraceMs = 2500L
+        Log.i("BENSON_AUDIO", "TARGET_REACQUIRE_START expected=$expectedPackage budgetMs=$budgetMs")
+        var blockingSince = 0L
+        var lastClass: InterruptionClass? = null
+        while (System.currentTimeMillis() - start < budgetMs) {
+            val env = observeEnvironment()
+            val cls = classifyInterruption(env, expectedPackage)
+            Log.i(
+                "BENSON_AUDIO",
+                "ENV_OBSERVE fg=${env.foregroundPackage ?: "?"} sysOverlay=${env.systemOverlayPresent} " +
+                    "ime=${env.imePresent} a11yOverlay=${env.accessibilityOverlayPresent} wins=${env.visiblePackages.size}",
+            )
+            if (cls != lastClass) { Log.i("BENSON_AUDIO", "INTERRUPTION_CLASS class=$cls"); lastClass = cls }
+            when (cls) {
+                InterruptionClass.EXPECTED -> {
+                    Log.i("BENSON_AUDIO", "TARGET_REACQUIRE_OK expected=$expectedPackage elapsedMs=${System.currentTimeMillis() - start}")
+                    return true
+                }
+                InterruptionClass.TEMPORARY_INTERRUPTION -> blockingSince = 0L
+                InterruptionClass.BLOCKING -> {
+                    if (blockingSince == 0L) blockingSince = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - blockingSince >= blockingGraceMs) {
+                        Log.i("BENSON_AUDIO", "TARGET_REACQUIRE_TIMEOUT expected=$expectedPackage reason=blocking fg=${env.foregroundPackage ?: "?"} elapsedMs=${System.currentTimeMillis() - start}")
+                        return false
+                    }
+                }
+            }
+            delay(300)
+        }
+        Log.i("BENSON_AUDIO", "TARGET_REACQUIRE_TIMEOUT expected=$expectedPackage reason=budget elapsedMs=${System.currentTimeMillis() - start}")
+        return false
+    }
+
+    private fun clickNodeOrAncestor(node: AccessibilityNodeInfo): Boolean {
+        if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        val anc = findClickableAncestor(node) ?: return false
+        return anc.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    private suspend fun awaitCondition(timeoutMs: Long, pollMs: Long, cond: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            try { if (cond()) return true } catch (_: Exception) {}
+            delay(pollMs)
+        }
+        return false
+    }
+
+    // If WhatsApp opened straight into an individual chat, walk back to the chat list so search is
+    // reachable. Bounded to 4 tries.
+    private suspend fun reachWhatsAppChatList() {
+        for (attempt in 1..4) {
+            val hasSearch = findNodeMatching { n ->
+                val vid = n.viewIdResourceName ?: ""
+                vid.endsWith("/search_bar_inner_layout") || vid.endsWith("/menuitem_search") ||
+                    (n.isClickable && matchesAny(n, SEARCH_KEYWORDS))
+            } != null
+            if (hasSearch) return
+            val inChat = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") } != null
+            if (!inChat) { delay(400); continue } // still loading
+            val back = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/whatsapp_toolbar_home") && it.isClickable }
+            if (back != null) clickNodeOrAncestor(back) else performGlobalAction(GLOBAL_ACTION_BACK)
+            delay(500)
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // WA-FIX-1 (2026-09-09) — deterministic Chats-state normalisation before the search step.
+    //
+    // Root cause (ROUND_WA_DIAG_REPORT.md, verdict CAUSE_A_PLUS_COLLAPSED_HEADER): the selector
+    // `com.whatsapp:id/search_bar_inner_layout` is unchanged and still valid, but it is the HEADER
+    // ROW of the conversations RecyclerView (`android:id/list`). When the chat list is scrolled
+    // down that row is recycled out of the accessibility tree, so every id/semantic selector for it
+    // returns nothing → SEARCH_NOT_FOUND. Confirmed on device: the node exists (doc #20/169,
+    // depth 19) whenever the list is at the top; absent when scrolled.
+    //
+    // Fix: before searching, put the Chats screen into a state where the header exists — assert
+    // WhatsApp foreground, select the Chats tab if another tab is active, then scroll the
+    // RecyclerView to the top (bounded, semantic ACTION_SCROLL_BACKWARD; no coordinate taps —
+    // canPerformGestures="false"), re-reading the tree after each step until the header appears.
+    //
+    // Revert: WA_FIX1_NORMALIZE_SEARCH = false → runWhatsAppCallNative uses the pre-2026-09-09
+    // reachWhatsAppChatList() + inline selector block only (kept verbatim below).
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    private val WA_FIX1_NORMALIZE_SEARCH = true
+    // WA-FIX-3 fast-burst scroll-to-top (ROUND_WA_FIX_2_REPORT.md: ACTION_SCROLL_BACKWARD works but
+    // moves ~1 row/call, and one settle+tree-read per row made it ~0.8 s/row — too slow. Fire the
+    // action in bursts with only a tiny inter-action delay, read the tree ONCE per burst.)
+    private val WA_FIX3_BURST_SIZE = 8
+    private val WA_FIX3_INTER_ACTION_DELAY_MS = 55L
+    private val WA_FIX3_POST_BURST_SETTLE_MS = 250L
+    private val WA_FIX3_MAX_TOTAL_SCROLL_ACTIONS = 120
+    private val WA_FIX3_MAX_WALL_CLOCK_MS = 15_000L
+
+    // The search affordance: primary id, its wrapper, and the ACC-1-proven broader variants
+    // (all evidenced in the live hierarchy / ROUND_ACC1_REPORT.md). `menuitem_search` kept only
+    // as one entry among several — it is absent on this WhatsApp build.
+    private fun waSearchHeaderNode(): AccessibilityNodeInfo? = findNodeMatching { n ->
+        val vid = n.viewIdResourceName ?: ""
+        vid.endsWith("/search_bar_inner_layout") || vid.endsWith("/my_search_bar") ||
+            vid.endsWith("/menuitem_search") || vid.contains("search_bar") ||
+            (n.contentDescription?.toString()?.lowercase()?.let { it.contains("meta ai") && it.contains("such") } == true)
+    }
+
+    // The conversations list — a scrollable RecyclerView carrying the well-known `android:id/list`.
+    private fun waConversationsList(): AccessibilityNodeInfo? =
+        findNodeMatching { n ->
+            (n.viewIdResourceName ?: "") == "android:id/list" && n.isScrollable
+        } ?: findNodeMatching { n ->
+            n.isScrollable && (n.className?.toString()?.contains("RecyclerView") == true) &&
+                (n.viewIdResourceName ?: "").endsWith("/list")
+        }
+
+    // Cheap "did the list move" probe — the first visible conversation row's name.
+    private fun waFirstRowSignature(): String =
+        findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/conversations_row_contact_name") && !it.text.isNullOrBlank() }
+            ?.text?.toString()?.trim().orEmpty()
+
+    // Active bottom-nav item renders its label as `*_large_label_view` and carries selected=true;
+    // inactive items use `*_small_label_view`. Locale note: WhatsApp UI here is German — the Chats
+    // tab label is still literally "Chats". Fallback: presence of the conversations RecyclerView
+    // with rows (only the Chats tab has that) counts as "on Chats".
+    private fun waChatsTabLabelNode(): AccessibilityNodeInfo? = findNodeMatching { n ->
+        val vid = n.viewIdResourceName ?: ""
+        vid.contains("navigation_bar_item") && vid.contains("label_view") &&
+            (n.text ?: "").toString().trim().lowercase().let { it == "chats" || it == "chat" }
+    }
+
+    private fun waOnChatsTab(): Boolean {
+        val label = waChatsTabLabelNode()
+        if (label != null) {
+            if ((label.viewIdResourceName ?: "").endsWith("large_label_view") || label.isSelected) return true
+            var p = label.parent; var h = 0
+            while (p != null && h < 6) { if (p.isSelected) { p.recycle(); return true }; val nx = p.parent; p.recycle(); p = nx; h++ }
+            // a Chats label exists but not marked active → not on Chats
+            return false
+        }
+        // no recognisable Chats label — fall back to structural evidence
+        val hasList = findNodeMatching { (it.viewIdResourceName ?: "") == "android:id/list" } != null
+        val hasRows = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/contact_row_container") } != null
+        return hasList && (hasRows || waSearchHeaderNode() != null)
+    }
+
+    private fun waSelectChatsTab(): Boolean {
+        val target = waChatsTabLabelNode()
+            ?: findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/navigation_bar_item_icon_container") } // leftmost item = Chats in WhatsApp
+            ?: return false
+        return clickNodeOrAncestor(target)
+    }
+
+    private fun waScrollActionIds(node: AccessibilityNodeInfo): String =
+        node.actionList.joinToString(",") { it.id.toString() }
+
+    private fun waSupportsScrollToPosition(node: AccessibilityNodeInfo): Boolean =
+        node.actionList.any { it.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_TO_POSITION.id }
+
+    // WA-FIX-3 (2026-09-09) — fast semantic scroll-to-top by BURSTS.
+    // Evidence (ROUND_WA_FIX_2_REPORT.md): WhatsApp's `android:id/list` advertises only
+    // SCROLL_FORWARD / SCROLL_BACKWARD (no SCROLL_TO_POSITION / SCROLL_UP / pageUp), and
+    // `ACTION_SCROLL_BACKWARD` moves ~1 row per call. The old loop's one settle+tree-read per row
+    // made it ~0.8 s/row → couldn't clear a deep list inside a call-appropriate budget.
+    // Here: fire `ACTION_SCROLL_BACKWARD` in bursts of WA_FIX3_BURST_SIZE with only a tiny
+    // inter-action delay and NO tree read between actions; after each burst do one bounded settle
+    // and ONE tree read to check the header + a burst-level first-row signature. Success is ONLY
+    // "search header present". Semantic AccessibilityNodeInfo actions only — no coordinates,
+    // no dispatchGesture. The ACTION_SCROLL_TO_POSITION probe is kept (falls through instantly
+    // on this build) as diagnostic evidence.
+    private suspend fun waScrollChatsToTop(): Boolean {
+        val started = System.currentTimeMillis()
+        fun elapsed() = System.currentTimeMillis() - started
+
+        var list = waConversationsList() ?: run {
+            Log.i("BENSON_AUDIO", "WA_CHAT_LIST_FOUND state=missing"); return false
+        }
+        Log.i("BENSON_AUDIO", "WA_CHAT_SCROLL_ACTIONS supported=\"${waScrollActionIds(list)}\"")
+
+        if (waSearchHeaderNode() != null) {
+            Log.i("BENSON_AUDIO", "WA_SEARCH_HEADER_RECOVERED method=already_present burst=0 totalActions=0 elapsedMs=${elapsed()}")
+            return true
+        }
+
+        // Kept probe — jump to position 0 if the node ever advertises it (it does not on this build).
+        if (waSupportsScrollToPosition(list)) {
+            val args = android.os.Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_ROW_INT, 0)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_COLUMN_INT, 0)
+            }
+            val r = list.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_TO_POSITION.id, args)
+            Log.i("BENSON_AUDIO", "WA_CHAT_SCROLL_TO_POSITION attempted=true supported=true result=$r")
+            val dl = System.currentTimeMillis() + 1200
+            while (System.currentTimeMillis() < dl) {
+                delay(150)
+                if (waSearchHeaderNode() != null) {
+                    Log.i("BENSON_AUDIO", "WA_SEARCH_HEADER_RECOVERED method=scroll_to_position burst=0 totalActions=1 elapsedMs=${elapsed()}")
+                    return true
+                }
+            }
+        } else {
+            Log.i("BENSON_AUDIO", "WA_CHAT_SCROLL_TO_POSITION attempted=false supported=false result=false")
+        }
+
+        // Burst loop
+        var totalActions = 0
+        var burst = 0
+        var unchangedBursts = 0
+        var prevSig = waFirstRowSignature()
+
+        while (totalActions < WA_FIX3_MAX_TOTAL_SCROLL_ACTIONS && elapsed() < WA_FIX3_MAX_WALL_CLOCK_MS) {
+            if (waSearchHeaderNode() != null) {
+                Log.i("BENSON_AUDIO", "WA_SEARCH_HEADER_RECOVERED method=scroll_backward_burst burst=$burst totalActions=$totalActions elapsedMs=${elapsed()}")
+                return true
+            }
+            list = waConversationsList() ?: run {
+                // re-acquire once more before declaring the node invalid
+                delay(150); waConversationsList()
+            } ?: run {
+                Log.i("BENSON_AUDIO", "WA_CHAT_LIST_FOUND state=missing")
+                Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=scroll_action_refused")
+                return false
+            }
+
+            burst++
+            val burstStart = System.currentTimeMillis()
+            val pre = prevSig
+            var requested = 0
+            var accepted = 0
+            var refused = false
+            while (requested < WA_FIX3_BURST_SIZE && totalActions < WA_FIX3_MAX_TOTAL_SCROLL_ACTIONS) {
+                requested++
+                totalActions++
+                if (list.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) accepted++
+                else { refused = true; break }
+                delay(WA_FIX3_INTER_ACTION_DELAY_MS)
+            }
+            delay(WA_FIX3_POST_BURST_SETTLE_MS)
+
+            val headerNow = waSearchHeaderNode() != null
+            val post = waFirstRowSignature()
+            Log.i(
+                "BENSON_AUDIO",
+                "WA_CHAT_SCROLL_BURST burst=$burst requested=$requested accepted=$accepted totalActions=$totalActions " +
+                    "pre=\"${pre.take(20)}\" post=\"${post.take(20)}\" elapsedMs=${System.currentTimeMillis() - burstStart}",
+            )
+
+            if (headerNow) {
+                Log.i("BENSON_AUDIO", "WA_SEARCH_HEADER_RECOVERED method=scroll_backward_burst burst=$burst totalActions=$totalActions elapsedMs=${elapsed()}")
+                return true
+            }
+
+            if (refused && accepted == 0) {
+                // Action refused with nothing accepted: re-acquire the list once and retry the burst once.
+                delay(400)
+                val fresh = waConversationsList()
+                var retryAccepted = 0
+                if (fresh != null) {
+                    var k = 0
+                    while (k < WA_FIX3_BURST_SIZE && totalActions < WA_FIX3_MAX_TOTAL_SCROLL_ACTIONS) {
+                        k++; totalActions++
+                        if (fresh.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) retryAccepted++ else break
+                        delay(WA_FIX3_INTER_ACTION_DELAY_MS)
+                    }
+                    delay(WA_FIX3_POST_BURST_SETTLE_MS)
+                }
+                if (waSearchHeaderNode() != null) {
+                    Log.i("BENSON_AUDIO", "WA_SEARCH_HEADER_RECOVERED method=scroll_backward_burst burst=$burst totalActions=$totalActions elapsedMs=${elapsed()}")
+                    return true
+                }
+                if (retryAccepted == 0 && waFirstRowSignature() == post) {
+                    Log.i("BENSON_AUDIO", "WA_CHAT_SCROLL_PROGRESS state=stalled")
+                    Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=scroll_action_refused")
+                    return false
+                }
+                prevSig = waFirstRowSignature()
+                continue
+            }
+
+            if (post != pre) {
+                unchangedBursts = 0
+                prevSig = post
+                Log.i("BENSON_AUDIO", "WA_CHAT_SCROLL_PROGRESS state=progress")
+            } else {
+                unchangedBursts++
+                if (unchangedBursts >= 2) {
+                    Log.i("BENSON_AUDIO", "WA_CHAT_SCROLL_PROGRESS state=stalled")
+                    Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=scroll_stalled")
+                    return false
+                }
+                Log.i("BENSON_AUDIO", "WA_CHAT_SCROLL_PROGRESS state=stalled_candidate")
+                prevSig = post
+            }
+        }
+
+        Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=scroll_timeout")
+        return false
+    }
+
+    // Puts the WhatsApp Chats screen into a state where `search_bar_inner_layout` exists in the
+    // accessibility tree. Returns false (with a WA_SEARCH_NORMALIZE_FAIL reason) if it cannot.
+    private suspend fun ensureWhatsAppChatsSearchAvailable(): Boolean {
+        Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_START")
+
+        val (fg, fgSrc, _) = foregroundIsPackage(WA_PKG)
+        if (!fg) { Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=not_foreground src=$fgSrc"); return false }
+
+        // Chats tab
+        var onChats = waOnChatsTab()
+        Log.i("BENSON_AUDIO", "WA_CHATS_TAB state=${if (onChats) "active" else "inactive"}")
+        if (!onChats) {
+            val sel = waSelectChatsTab()
+            Log.i("BENSON_AUDIO", "WA_CHATS_TAB state=select ok=$sel")
+            awaitCondition(2500, 150) { waOnChatsTab() && findNodeMatching { (it.viewIdResourceName ?: "") == "android:id/list" } != null }
+            onChats = waOnChatsTab()
+            if (!onChats) { Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=chats_tab_unreachable"); return false }
+        }
+
+        // not stuck inside an individual chat
+        if (findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") } != null) {
+            val back = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/whatsapp_toolbar_home") && it.isClickable }
+            if (back != null) clickNodeOrAncestor(back) else performGlobalAction(GLOBAL_ACTION_BACK)
+            awaitCondition(2000, 150) { findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") } == null }
+        }
+
+        if (waSearchHeaderNode() != null) {
+            Log.i("BENSON_AUDIO", "WA_SEARCH_HEADER state=visible")
+            return true
+        }
+        Log.i("BENSON_AUDIO", "WA_SEARCH_HEADER state=missing")
+
+        val list = waConversationsList()
+        if (list == null) {
+            Log.i("BENSON_AUDIO", "WA_CHAT_LIST_FOUND state=missing")
+            Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=no_recyclerview")
+            return false
+        }
+        Log.i("BENSON_AUDIO", "WA_CHAT_LIST_FOUND state=found vid=${list.viewIdResourceName ?: "-"}")
+
+        // waScrollChatsToTop() logs its own specific WA_SEARCH_NORMALIZE_FAIL reason on failure.
+        if (waScrollChatsToTop()) {
+            Log.i("BENSON_AUDIO", "WA_SEARCH_HEADER state=visible source=scrolled")
+            return true
+        }
+        return false
+    }
+
+    // Finds the search affordance, clicks it, and returns the VERIFIED search-input node once the
+    // search state is actually open — or null (with a WA_SEARCH_NORMALIZE_FAIL reason). Selector
+    // cascade aligned with the ACC-1 proven matcher (id set + non-clickable desc tier). Bounded
+    // re-click retry. No coordinate taps. Shared by runWhatsAppCallNative and the self-test.
+    private suspend fun openWhatsAppSearch(): AccessibilityNodeInfo? {
+        val searchNode = waitForNode(4000, 150, WA_PKG, "wa_search_affordance") { n ->
+            val vid = n.viewIdResourceName ?: ""
+            vid.endsWith("/search_bar_inner_layout") || vid.endsWith("/my_search_bar") ||
+                vid.endsWith("/menuitem_search") || vid.contains("search_bar")
+        } ?: waitForNode(2000, 150, WA_PKG, "wa_search_affordance_sem") { n ->
+            matchesAny(n, SEARCH_KEYWORDS) ||
+                (n.contentDescription?.toString()?.lowercase()?.let { it.contains("such") || it.contains("meta ai") } == true)
+        }
+        if (searchNode == null) { Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=affordance_absent_after_normalize"); return null }
+        Log.i("BENSON_AUDIO", "WA_SEARCH_CLICK viewId=${searchNode.viewIdResourceName?.substringAfterLast('/') ?: "-"} desc=\"${(searchNode.contentDescription ?: "").toString().take(32)}\"")
+
+        var input: AccessibilityNodeInfo? = null
+        for (attempt in 1..2) {
+            var clicked = false
+            for (a in 1..3) { if (clickNodeOrAncestor(searchNode)) { clicked = true; break }; delay(200) }
+            if (!clicked && attempt == 2) { Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=click_rejected"); return null }
+            input = waitForNode(3000, 120, WA_PKG, "wa_search_input") { n ->
+                val vid = n.viewIdResourceName ?: ""
+                vid.endsWith("/search_input") || vid.endsWith("/search_src_text")
+            } ?: waitForNode(1200, 120, WA_PKG, "wa_search_input_edit") { it.isEditable && isSearchUiNode(it) }
+              ?: waitForNode(800, 120, WA_PKG, "wa_search_input_any") { it.isEditable }
+            if (input != null) break
+            Log.i("BENSON_AUDIO", "WA_SEARCH_INPUT_READY state=retry attempt=$attempt")
+            delay(300)
+        }
+        if (input == null) { Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=search_state_not_open"); return null }
+        val focused = try { input.refresh(); input.isFocused } catch (_: Exception) { false }
+        Log.i("BENSON_AUDIO", "WA_SEARCH_INPUT_READY state=open viewId=${input.viewIdResourceName?.substringAfterLast('/') ?: "-"} focused=$focused")
+        return input
+    }
+
+    // WhatsApp conversation CONTACT IDENTITY — the header name TextView, and nothing else.
+    // ROUND_WA_HEADER_FIX_1 (2026-09-10): the old version also accepted
+    // `conversation_contact_status_holder` and fell back to "the first top-region TextView", so
+    // right after a `whatsapp://send` deep link — while `conversation_contact_name` is still
+    // binding — it returned the status / typing / "last seen" / message-preview line ("Du…").
+    // That is contact-identity poison: the direct-call verifier then compared "Du…" to the
+    // resolved name and refused a CORRECT conversation (ROUND_WA_HEADER_DIAG_1). A blank result
+    // (caller retries) is always better than a wrong one — so: read ONLY
+    // `com.whatsapp:id/conversation_contact_name`, no status node, no generic TextView fallback.
+    private fun conversationTitleText(): String? =
+        findNodeMatching { n ->
+            (n.viewIdResourceName ?: "").endsWith("/conversation_contact_name") && !n.text.isNullOrBlank()
+        }?.also { try { it.refresh() } catch (_: Exception) {} }
+            ?.text?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+    private fun setTextOn(node: AccessibilityNodeInfo, value: String): Boolean =
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, android.os.Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+        })
+
+    suspend fun runWhatsAppCallNative(contactRaw: String): WhatsAppCallNativeResult =
+        withContext(Dispatchers.Default) {
+            val contact = contactRaw.trim()
+            val t0 = System.currentTimeMillis()
+            fun ms() = System.currentTimeMillis() - t0
+            fun waLog(m: String) = Log.i("BENSON_AUDIO", m)
+            fun ok(step: String, verifiedHeaderText: String? = null, nameMatch: Boolean = false): WhatsAppCallNativeResult {
+                waLog("WA_NATIVE_END success=true step=$step elapsedMs=${ms()}")
+                return WhatsAppCallNativeResult(true, step, null, contact, ms(), verifiedHeaderText, nameMatch)
+            }
+            fun fail(step: String, reason: String): WhatsAppCallNativeResult {
+                waLog("WA_NATIVE_FAIL stage=$step reason=${reason.replace("\n", " ").take(200)}")
+                return WhatsAppCallNativeResult(false, step, reason, contact, ms())
+            }
+
+            waLog("WA_NATIVE_START contact=\"$contact\"")
+            waLog("WA_CALL_STATE state=CALL_STARTING contact=\"$contact\"")
+            if (contact.isEmpty()) return@withContext fail("VALIDATE", "empty contact")
+
+            whatsappAutomationActive = true
+            try {
+                // ── 1. LAUNCH ──────────────────────────────────────────────────────────────────
+                val launched = launchWhatsApp()
+                waLog("WA_NATIVE_LAUNCH ok=$launched")
+                if (!launched) return@withContext fail("LAUNCH", "getLaunchIntentForPackage/startActivity failed")
+
+                // ── 2. PACKAGE (overlay-aware, real check) ─────────────────────────────────────
+                var pkgOk = false; var pkgSrc = "none"; var winN = 0
+                run {
+                    val deadline = System.currentTimeMillis() + 6000
+                    while (System.currentTimeMillis() < deadline) {
+                        val (f, s, n) = foregroundIsPackage(WA_PKG)
+                        winN = n
+                        if (f) { pkgOk = true; pkgSrc = s; break }
+                        delay(200)
+                    }
+                }
+                waLog("WA_NATIVE_PACKAGE found=$pkgOk source=$pkgSrc windows=$winN")
+                if (!pkgOk) return@withContext fail("PACKAGE", "WhatsApp not foreground (source=$pkgSrc windows=$winN)")
+
+                // ── 3-6. SEARCH — WA-FIX-1: normalise the Chats list so the search header exists,
+                // then find + click + verify-open via the shared helpers. `search_bar_inner_layout`
+                // is a scroll-away RecyclerView row (ROUND_WA_DIAG_REPORT.md). Downstream steps
+                // (SET TEXT / contact match / call button / verify) are unchanged.
+                // Revert: WA_FIX1_NORMALIZE_SEARCH = false → the pre-2026-09-09 block (kept below).
+                val searchInput: AccessibilityNodeInfo
+                if (WA_FIX1_NORMALIZE_SEARCH) {
+                    if (!ensureWhatsAppChatsSearchAvailable()) {
+                        dumpScreenForDebug("wa_native_search_normalize")
+                        return@withContext fail("SEARCH_HEADER_NOT_RECOVERED", "WhatsApp Chats could not be normalised to expose com.whatsapp:id/search_bar_inner_layout")
+                    }
+                    searchInput = openWhatsAppSearch() ?: run {
+                        dumpScreenForDebug("wa_native_search")
+                        return@withContext fail("SEARCH_NOT_FOUND", "search affordance not found or search did not open after chat-list normalisation")
+                    }
+                } else {
+                    reachWhatsAppChatList()
+                    // ── 3-4. SEARCH — viewId search_bar_inner_layout first, then semantic ──────────
+                    val searchNode = waitForNode(4000, 150, WA_PKG, "wa_native_search") { n ->
+                        val vid = n.viewIdResourceName ?: ""
+                        vid.endsWith("/search_bar_inner_layout") || vid.endsWith("/menuitem_search")
+                    } ?: waitForNode(2000, 150, WA_PKG, "wa_native_search_sem") { n ->
+                        n.isClickable && (matchesAny(n, SEARCH_KEYWORDS) ||
+                            (n.contentDescription?.toString()?.lowercase()?.contains("such") == true))
+                    }
+                    if (searchNode == null) { dumpScreenForDebug("wa_native_search"); return@withContext fail("SEARCH_NOT_FOUND", "no search_bar_inner_layout / menuitem_search / semantic search node") }
+                    waLog("WA_NATIVE_SEARCH_FOUND viewId=${searchNode.viewIdResourceName ?: "-"} desc=\"${(searchNode.contentDescription ?: "").toString().take(40)}\"")
+                    // ── 5. SEARCH CLICK ──────────────────────────────────────────────────────────────
+                    var searchTap = false
+                    for (a in 1..3) { if (clickNodeOrAncestor(searchNode)) { searchTap = true; break }; delay(200) }
+                    waLog("WA_NATIVE_SEARCH_CLICK ok=$searchTap")
+                    if (!searchTap) return@withContext fail("SEARCH_CLICK", "ACTION_CLICK rejected on search node/ancestor")
+                    // ── 6. SEARCH VERIFY — search input appeared ──────────────────────────────────
+                    val si = waitForNode(3000, 120, WA_PKG, "wa_native_search_input") { n ->
+                        val vid = n.viewIdResourceName ?: ""
+                        vid.endsWith("/search_input") || vid.endsWith("/search_src_text")
+                    } ?: waitForNode(1500, 120, WA_PKG, "wa_native_search_edit") { it.isEditable && isSearchUiNode(it) }
+                      ?: waitForNode(1000, 120, WA_PKG, "wa_native_any_edit") { it.isEditable }
+                    waLog("WA_NATIVE_SEARCH_VERIFY ok=${si != null} viewId=${si?.viewIdResourceName ?: "-"}")
+                    if (si == null) { dumpScreenForDebug("wa_native_search_open"); return@withContext fail("SEARCH_NOT_OPEN", "search input did not appear after tapping search") }
+                    searchInput = si
+                }
+
+                // ── 7. SET TEXT — exact contact from the mission ──────────────────────────────
+                val setOk = setTextOn(searchInput, contact)
+                waLog("WA_NATIVE_SET_TEXT ok=$setOk text=\"$contact\"")
+                if (!setOk) return@withContext fail("SET_TEXT", "ACTION_SET_TEXT rejected")
+
+                // ── 8. VERIFY TEXT — input reflects the contact ──────────────────────────────
+                val textOk = awaitCondition(2500, 150) {
+                    searchInput.refresh()
+                    val cur = searchInput.text?.toString()?.trim().orEmpty()
+                    cur.equals(contact, true) || normPhon(cur) == normPhon(contact) || cur.contains(contact, true)
+                }
+                waLog("WA_NATIVE_SET_TEXT_VERIFY ok=$textOk cur=\"${searchInput.text?.toString()?.take(40) ?: ""}\"")
+                if (!textOk) return@withContext fail("TEXT_MISMATCH", "search input did not reflect \"$contact\"")
+
+                // ── 9-10. CONTACT MATCH — full name first, 3-char prefix fallback ────────────
+                val rowFilter: (AccessibilityNodeInfo) -> Boolean = {
+                    !it.isEditable && !isSearchUiNode(it) && !isAvatarNode(it) && !isRecentSuggestionNode(it)
+                }
+                var matchTier = ""
+                fun rowPredicate(n: AccessibilityNodeInfo): Boolean {
+                    if (!rowFilter(n)) return false
+                    val lbl = nodeLabel(n)
+                    if (lbl.isBlank()) return false
+                    return when {
+                        normPhon(lbl) == normPhon(contact) -> { matchTier = "exact"; true }
+                        wholeLabelPhoneticEquals(lbl, contact) -> { matchTier = "normalized"; true }
+                        phoneticNameMatch(lbl, contact) -> { matchTier = "phonetic"; true }
+                        else -> false
+                    }
+                }
+                var row = waitForNode(5000, 150, WA_PKG, "wa_native_row") { rowPredicate(it) }
+                if (row == null) {
+                    val prefix = normPhon(contact).take(3).ifEmpty { contact.take(3) }
+                    waLog("WA_NATIVE_SET_TEXT retry=1 text=\"$prefix\"")
+                    val si = waitForNode(2000, 150, WA_PKG, "wa_native_input_retry") {
+                        (it.viewIdResourceName ?: "").endsWith("/search_input") || (it.isEditable && isSearchUiNode(it))
+                    } ?: searchInput
+                    setTextOn(si, prefix)
+                    delay(500)
+                    row = waitForNode(4000, 150, WA_PKG, "wa_native_row_retry") { rowPredicate(it) }
+                }
+                if (row == null) { dumpScreenForDebug("wa_native_contact"); return@withContext fail("CONTACT_NOT_FOUND", "no result row phonetically matched \"$contact\"") }
+                waLog("WA_NATIVE_CONTACT_MATCH tier=$matchTier label=\"${nodeLabel(row).take(40)}\"")
+
+                // ── 10. CONTACT CLICK — re-resolve FRESH before each attempt ─────────────────
+                var contactClicked = false
+                for (attempt in 1..3) {
+                    val fresh = waitForNode(900, 150, WA_PKG, "wa_native_row_fresh") { n ->
+                        rowFilter(n) && (wholeLabelPhoneticEquals(nodeLabel(n), contact) ||
+                            phoneticNameMatch(nodeLabel(n), contact) || normPhon(nodeLabel(n)) == normPhon(contact))
+                    } ?: row
+                    if (clickNodeOrAncestor(fresh)) { contactClicked = true; break }
+                    delay(250)
+                }
+                waLog("WA_NATIVE_CONTACT_CLICK ok=$contactClicked")
+                if (!contactClicked) return@withContext fail("CONTACT_CLICK", "ACTION_CLICK rejected on result row after 3 attempts")
+
+                // ── 11. CHAT VERIFY — chat open + header IS the requested contact ────────────
+                val entry = waitForNode(3500, 150, WA_PKG, "wa_native_entry") { (it.viewIdResourceName ?: "").endsWith("/entry") }
+                if (entry == null) { dumpScreenForDebug("wa_native_chat"); return@withContext fail("CHAT_NOT_OPEN", "compose field (id/entry) not present after selecting contact") }
+                var header: String? = null
+                awaitCondition(2500, 150) { header = conversationTitleText(); !header.isNullOrBlank() }
+                val headerMatch = !header.isNullOrBlank() && (
+                    normPhon(header!!) == normPhon(contact) ||
+                    wholeLabelPhoneticEquals(header!!, contact) ||
+                    phoneticNameMatch(header!!, contact))
+                waLog("WA_NATIVE_CHAT_VERIFY ok=$headerMatch header=\"${(header ?: "?").take(40)}\"")
+                if (header.isNullOrBlank()) return@withContext fail("CHAT_VERIFY", "conversation header not readable")
+                if (!headerMatch) return@withContext fail("CHAT_WRONG_CONTACT", "chat header \"$header\" != \"$contact\" — not calling")
+
+                // ── 12. CALL BUTTON — viewId → contentDescription → semantic (voice, not video) ─
+                val maxTop = headerRegionMaxTop()
+                val callNode = waitForNode(3000, 150, WA_PKG, "wa_native_call_id") { n ->
+                    val vid = n.viewIdResourceName ?: ""
+                    (vid.endsWith("/menuitem_call") || vid.endsWith("/voip_call")) && !vid.contains("video")
+                } ?: waitForNode(1800, 150, WA_PKG, "wa_native_call_desc") { n ->
+                    val b = Rect(); n.getBoundsInScreen(b)
+                    val d = n.contentDescription?.toString()?.lowercase() ?: ""
+                    n.isClickable && b.top <= maxTop && d.isNotEmpty() && d != "video" &&
+                        (d.contains("sprachanruf") || d.contains("voice call") || d.contains("apel vocal") || d.contains("anrufen")) &&
+                        !d.contains("video")
+                } ?: waitForNode(1500, 150, WA_PKG, "wa_native_call_sem") { n ->
+                    val b = Rect(); n.getBoundsInScreen(b)
+                    n.isClickable && b.top <= maxTop && matchesAny(n, CALL_KEYWORDS) && !matchesAny(n, VIDEO_EXCLUDE_KEYWORDS)
+                }
+                if (callNode == null) { dumpScreenForDebug("wa_native_call"); return@withContext fail("CALL_NOT_FOUND", "voice-call button not found (viewId/contentDesc/semantic all missed)") }
+                if (isPaymentSensitive(callNode)) return@withContext fail("CALL_BLOCKED", "call node matched payment-sensitive pattern")
+                waLog("WA_NATIVE_CALL_FOUND viewId=${callNode.viewIdResourceName ?: "-"} desc=\"${(callNode.contentDescription ?: "").toString().take(40)}\"")
+
+                // ── 13. CALL CLICK ─────────────────────────────────────────────────────────────
+                var callClicked = false
+                for (a in 1..2) { if (clickNodeOrAncestor(callNode)) { callClicked = true; break }; delay(250) }
+                waLog("WA_NATIVE_CALL_CLICK ok=$callClicked")
+                if (!callClicked) return@withContext fail("CALL_CLICK", "ACTION_CLICK rejected on call button")
+
+                // ── 14. CALL VERIFY — WhatsApp call screen up + correct contact ─────────────
+                delay(1500)
+                var callScreen = false; var callName: String? = null
+                run {
+                    val deadline = System.currentTimeMillis() + 7000
+                    while (System.currentTimeMillis() < deadline) {
+                        val screen = findNodeMatching { n ->
+                            val vid = n.viewIdResourceName ?: ""
+                            vid.endsWith("/call_screen") || vid.endsWith("/end_call_button") ||
+                                vid.endsWith("/audio_route_button") || vid.endsWith("/call_screen_header_view") ||
+                                vid.contains("voip_") || vid.endsWith("/call_controls_card")
+                        }
+                        if (screen != null) {
+                            callScreen = true
+                            callName = findNodeMatching { n ->
+                                val vid = n.viewIdResourceName ?: ""
+                                (vid.endsWith("/name") || vid.endsWith("/title") || vid.endsWith("/contact_name") ||
+                                    vid.endsWith("/call_screen_contact_name") || vid.endsWith("/subtitle")) &&
+                                    !n.text.isNullOrBlank() && (n.text!!.length in 1..40)
+                            }?.text?.toString()?.trim()
+                            break
+                        }
+                        delay(250)
+                    }
+                }
+                val nameOk = callName.isNullOrBlank() || normPhon(callName!!) == normPhon(contact) ||
+                    wholeLabelPhoneticEquals(callName!!, contact) || phoneticNameMatch(callName!!, contact)
+                val verifyOk = callScreen && nameOk
+                // ROUND_VERIFIED_IDENTITY_BRIDGE_1 — nameOk is also true when callName is blank
+                // (lenient pass-through, not a real read) — only bridge the identity when a real
+                // header text was actually read AND phonetically matched.
+                val identityVerified = !callName.isNullOrBlank() && nameOk
+                waLog("WA_NATIVE_CALL_VERIFY success=$verifyOk screen=$callScreen name=\"${callName ?: "?"}\" nameMatch=$nameOk")
+                if (!callScreen) return@withContext fail("CALL_NOT_STARTED", "WhatsApp call screen did not appear after tapping call")
+                if (!nameOk) return@withContext fail("CALL_WRONG_CONTACT", "call screen shows \"$callName\" not \"$contact\"")
+
+                // WA-NATIVE post-call rule (2026-09-08, product-owner-directed): the WhatsApp call is
+                // now verified LIVE on screen. From this point the executor performs ZERO further UI
+                // actions on WhatsApp — no ACTION_CLICK, no performGlobalAction(BACK/HOME), no re-tap,
+                // no retry, no UI cleanup. It returns immediately below. BENSON's own Activity stays
+                // in the background; the call keeps running until the user or the other party ends it.
+                //
+                // Two detached tasks run on serviceScope (survive BENSON being backgrounded):
+                //  - the mic/audio hold flag, so BENSON's conversation-mode / wake STT loop does NOT
+                //    re-acquire the mic + audio focus mid-call (that was dropping the call). The
+                //    180s is only a failsafe — the lifecycle watcher clears it the instant it
+                //    structurally confirms the call ended.
+                //  - watchWhatsAppCallLifecycle(): STRUCTURAL, debounced call-end detection, then
+                //    release the hold and fire an explicit Intent back to BENSON's MainActivity
+                //    (AUTO-RETURN-AFTER-CALL). No BACK/HOME/gesture/click.
+                whatsappCallMicHoldUntilMs = System.currentTimeMillis() + 180_000L
+                Log.i("BENSON_AUDIO", "WA_NATIVE_POST_CALL_ACTION action=mic_hold_armed holdMs=180000")
+                Log.i("BENSON_AUDIO", "WA_CALL_AUDIO_HOLD state=armed holdMs=180000")
+                // WA-LIFECYCLE-FIX-1 — persist BEFORE relying on the serviceScope watcher, so a
+                // service death mid-call is recoverable on the next onServiceConnected.
+                try { waCallPersistState(this@BensonAccessibilityService, WA_CALL_STATE_ACTIVE, contact) } catch (_: Exception) {}
+                val verifiedAt = System.currentTimeMillis()
+                val obsContact = contact
+                serviceScope.launch { watchWhatsAppCallLifecycle(obsContact, verifiedAt) }
+
+                return@withContext ok("CALL_VERIFIED", verifiedHeaderText = if (identityVerified) callName else null, nameMatch = identityVerified)
+            } catch (e: Exception) {
+                return@withContext fail("EXCEPTION", "${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                whatsappAutomationActive = false
+            }
+        }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // WA-FIX-4 (2026-09-09) — DIRECT-CONTACT-DEEPLINK call route (ROUND_WA_ROUTE_DIAG_REPORT.md).
+    //
+    // JS has already resolved the spoken name to a phone number from the local address book. This
+    // opens the exact conversation via `whatsapp://send?phone=<digits>` (handler
+    // com.whatsapp/.TextAndDirectChatDeepLink, verified on device) — NO Chats list, NO scroll, NO
+    // search_bar_inner_layout — then verifies the conversation is the expected contact and reuses
+    // the proven call-button + call-screen-verify + post-call mic-hold sequence.
+    //
+    // Steps 11–14 + the post-call hold below MIRROR runWhatsAppCallNative (device-proven 2026-09-08,
+    // RUNs 1/2/6/9). Kept as a parallel copy on purpose — the proven runWhatsAppCallNative is not
+    // refactored. Keep the two in sync; do not share-refactor without a 5/5 device pass.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    suspend fun runWhatsAppOpenConversationCall(phoneRaw: String, expectedNameRaw: String): WhatsAppCallNativeResult =
+        withContext(Dispatchers.Default) {
+            val phone = phoneRaw.filter { it.isDigit() }
+            val contact = expectedNameRaw.trim()
+            val t0 = System.currentTimeMillis()
+            fun ms() = System.currentTimeMillis() - t0
+            fun waLog(m: String) = Log.i("BENSON_AUDIO", m)
+            fun mask(p: String) = if (p.length <= 4) "****" else "***" + p.takeLast(4)
+            fun ok(step: String, verifiedHeaderText: String? = null, nameMatch: Boolean = false): WhatsAppCallNativeResult {
+                waLog("WA_DIRECT_END success=true step=$step elapsedMs=${ms()}")
+                return WhatsAppCallNativeResult(true, step, null, contact, ms(), verifiedHeaderText, nameMatch)
+            }
+            fun fail(step: String, reason: String): WhatsAppCallNativeResult {
+                waLog("WA_DIRECT_FAIL stage=$step reason=${reason.replace("\n", " ").take(200)}")
+                return WhatsAppCallNativeResult(false, step, reason, contact, ms())
+            }
+
+            waLog("WA_DIRECT_START phone=${mask(phone)} name=\"$contact\"")
+            waLog("WA_CALL_STATE state=CALL_STARTING contact=\"$contact\"")
+            if (phone.length < 6) return@withContext fail("WHATSAPP_DEEPLINK_FAILED", "phone too short after normalisation")
+
+            whatsappAutomationActive = true
+            try {
+                // ── 1. DEEP LINK — exact conversation, no UI navigation ────────────────────────
+                waLog("WA_DIRECT_DEEPLINK_START")
+                val launched = try {
+                    val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("whatsapp://send?phone=$phone")).apply {
+                        setPackage(WA_PKG)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(i); true
+                } catch (e: Exception) {
+                    waLog("WA_DIRECT_DEEPLINK_EXC ${e.javaClass.simpleName}: ${e.message}"); false
+                }
+                waLog("WA_DIRECT_DEEPLINK_RESULT launched=$launched")
+                if (!launched) return@withContext fail("WHATSAPP_DEEPLINK_FAILED", "startActivity(whatsapp://send) failed")
+
+                // ── 2. WAIT — WhatsApp reacquired as the environment target (RUNTIME LAYER v1:
+                // a notification / SystemUI overlay / IME popping right after the deep link is a
+                // TEMPORARY_INTERRUPTION, not a launch failure) ───────────────────────────────
+                val pkgOk = foregroundIsPackage(WA_PKG).first || awaitTargetReacquired(WA_PKG, 8000L)
+                if (!pkgOk) return@withContext fail("WHATSAPP_DEEPLINK_FAILED", "WhatsApp did not reach the foreground after the deep link")
+                val entry = waitForNode(9000, 200, WA_PKG, "wa_direct_entry") { (it.viewIdResourceName ?: "").endsWith("/entry") }
+                if (entry == null) {
+                    dumpScreenForDebug("wa_direct_no_conversation")
+                    return@withContext fail("WHATSAPP_CONTACT_VERIFY_FAILED", "no conversation opened (id/entry absent) — number may not be on WhatsApp")
+                }
+
+                // ── 3. VERIFY the conversation IS the expected contact ────────────────────────
+                // ROUND_WA_HEADER_FIX_1 — `conversation_contact_name` binds a beat after a
+                // whatsapp://send deep link. Poll it for up to 6s, re-reading each pass; break the
+                // instant the name OR the digit criterion matches. conversationTitleText() now
+                // returns ONLY the name node (never status/preview), so a non-blank result here is
+                // always a real identity candidate. No match after 6s → DO NOT CALL.
+                var h = ""
+                var nameMatch = false
+                var digitsMatch = false
+                var nameAppearedMs = -1L
+                val vStart = System.currentTimeMillis()
+                run {
+                    val deadline = vStart + 6000
+                    while (System.currentTimeMillis() < deadline) {
+                        val cur = conversationTitleText()?.trim().orEmpty()
+                        if (cur.isNotBlank()) {
+                            if (nameAppearedMs < 0) nameAppearedMs = System.currentTimeMillis() - vStart
+                            h = cur
+                            nameMatch = contact.isNotEmpty() && (
+                                normPhon(h) == normPhon(contact) ||
+                                    wholeLabelPhoneticEquals(h, contact) ||
+                                    phoneticNameMatch(h, contact))
+                            val hd = h.filter { it.isDigit() }
+                            digitsMatch = hd.length >= 6 &&
+                                (phone.endsWith(hd.takeLast(9)) || hd.endsWith(phone.takeLast(9)))
+                            if (nameMatch || digitsMatch) break
+                        }
+                        delay(150)
+                    }
+                }
+                val verified = nameMatch || digitsMatch
+                waLog("WA_DIRECT_CONVERSATION_VERIFY status=${if (verified) "verified" else "failed"} header=\"${h.take(40)}\" nameAppearedMs=$nameAppearedMs nameMatch=$nameMatch digitsMatch=$digitsMatch elapsedMs=${System.currentTimeMillis() - vStart}")
+                if (!verified) {
+                    dumpScreenForDebug("wa_direct_verify")
+                    return@withContext fail(
+                        "WHATSAPP_CONTACT_VERIFY_FAILED",
+                        if (h.isBlank()) "conversation_contact_name never rendered within 6s"
+                        else "conversation header \"$h\" does not match \"$contact\"",
+                    )
+                }
+
+                // ── 4. CALL BUTTON — MIRRORS runWhatsAppCallNative step 12 ────────────────────
+                waLog("WA_DIRECT_CALL_BUTTON")
+                val maxTop = headerRegionMaxTop()
+                val callNode = waitForNode(3000, 150, WA_PKG, "wa_direct_call_id") { n ->
+                    val vid = n.viewIdResourceName ?: ""
+                    (vid.endsWith("/menuitem_call") || vid.endsWith("/voip_call")) && !vid.contains("video")
+                } ?: waitForNode(1800, 150, WA_PKG, "wa_direct_call_desc") { n ->
+                    val b = Rect(); n.getBoundsInScreen(b)
+                    val d = n.contentDescription?.toString()?.lowercase() ?: ""
+                    n.isClickable && b.top <= maxTop && d.isNotEmpty() && d != "video" &&
+                        (d.contains("sprachanruf") || d.contains("voice call") || d.contains("apel vocal") || d.contains("anrufen")) &&
+                        !d.contains("video")
+                } ?: waitForNode(1500, 150, WA_PKG, "wa_direct_call_sem") { n ->
+                    val b = Rect(); n.getBoundsInScreen(b)
+                    n.isClickable && b.top <= maxTop && matchesAny(n, CALL_KEYWORDS) && !matchesAny(n, VIDEO_EXCLUDE_KEYWORDS)
+                }
+                if (callNode == null) { dumpScreenForDebug("wa_direct_call"); return@withContext fail("CALL_BUTTON_NOT_FOUND", "voice-call button not found in the verified conversation") }
+                if (isPaymentSensitive(callNode)) return@withContext fail("CALL_BUTTON_NOT_FOUND", "call node matched payment-sensitive pattern")
+
+                var callClicked = false
+                for (a in 1..2) { if (clickNodeOrAncestor(callNode)) { callClicked = true; break }; delay(250) }
+                waLog("WA_DIRECT_CALL_CLICK ok=$callClicked")
+                if (!callClicked) return@withContext fail("CALL_START_FAILED", "ACTION_CLICK rejected on call button")
+
+                // ── 5. CALL VERIFY — MIRRORS runWhatsAppCallNative step 14 ───────────────────
+                delay(1500)
+                var callScreen = false; var callName: String? = null
+                run {
+                    val deadline = System.currentTimeMillis() + 7000
+                    while (System.currentTimeMillis() < deadline) {
+                        val screen = findNodeMatching { n ->
+                            val vid = n.viewIdResourceName ?: ""
+                            vid.endsWith("/call_screen") || vid.endsWith("/end_call_button") ||
+                                vid.endsWith("/audio_route_button") || vid.endsWith("/call_screen_header_view") ||
+                                vid.contains("voip_") || vid.endsWith("/call_controls_card")
+                        }
+                        if (screen != null) {
+                            callScreen = true
+                            callName = findNodeMatching { n ->
+                                val vid = n.viewIdResourceName ?: ""
+                                (vid.endsWith("/name") || vid.endsWith("/title") || vid.endsWith("/contact_name") ||
+                                    vid.endsWith("/call_screen_contact_name") || vid.endsWith("/subtitle")) &&
+                                    !n.text.isNullOrBlank() && (n.text!!.length in 1..40)
+                            }?.text?.toString()?.trim()
+                            break
+                        }
+                        delay(250)
+                    }
+                }
+                val nameOk = callName.isNullOrBlank() || normPhon(callName!!) == normPhon(contact) ||
+                    wholeLabelPhoneticEquals(callName!!, contact) || phoneticNameMatch(callName!!, contact)
+                val verifyOk = callScreen && nameOk
+                waLog("WA_DIRECT_CALL_VERIFY success=$verifyOk screen=$callScreen name=\"${callName ?: "?"}\" nameMatch=$nameOk")
+                // ROUND_VERIFIED_IDENTITY_BRIDGE_1 — the earlier chat-header check (h/nameMatch,
+                // WA_DIRECT_CONVERSATION_VERIFY, above) is the reliable "real header text was read"
+                // signal for this function — the call-screen's own callName can be blank yet still
+                // pass nameOk's lenient OR.
+                if (!callScreen) return@withContext fail("CALL_VERIFY_FAILED", "WhatsApp call screen did not appear after tapping call")
+                if (!nameOk) return@withContext fail("CALL_VERIFY_FAILED", "call screen shows \"$callName\" not \"$contact\"")
+
+                // ── 6. POST-CALL — MIRRORS runWhatsAppCallNative: arm mic-hold + lifecycle watcher ─
+                whatsappCallMicHoldUntilMs = System.currentTimeMillis() + 180_000L
+                Log.i("BENSON_AUDIO", "WA_NATIVE_POST_CALL_ACTION action=mic_hold_armed holdMs=180000")
+                Log.i("BENSON_AUDIO", "WA_CALL_AUDIO_HOLD state=armed holdMs=180000")
+                // WA-LIFECYCLE-FIX-1 — persist BEFORE relying on the serviceScope watcher, so a
+                // service death mid-call is recoverable on the next onServiceConnected.
+                try { waCallPersistState(this@BensonAccessibilityService, WA_CALL_STATE_ACTIVE, contact) } catch (_: Exception) {}
+                val verifiedAt = System.currentTimeMillis()
+                val obsContact = contact
+                serviceScope.launch { watchWhatsAppCallLifecycle(obsContact, verifiedAt) }
+
+                return@withContext ok("CALL_VERIFIED", verifiedHeaderText = if (nameMatch) h else null, nameMatch = nameMatch)
+            } catch (e: Exception) {
+                return@withContext fail("EXCEPTION", "${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                whatsappAutomationActive = false
+            }
+        }
+
+    // ── ROUND_WA_GOVERNANCE_WRITE_1 — PHASE A ────────────────────────────────────────────────────
+    // RESOLVE_CONTACT (JS) → OPEN_CHAT → VERIFY_CHAT → FIND_MESSAGE_INPUT → TYPE_MESSAGE →
+    // VERIFY_TYPED_TEXT → WAIT_CONFIRMATION. STOPS before send. Reuses the verified
+    // whatsapp://send?phone= direct-chat route + the WA-HEADER-FIX-1 identity poll — copied inline
+    // (not shared) so the proven placeCall path stays byte-identical. Idempotent per missionId:
+    // refuses to re-open/retype a mission that already reached SEND.
+    suspend fun runWhatsAppOpenConversationType(
+        phoneRaw: String, expectedNameRaw: String, messageRaw: String, missionId: String,
+    ): WhatsAppCallNativeResult = withContext(Dispatchers.Default) {
+        val phone = phoneRaw.filter { it.isDigit() }
+        val contact = expectedNameRaw.trim()
+        val message = messageRaw
+        val want = message.trim()
+        val t0 = System.currentTimeMillis()
+        fun ms() = System.currentTimeMillis() - t0
+        fun waLog(m: String) = Log.i("BENSON_AUDIO", m)
+        fun mask(p: String) = if (p.length <= 4) "****" else "***" + p.takeLast(4)
+        fun ok(step: String, verifiedHeaderText: String? = null, nameMatch: Boolean = false): WhatsAppCallNativeResult {
+            waLog("WA_WRITE_END success=true step=$step elapsedMs=${ms()}")
+            return WhatsAppCallNativeResult(true, step, null, contact, ms(), verifiedHeaderText, nameMatch)
+        }
+        fun fail(step: String, reason: String): WhatsAppCallNativeResult {
+            waLog("WA_WRITE_FAIL stage=$step reason=${reason.replace("\n", " ").take(200)}")
+            return WhatsAppCallNativeResult(false, step, reason, contact, ms())
+        }
+
+        waLog("WA_WRITE_START mission=$missionId phone=${mask(phone)} name=\"$contact\" msgLen=${want.length}")
+        if (missionId.isBlank()) return@withContext fail("RESOLVE_CONTACT", "missing mission id")
+        if (phone.length < 6) return@withContext fail("RESOLVE_CONTACT", "phone too short after normalisation")
+        if (want.isBlank()) return@withContext fail("TYPE_MESSAGE", "empty message")
+
+        // Idempotency across recovery / re-entry — never type twice for one mission.
+        val prior = waWriteRead(this@BensonAccessibilityService)
+        if (prior.missionId == missionId) {
+            when (prior.state) {
+                WA_WRITE_SEND_ATTEMPTED, WA_WRITE_SENT_VERIFIED ->
+                    return@withContext fail("TYPE_MESSAGE", "mission $missionId already at ${prior.state} — refusing to retype")
+                WA_WRITE_TYPED_VERIFIED, WA_WRITE_WAITING_CONFIRMATION ->
+                    if (prior.msgHash == want.hashCode()) {
+                        waLog("WA_WRITE_TEXT_TYPED ok=true note=idempotent_reentry")
+                        waLog("WA_WRITE_TEXT_VERIFIED ok=true note=idempotent_reentry")
+                        waWritePersist(this@BensonAccessibilityService, missionId, WA_WRITE_WAITING_CONFIRMATION, want.hashCode())
+                        waLog("WA_WRITE_WAIT_CONFIRMATION mission=$missionId note=idempotent_reentry")
+                        return@withContext ok("TYPED_VERIFIED")
+                    }
+                else -> {}
+            }
+        }
+
+        whatsappAutomationActive = true
+        try {
+            // 1. OPEN_CHAT — the verified direct-chat route, explicit com.whatsapp
+            waLog("WA_WRITE_DEEPLINK_START")
+            val launched = try {
+                val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("whatsapp://send?phone=$phone")).apply {
+                    setPackage(WA_PKG); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(i); true
+            } catch (e: Exception) {
+                waLog("WA_WRITE_DEEPLINK_EXC ${e.javaClass.simpleName}: ${e.message}"); false
+            }
+            if (!launched) return@withContext fail("OPEN_CHAT", "startActivity(whatsapp://send) failed")
+
+            val pkgOk = foregroundIsPackage(WA_PKG).first || awaitTargetReacquired(WA_PKG, 8000L)
+            if (!pkgOk) return@withContext fail("OPEN_CHAT", "WhatsApp did not reach the foreground after the deep link")
+            val entry0 = waitForNode(9000, 200, WA_PKG, "wa_write_entry") { (it.viewIdResourceName ?: "").endsWith("/entry") }
+            if (entry0 == null) {
+                dumpScreenForDebug("wa_write_no_conversation")
+                return@withContext fail("OPEN_CHAT", "no conversation opened (id/entry absent) — number may not be on WhatsApp")
+            }
+
+            // 2. VERIFY_CHAT — identity BEFORE typing (mirrors WA-HEADER-FIX-1)
+            var h = ""; var nameMatch = false; var digitsMatch = false; var nameAppearedMs = -1L
+            val vStart = System.currentTimeMillis()
+            run {
+                val deadline = vStart + 6000
+                while (System.currentTimeMillis() < deadline) {
+                    val cur = conversationTitleText()?.trim().orEmpty()
+                    if (cur.isNotBlank()) {
+                        if (nameAppearedMs < 0) nameAppearedMs = System.currentTimeMillis() - vStart
+                        h = cur
+                        nameMatch = contact.isNotEmpty() && (
+                            normPhon(h) == normPhon(contact) ||
+                                wholeLabelPhoneticEquals(h, contact) ||
+                                phoneticNameMatch(h, contact))
+                        val hd = h.filter { it.isDigit() }
+                        digitsMatch = hd.length >= 6 &&
+                            (phone.endsWith(hd.takeLast(9)) || hd.endsWith(phone.takeLast(9)))
+                        if (nameMatch || digitsMatch) break
+                    }
+                    delay(150)
+                }
+            }
+            val verified = nameMatch || digitsMatch
+            waLog("WA_WRITE_CHAT_VERIFIED status=${if (verified) "verified" else "failed"} header=\"${h.take(40)}\" nameAppearedMs=$nameAppearedMs nameMatch=$nameMatch digitsMatch=$digitsMatch elapsedMs=${System.currentTimeMillis() - vStart}")
+            if (!verified) {
+                dumpScreenForDebug("wa_write_verify")
+                return@withContext fail(
+                    "VERIFY_CHAT",
+                    if (h.isBlank()) "conversation_contact_name never rendered within 6s"
+                    else "conversation header \"$h\" does not match \"$contact\"",
+                )
+            }
+
+            // 3. FIND_MESSAGE_INPUT — stable view-id only, never coordinates
+            val input = waitForNode(4000, 150, WA_PKG, "wa_write_input") { n ->
+                (n.viewIdResourceName ?: "").endsWith("/entry") && n.isEditable
+            } ?: waitForNode(1500, 150, WA_PKG, "wa_write_input_any") {
+                it.isEditable && (it.viewIdResourceName ?: "").endsWith("/entry")
+            }
+            if (input == null) {
+                dumpScreenForDebug("wa_write_no_input")
+                return@withContext fail("FIND_MESSAGE_INPUT", "compose field com.whatsapp:id/entry not found")
+            }
+            waLog("WA_WRITE_INPUT_FOUND viewId=${input.viewIdResourceName}")
+
+            // 4. TYPE_MESSAGE — exact text, one ACTION_SET_TEXT
+            val setOk = setTextOn(input, message)
+            waLog("WA_WRITE_TEXT_TYPED ok=$setOk")
+            if (!setOk) {
+                dumpScreenForDebug("wa_write_settext_failed")
+                return@withContext fail("TYPE_MESSAGE", "ACTION_SET_TEXT rejected on compose field")
+            }
+
+            // 5. VERIFY_TYPED_TEXT — read the field back, exact match
+            var typedBack = ""
+            run {
+                val deadline = System.currentTimeMillis() + 2500
+                while (System.currentTimeMillis() < deadline) {
+                    val n = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") && it.isEditable }
+                        ?.also { try { it.refresh() } catch (_: Exception) {} }
+                    typedBack = n?.text?.toString()?.trim().orEmpty()
+                    if (typedBack == want) break
+                    delay(150)
+                }
+            }
+            val textOk = typedBack == want
+            waLog("WA_WRITE_TEXT_VERIFIED ok=$textOk fieldLen=${typedBack.length} wantLen=${want.length}")
+            if (!textOk) {
+                dumpScreenForDebug("wa_write_text_mismatch")
+                return@withContext fail("VERIFY_TYPED_TEXT", "compose field shows \"${typedBack.take(60)}\" not the requested message")
+            }
+
+            // typed & verified — persist, STOP. SEND is a separate, explicitly-confirmed call.
+            waWritePersist(this@BensonAccessibilityService, missionId, WA_WRITE_TYPED_VERIFIED, want.hashCode())
+            waLog("WA_WRITE_WAIT_CONFIRMATION mission=$missionId")
+            waWritePersist(this@BensonAccessibilityService, missionId, WA_WRITE_WAITING_CONFIRMATION, want.hashCode())
+            return@withContext ok("TYPED_VERIFIED", verifiedHeaderText = if (nameMatch) h else null, nameMatch = nameMatch)
+        } catch (e: Exception) {
+            return@withContext fail("EXCEPTION", "${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            whatsappAutomationActive = false
+        }
+    }
+
+    // ── ROUND_WA_GOVERNANCE_WRITE_1 — PHASE B ────────────────────────────────────────────────────
+    // Called ONLY after an explicit YES. Presses Send at most once per missionId, then verifies
+    // the exact outgoing message appears in the transcript. SEND_ATTEMPTED is persisted before the
+    // tap: an interruption after it re-VERIFIES only, never re-presses.
+    suspend fun pressWhatsAppSendVerified(missionId: String, messageRaw: String): WhatsAppCallNativeResult =
+        withContext(Dispatchers.Default) {
+            val want = messageRaw.trim()
+            val t0 = System.currentTimeMillis()
+            fun ms() = System.currentTimeMillis() - t0
+            fun waLog(m: String) = Log.i("BENSON_AUDIO", m)
+            fun ok(step: String): WhatsAppCallNativeResult {
+                waLog("WA_WRITE_END success=true step=$step elapsedMs=${ms()}")
+                return WhatsAppCallNativeResult(true, step, null, "", ms())
+            }
+            fun fail(step: String, reason: String): WhatsAppCallNativeResult {
+                waLog("WA_WRITE_FAIL stage=$step reason=${reason.replace("\n", " ").take(200)}")
+                return WhatsAppCallNativeResult(false, step, reason, "", ms())
+            }
+
+            val rec = waWriteRead(this@BensonAccessibilityService)
+            waLog("WA_WRITE_SEND_ENTER mission=$missionId priorMission=${rec.missionId} priorState=${rec.state}")
+
+            if (missionId.isBlank() || rec.missionId != missionId) {
+                return@withContext fail("SEND_ON_YES", "no typed-and-verified message for mission $missionId (have ${rec.missionId}/${rec.state})")
+            }
+            if (rec.state == WA_WRITE_SENT_VERIFIED) {
+                waLog("WA_WRITE_SENT_VERIFIED mission=$missionId note=already_sent")
+                return@withContext ok("SENT_VERIFIED")
+            }
+            if (rec.state == WA_WRITE_SEND_ATTEMPTED) {
+                val present = whatsAppOutgoingMessagePresent(want)
+                return@withContext if (present) {
+                    waWritePersist(this@BensonAccessibilityService, missionId, WA_WRITE_SENT_VERIFIED, want.hashCode())
+                    waLog("WA_WRITE_SENT_VERIFIED mission=$missionId note=verified_on_recovery")
+                    ok("SENT_VERIFIED")
+                } else {
+                    fail("SEND_ON_YES", "send already attempted for mission $missionId but outgoing message not verified — not re-pressing")
+                }
+            }
+            if (rec.state != WA_WRITE_TYPED_VERIFIED && rec.state != WA_WRITE_WAITING_CONFIRMATION) {
+                return@withContext fail("SEND_ON_YES", "mission $missionId in state ${rec.state}, expected TYPED_VERIFIED / WAITING_CONFIRMATION")
+            }
+            if (rec.msgHash != want.hashCode()) {
+                return@withContext fail("SEND_ON_YES", "message changed since it was typed & verified")
+            }
+
+            whatsappAutomationActive = true
+            try {
+                val fgOk = foregroundIsPackage(WA_PKG).first || awaitTargetReacquired(WA_PKG, 6000L)
+                if (!fgOk) return@withContext fail("SEND_ON_YES", "WhatsApp is not foreground")
+
+                val field = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") && it.isEditable }
+                    ?.also { try { it.refresh() } catch (_: Exception) {} }
+                val fieldText = field?.text?.toString()?.trim().orEmpty()
+                if (fieldText != want) {
+                    dumpScreenForDebug("wa_write_send_field_drift")
+                    return@withContext fail("SEND_ON_YES", "compose field no longer holds the verified message (\"${fieldText.take(40)}\")")
+                }
+
+                // mark SEND_ATTEMPTED BEFORE the tap — a crash after this can only re-verify
+                waWritePersist(this@BensonAccessibilityService, missionId, WA_WRITE_SEND_ATTEMPTED, want.hashCode())
+                waLog("WA_WRITE_SEND_ATTEMPT mission=$missionId")
+
+                val sendNode = waitForNode(3000, 150, WA_PKG, "wa_write_send") { n ->
+                    (n.viewIdResourceName ?: "").endsWith("/send") && n.isClickable
+                } ?: waitForNode(1200, 150, WA_PKG, "wa_write_send_any") { (it.viewIdResourceName ?: "").endsWith("/send") }
+                if (sendNode == null) {
+                    dumpScreenForDebug("wa_write_no_send")
+                    return@withContext fail("SEND_ON_YES", "send button com.whatsapp:id/send not found")
+                }
+                if (isPaymentSensitive(sendNode)) return@withContext fail("SEND_ON_YES", "send node matched payment-sensitive pattern")
+
+                val clicked = clickNodeOrAncestor(sendNode)
+                waLog("WA_WRITE_SEND_CLICK ok=$clicked")
+                if (!clicked) return@withContext fail("SEND_ON_YES", "ACTION_CLICK rejected on send button")
+
+                // VERIFY_OUTGOING_MESSAGE
+                var present = false
+                run {
+                    val deadline = System.currentTimeMillis() + 6000
+                    while (System.currentTimeMillis() < deadline) {
+                        if (whatsAppOutgoingMessagePresent(want)) { present = true; break }
+                        delay(200)
+                    }
+                }
+                waLog("WA_WRITE_SENT_VERIFIED mission=$missionId present=$present")
+                if (!present) {
+                    dumpScreenForDebug("wa_write_not_in_transcript")
+                    return@withContext fail("VERIFY_OUTGOING_MESSAGE", "tapped send but the message did not appear in the conversation")
+                }
+                waWritePersist(this@BensonAccessibilityService, missionId, WA_WRITE_SENT_VERIFIED, want.hashCode())
+                return@withContext ok("SENT_VERIFIED")
+            } catch (e: Exception) {
+                return@withContext fail("EXCEPTION", "${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                whatsappAutomationActive = false
+            }
+        }
+
+    // The exact message text present as a NON-editable node in the conversation transcript
+    // (i.e. a sent/received bubble, not the compose field).
+    private fun whatsAppOutgoingMessagePresent(message: String): Boolean {
+        val wantMsg = message.trim()
+        if (wantMsg.isEmpty()) return false
+        return findNodeMatching { n ->
+            val vid = n.viewIdResourceName ?: ""
+            !n.isEditable && !vid.endsWith("/entry") &&
+                (n.text?.toString()?.trim() == wantMsg)
+        } != null
     }
 
     // Ends an in-progress WhatsApp call. Assumes a call is currently active (started via

@@ -61,10 +61,13 @@ async function validateWhatsAppParams(
     return { valid: true, enrichedParams: { contactName: searchString } };
   }
 
-  if (request.action === 'prepareMessage') {
-    const message = typeof request.params.message === 'string' ? request.params.message.trim() : '';
-    if (!message) return { valid: false, reason: 'Message text is missing.' };
-  }
+  // ROUND_WHATSAPP_REPLY_REGRESSION_1 — an empty message for prepareMessage is NOT a validation
+  // failure: missionExecutor.ts's maybeRunWhatsAppWritePhaseA already handles this case by design
+  // (asks "Ce să-i scriu lui X?" and keeps the mission alive for the reply — see its own "Hard
+  // invariant" comment). This block used to hard-reject it here first, in English, before that
+  // flow ever ran — the mission failed outright instead of asking. contactName resolution below
+  // still runs unconditionally for prepareMessage; message (even empty) survives untouched in the
+  // enrichedParams merge (missionExecutor.ts only overlays contactName here, never message).
 
   // Doctrine (product-owner-directed 2026-08-01): openContact/prepareMessage now follow the same
   // no-device-contacts-read pattern as placeCall by default — search string only, WhatsApp's own

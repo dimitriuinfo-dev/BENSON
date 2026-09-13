@@ -15,44 +15,76 @@ import * as SplashScreen from 'expo-splash-screen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   startListeningService, stopListeningService, addStopRequestedListener,
-  addListenRequestedListener, addWakeWordDetectedListener, bringToForeground,
+  addListenRequestedListener, addWakeWordDetectedListener, addWakePokeListener, bringToForeground,
   isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations,
   pauseHotword, resumeHotword, setSystemSoundsMuted, consumeRecoveryFlag, logAudioDiag,
-  setSttLanguage, setWakeWordEnabled,
+  setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
   setPorcupineAccessKey, getPorcupineStatus, getActiveWakeEngine,
+  nativeWakeSetOwner, isNativeWakeAvailable, setWakeName, setNativeWakeCredentials,
+  armSttSessionWatchdog, cancelSttSessionWatchdog, addSttWatchdogTimeoutListener,
+  startConfirmationListening, cancelConfirmationListening, addConfirmationResultListener,
+  takePendingWakeCommand,
 } from 'benson-foreground-service';
 import {
   hasOverlayPermission, requestOverlayPermission, showBubble, hideBubble,
-  addBubbleTappedListener, hideWakeRing,
+  addBubbleTappedListener, hideWakeRing, updateBubbleStatus, setBubbleMotion, playWakeSound,
+  setMicLevel,
 } from 'benson-overlay';
-import { isServiceEnabled as isAccessibilityEnabled, openAccessibilitySettings, openRecents } from 'benson-accessibility';
+import { isServiceEnabled as isAccessibilityEnabled, getConnectionState as getA11yConnectionState, openAccessibilitySettings, openRecents, whatsAppCallMicHoldActive, clearWhatsAppCallMicHold, consumeCallEndedReturnPending, getWhatsAppCallEndedSignalAt } from 'benson-accessibility';
+
+// WA-CALL-STAYS-LIVE — true while a WhatsApp voice call BENSON just placed is still live. Source of
+// truth is native (the executor that verified the call screen). Wrapped so a missing/old native
+// module can never break the listen loop.
+function waCallMicHoldActiveSafe(): boolean {
+  try { return whatsAppCallMicHoldActive(); } catch { return false; }
+}
+import { classifyEmergencyIntent, getEmergencyContext, routeEmergencyCall } from 'benson-app-registry';
 import { startAccessibilityWatch, ACCESSIBILITY_ALERT_NOTIFICATION_TAG } from '../lib/accessibilityWatchdog';
 import { ensureAccessibilityReady, ACCESSIBILITY_DOWN_SPOKEN_MESSAGE_RO } from '../src/core/safety';
 import type { Character, AnthropicMsg, FamilyMember } from '../lib/agents/types';
 import type { ContentCard } from '../lib/agents/contentTypes';
-import { routeCommand, type ModelProvider } from '../lib/agents/orchestrator';
+import { routeCommand, conversationFallbackLine, type ModelProvider } from '../lib/agents/orchestrator';
+import { CALL_PATTERN } from '../lib/agents/contactsAgent';
+import { parseCommandToActionRequest } from '../src/core/action-engine';
+// Round 2 — swappable engine layer wiring.
+// Build A: memory guard + the STT/Groq-key Settings section.
+// Build B: the brain as the conversation + intent route (routeThroughBrain), the canonical-command
+// bridge to the existing deterministic executor, and the shared contact-param sanity checkpoint.
+import { checkMemoryWrite } from '../lib/engines/memory/memoryGuard';
+import { routeThroughBrain, buildCanonicalCommand, contactParamOf } from '../lib/engines/brainRouter';
+import type { KnownAction } from '../lib/engines/types';
+import { resolvePerson, type ResolutionCandidate, type ResolvedPerson } from '../src/core/contacts/contextResolver';
+import { getVerifiedIdentities } from '../src/core/contacts/verifiedIdentityStore';
+import { sanityCheckContactParam } from '../lib/engines/actionSanity';
+import {
+  getSelectedEngineId, setSelectedEngineId, getEngineConfig, saveEngineConfig, maskApiKey,
+} from '../lib/engines/settingsStore';
+import { testGroqConnection, GROQ_STT_DEFAULT_BASE_URL, GROQ_STT_DEFAULT_MODEL } from '../lib/engines/stt/groqStt';
 import {
   requestMicPermission, checkMicPermission, startRecognition, stopRecognition,
   addResultListener, addErrorListener, addEndListener, addVolumeListener,
+  addSpeechStartListener, addSpeechEndListener,
   startWakeScan, stopWakeScan,
   speakNow, stopSpeaking, getAvailableVoices,
   isOnDeviceLocaleInstalled, triggerOfflineModelDownload,
+  setOpenAIKeyForStt, setGeminiKeyForStt, getLastUtteranceBytes,
   type Voice, type SttEngine,
 } from '../lib/agents/voiceAgent';
 import { preloadLocalWhisper, subscribeWhisperStatus, type WhisperStatus } from '../lib/agents/localWhisperEngine';
 import { preloadWakeChime, playWakeChime, setWakeChimeVolume, unloadWakeChime } from '../lib/agents/wakeChime';
 import { setNormalAudioMode, releaseAudioFocusMode } from '../lib/agents/audioMode';
 import { speakWithOpenAI, stopOpenAITTS } from '../lib/agents/openaiTTS';
+import { speakWithGemini, stopGeminiTTS } from '../lib/agents/geminiTTS';
 import { buildVoiceInstructions, currentTimeOfDay } from '../lib/agents/voiceInstructions';
 import { startCarAutoDetection, type CarAutoDetectHandle } from '../lib/carAutoDetect';
-import { startScreenBridge } from '../lib/screenBridge';
+import { startScreenBridge, getLastScreenSnapshot } from '../lib/screenBridge';
 import { runMission, resumePendingTask } from '../src/core/orchestrator';
 import type { MissionPlan } from '../src/core/orchestrator';
 import type { TrustedContact } from '../src/core/contacts';
 import { loadDeviceContacts as loadRealDeviceContacts, getContactsPermissionState, requestContactsPermission } from '../src/core/contacts';
 import {
   hydrateActiveMission, getActiveMission, confirmActiveMission, cancelActiveMission,
-  resolveActiveMissionFromUtterance,
+  supersedeActiveMission, resolveActiveMissionFromUtterance,
 } from '../src/core/mission';
 import { getBondedDevices, type BluetoothDeviceInfo } from 'benson-car-bluetooth';
 import { addPipModeListener } from 'benson-app-registry';
@@ -110,6 +142,51 @@ function bumpSessionKeepAwake() {
 // single most natural affirmative reply a user would give, yet it never matched, leaving every
 // pending mission stuck waiting forever.
 const YES_PATTERN = /\b(da|yes|sigur|sure|ok|okay|pregate|pregăte[sș]te|confirm[aă]?t?)\b/i;
+// Explicit refusal — used alongside YES_PATTERN so a pending confirmation (WhatsApp call, Waze,
+// etc.) is only ever dropped on a DELIBERATE reply, not silently on noise (see cancelActiveMission
+// call site below for why this matters).
+const NO_PATTERN = /\b(nu|no|anuleaz[ăa]|renun[țt][ăa]|stop|cancel)\b/i;
+
+// ── RUNDA ORCH-FIX-1 (2026-09-08) — clasificator robust de confirmare ────────────────────────
+// Audit read-only: YES_PATTERN (`confirm[aă]?t?\b`) rata "Confirme.", "Confirmi", "Confirmați" —
+// chiar cuvântul din propriul prompt "Confirmi?". Aici: normalizează (fără diacritice, minuscule,
+// doar litere/cifre/spații), apoi verifică ÎN ORDINE STRICTĂ:
+//   1) NU explicit   2) DA explicit (inclusiv rădăcina `confirm\w*` pe cuvânt întreg)   3) UNKNOWN
+// O negație explicită ("Nu confirm") câștigă întotdeauna înaintea lui DA. `confirm\w*` cere
+// literalul "confirm" la început de cuvânt — nu prinde cuvinte fără legătură.
+function normConfirm(raw: string): string {
+  return raw
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+const CONFIRM_NO_RE = /\b(nu|no|nein|nu-i|anuleaza|renunta|opreste|stop|cancel|abbrechen|negativ)\b/;
+const CONFIRM_YES_RE = /\b(da|dap|yes|yeah|yep|yup|sure|ok|okay|sigur|desigur|bineinteles|corect|exact|perfect|pregat\w*|confirm\w*)\b/;
+type ConfirmVerdict = 'YES' | 'NO' | 'UNKNOWN';
+function classifyConfirmation(raw: string): ConfirmVerdict {
+  const t = normConfirm(raw);
+  if (!t) return 'UNKNOWN';
+  if (CONFIRM_NO_RE.test(t)) return 'NO';   // 1. NU explicit — bate întotdeauna DA
+  if (CONFIRM_YES_RE.test(t)) return 'YES'; // 2. DA explicit
+  return 'UNKNOWN';                         // 3. altfel
+}
+// Câte re-prompt-uri pe UNKNOWN acceptăm înainte să renunțăm curat (fără buclă infinită).
+const MAX_CONFIRM_REPROMPTS = 3;
+
+// ROUND_EMERGENCY_CORE_1 — revert switch. Set to false to fully disable the emergency gate in
+// handleIncomingText (classifier + "Sun la 112?" flow + native 112 route) and restore the prior
+// behaviour where "ajutor" falls through to the HELP parser.
+const EMERGENCY_GATE_ENABLED = true;
+
+// Task 2 (2026-08-28): a Confirmation Gate must not be satisfied by a hallucination. Confirmed
+// live — the local capture handed Groq/Whisper a 0-byte WAV and it returned raw="Da, confirm.",
+// which matched YES_PATTERN and executed a pending action nobody consented to. A deliberate "da"
+// is ≥ ~0.25s of speech; capture is 16 kHz mono 16-bit = 32000 bytes/s, so 8000 bytes ≈ 0.25s.
+// Below this, a voice affirmative into an open gate is dropped (CONFIRM_REJECTED) and the gate
+// stays pending. Bytes of -1 (Android SpeechRecognizer, no file) or a typed reply are exempt.
+const MIN_CONFIRM_BYTES = 8000;
 const VIGNETTE_KEY = 'benson_vignette_expiry_v1';
 
 // Latency fix (user-reported 2026-07-17, "dialogul trebuie sa devina mai rapid ... peste tot"):
@@ -129,7 +206,7 @@ const URL_PATTERN = /\b(?:https?:\/\/|www\.)\S+/i;
 // getLiveContacts() below. The old TEST_CONTACTS hardcoded stand-in survives only inside
 // app/debug.tsx's own explicitly-labeled Debug Panel harness, not here.
 
-type TtsProvider = 'device' | 'openai';
+type TtsProvider = 'device' | 'openai' | 'gemini';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 type AddressMode = 'master' | 'name';
@@ -144,6 +221,21 @@ const MAX_FACTS   = 20;
 const REMEMBER_PATTERN =
   /\b(?:remember that|retine ca|reține că|merke dir|souviens-toi que)\b\s+(.+)/i;
 
+// Build B — utterances that ask BENSON to read/act on what's on screen. Only when this matches
+// does the current on-screen snapshot get attached to the brain turn (as UNTRUSTED_DATA) — so
+// screen contents aren't shipped to the brain on every unrelated sentence.
+const SCREEN_READ_PATTERN =
+  /\b(?:cite[sșş]te|cite[sșş]ti|ce\s+(?:scrie|zice|e)\s+(?:pe\s+)?ecran|read|lies|vezi)\b.{0,20}\b(?:ecran(?:ul)?|screen|bildschirm|display)\b/i;
+
+// Build B — the one "who should I call?" clarify line, in the active language. Spoken when the
+// shared contact-param sanity check rejects a name on either route (parser or brain).
+function askWhoToCall(lang: string, address: string): string {
+  const l = (lang || '').toLowerCase();
+  if (l.startsWith('ro')) return `Pe cine să sun, ${address}?`;
+  if (l.startsWith('de')) return `Wen soll ich anrufen, ${address}?`;
+  return `Who should I call, ${address}?`;
+}
+
 // ── Family Engine ──────────────────────────────────────────────────────────────
 const FAMILY_KEY = 'benson_family_v1';
 const DEFAULT_FAMILY: FamilyMember[] = [
@@ -157,26 +249,22 @@ const LANGUAGES = [
   { code: 'en-GB', label: 'EN' },
   { code: 'ro-RO', label: 'RO' },
   { code: 'de-DE', label: 'DE' },
-  { code: 'fr-FR', label: 'FR' },
 ];
 
 const GREETINGS: Record<string, string> = {
   'en-GB': 'BENSON online, {name}. What can I do for you?',
   'ro-RO': 'BENSON online, {name}. Ce fac pentru tine?',
   'de-DE': 'BENSON online, {name}. Was kann ich für dich tun?',
-  'fr-FR': 'BENSON en ligne, {name}. Que puis-je faire pour vous?',
 };
 const CONV_ON: Record<string, string> = {
   'en-GB': 'Conversation mode on. Listening.',
   'ro-RO': 'Mod conversație activat. Ascult.',
   'de-DE': 'Gesprächsmodus aktiv. Ich höre zu.',
-  'fr-FR': 'Mode conversation activé. Je vous écoute.',
 };
 const CONV_OFF: Record<string, string> = {
   'en-GB': 'Conversation mode off.',
   'ro-RO': 'Modul conversație dezactivat.',
   'de-DE': 'Gesprächsmodus beendet.',
-  'fr-FR': 'Mode conversation désactivé.',
 };
 
 // Spoken cue after a bare "Benson" (no command in the same breath) — replaces a silent/haptic-only
@@ -185,7 +273,6 @@ const WAKE_LISTENING_PROMPT: Record<string, string> = {
   'en-GB': "I'm listening.",
   'ro-RO': 'Te ascult.',
   'de-DE': 'Ich höre.',
-  'fr-FR': "Je vous écoute.",
 };
 
 // ── Voice-only Settings control (2026-07-14) ────────────────────────────────
@@ -231,6 +318,19 @@ export default function BensonApp() {
   const [apiKey, setApiKey]           = useState('');
   const [tavilyKey, setTavilyKey]     = useState('');
   const [openaiKey, setOpenaiKey]     = useState('');
+  const [geminiKey, setGeminiKey]     = useState('');
+  // Round 2 — Groq key + STT nucleus selector, both surfaced in the one Settings modal.
+  const [groqKey, setGroqKey]         = useState('');
+  const [savedGroqMasked, setSavedGroqMasked] = useState('(none)');
+  const [sttNucleusId, setSttNucleusId] = useState<'groq' | 'local'>('groq');
+  const [groqTestStatus, setGroqTestStatus] = useState('');
+  const [groqTesting, setGroqTesting] = useState(false);
+  // ROUND_WAKE_NATIVE_GENERIC_1 — the ONE authoritative wake-name config. Native-persisted
+  // (survives JS suspension / service recreation) so the native cloud wake loop reads exactly
+  // what this field writes. Default "Benson"; the JS foreground detectWakeWord()/WAKE_VARIANTS
+  // path below is untouched this round (proven-working code, not rewritten — see report).
+  const [wakeName, setWakeNameState] = useState('Benson');
+  const wakeNameRef = useRef('Benson');
   const [inputName, setInputName]     = useState('');
   const [inputKey, setInputKey]       = useState('');
   const [activeCard, setActiveCard]   = useState<ContentCard | null>(null);
@@ -334,7 +434,44 @@ export default function BensonApp() {
 
   useEffect(() => {
     if (settingsOpen) refreshPorcupineStatus();
+    if (settingsOpen) {
+      (async () => {
+        try {
+          const cfg = await getEngineConfig('stt', 'groq');
+          setSavedGroqMasked(cfg?.apiKey ? maskApiKey(cfg.apiKey) : '(none)');
+          const sel = await getSelectedEngineId('stt', 'groq');
+          setSttNucleusId(sel === 'local' ? 'local' : 'groq');
+        } catch {}
+        setGroqKey(''); setGroqTestStatus('');
+      })();
+    }
   }, [settingsOpen]);
+
+  async function changeSttNucleus(id: 'groq' | 'local') {
+    setSttNucleusId(id);
+    setGroqTestStatus('');
+    try { await setSelectedEngineId('stt', id); } catch {}
+  }
+
+  async function runGroqTest() {
+    setGroqTesting(true);
+    setGroqTestStatus('');
+    try {
+      const saved = await getEngineConfig('stt', 'groq');
+      const cfg = {
+        baseUrl: saved?.baseUrl || GROQ_STT_DEFAULT_BASE_URL,
+        model: saved?.model || GROQ_STT_DEFAULT_MODEL,
+        apiKey: groqKey.trim() || saved?.apiKey || '',
+      };
+      if (!cfg.apiKey) { setGroqTestStatus('EROARE: nicio cheie Groq salvată'); return; }
+      const r = await testGroqConnection(cfg);
+      setGroqTestStatus(r.ok ? 'OK' : `EROARE: ${r.error}`);
+    } catch (e) {
+      setGroqTestStatus(`EROARE: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setGroqTesting(false);
+    }
+  }
 
   async function savePorcupineKey() {
     tap();
@@ -398,6 +535,7 @@ export default function BensonApp() {
   const apiKeyRef       = useRef('');
   const tavilyKeyRef    = useRef('');
   const openaiKeyRef    = useRef('');
+  const geminiKeyRef    = useRef('');
   const ttsProviderRef  = useRef<TtsProvider>('device');
   const modelProviderRef = useRef<ModelProvider>('claude');
   const sttEngineRef = useRef<SttEngine>('local');
@@ -434,6 +572,10 @@ export default function BensonApp() {
   const wakeScanningRef   = useRef(false);
   const jsSttSessionIdRef = useRef('none'); // BENSON_AUDIO session id for the current JS STT session
   const lastPartialTranscriptRef = useRef<{ sessionId: string; text: string } | null>(null);
+  // 2026-08-28 — a partial result is NOT treated as final immediately on session end. When 'end'
+  // fires with only a partial captured, we wait PARTIAL_FALLBACK_GRACE_MS for a real final; only
+  // if none arrives is the partial dispatched, logged distinctly (STT_PARTIAL_FALLBACK).
+  const partialFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // For turning SILENT listen failures into feedback: what started the current STT session
   // ('manual_tap' | 'conversation_mode' | 'wake_word') and whether it produced any transcript.
   // A manual medallion tap or a wake-word command that captures NOTHING must not just die quietly
@@ -444,6 +586,410 @@ export default function BensonApp() {
   // result/error/end — AUDIO_DIAGNOSIS_REPORT.md). If a session never ends on its own, this forces
   // it closed so the mic is never left stuck "listening" forever with no reaction.
   const listenWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Post-action mute net (2026-08-28, temporary): right after BENSON acts in another app (e.g. a
+  // governed Waze/WhatsApp mission), that app's own voice (Waze turn-by-turn) or BENSON's spoken
+  // outcome can bleed straight back into the next capture. Until the native audio-focus ducking is
+  // proven sufficient on device, doStartListening() defers by whatever is left of this window.
+  // One constant, one ref — easy to pull out once ducking is confirmed enough.
+  const POST_ACTION_MUTE_MS = 3000;
+  const postActionMuteUntilRef = useRef(0);
+  // WA-CALL-STAYS-LIVE (2026-09-08, product-owner-directed): once BENSON has placed a WhatsApp
+  // voice call and the native executor confirmed the call screen is up, BENSON must go fully quiet
+  // and NOT reopen the mic / restart the wake-word loop — that concurrent mic grab is what was
+  // tearing the fresh WhatsApp call down on this device. While Date.now() < this value, every
+  // listen/wake entry point (doStartListening, resumePassiveWake, resumeListeningAfterUnblock)
+  // bails with MIC_BLOCKED reason=whatsapp_call_live, leaving the mic to WhatsApp. It is cleared
+  // early the moment BENSON's own Activity is foregrounded again (AppState 'active') — by then the
+  // user is back in BENSON and the call is on speaker / ended. Revert: set WA_CALL_MIC_HOLD_MS = 0.
+  const WA_CALL_MIC_HOLD_MS = 180_000;
+  const whatsappCallMicHoldUntilRef = useRef(0);
+  // WA-LIFECYCLE-FIX-1 — last native "verified WhatsApp call ended" signal timestamp this JS side
+  // has already acted on. The self-heal loop clears the JS hold + re-arms wake when the persisted
+  // native signal is newer than this, so recovery works even with no AppState 'active' transition
+  // (BENSON still backgrounded after a post-call OxygenOS service kill/revive).
+  const lastCallEndedSignalRef = useRef(0);
+  // Hard mic close during TTS (2026-08-29): the mic is fully shut the whole time BENSON is speaking
+  // and stays shut for TTS_TAIL_MS after the last word, so BENSON can never transcribe its own
+  // voice — no reliance on acoustic echo cancellation. beginTtsBlock() stops any in-flight capture
+  // and raises speakingRef; endTtsBlock() drops it and arms the tail window. doStartListening() and
+  // startLocalWakeLoop() honour both (MIC_BLOCKED / MIC_RESUMED).
+  const TTS_TAIL_MS = 500;
+  const micResumeAtRef = useRef(0); // Date.now() before which no capture may start
+  const ttsEndedAtRef = useRef(0);  // when the last TTS utterance finished (for MIC_RESUMED afterMs)
+  // ── BENSON_STABILIZATION_1 — self-audio turn gate. INVARIANT: BENSON_OUTPUT can NEVER become
+  // USER_INPUT. A transcript is only accepted if its capture started AFTER TTS fully ended + a
+  // bounded audio-tail guard, BENSON is not speaking now, and the session id is current. ───────
+  const AUDIO_TAIL_GUARD_MS = 1200;
+  const sttCaptureStartedAtRef = useRef(0);  // Date.now() when the CURRENT mic capture (wake or command) began
+  // ROUND_MIC_CAPTURE_DIAGNOSTICS_1 — truthful timing/amplitude telemetry for one capture turn.
+  // t0 = sttCaptureStartedAtRef.current. All *At fields are absolute Date.now(); -1 = never observed
+  // this turn (never fabricated as 0 or guessed). Reset at STT_START_CALLED, read+cleared at the
+  // first terminal event (result/error/end) for this session.
+  const micCaptureDiagRef = useRef({
+    active: false, sessionId: '', recorderCreateAt: -1, sttStartCalledAt: -1,
+    speechStartAt: -1, speechEndAt: -1, firstRmsAboveThresholdAt: -1,
+    peakRms: 0, rmsSum: 0, rmsCount: 0,
+  });
+  const MIC_RMS_THRESHOLD = 0.15; // matches the visible-motion floor used elsewhere for "audio present"
+
+  // URGENT_CONFIRMATION_NATIVE_1 — non-null while a native one-shot confirmation capture is armed
+  // (armed right when TTS finishes speaking a mission-gate question, e.g. "Îl trimit?"). The JS
+  // mic loop (doStartListening) must not compete with it — proven live that BENSON backgrounded
+  // into WhatsApp left the JS-owned retry timers inert, so "da" was never heard at all.
+  const pendingConfirmationIdRef = useRef<string | null>(null);
+  const CONFIRMATION_LISTEN_TIMEOUT_MS = 8000;
+  function logMicCaptureDiag(reason: string, transcript: string) {
+    const d = micCaptureDiagRef.current;
+    if (!d.active) return;
+    d.active = false;
+    const t0 = sttCaptureStartedAtRef.current;
+    const rel = (at: number) => (at < 0 ? 'n/a' : `${at - t0}`);
+    const avgRms = d.rmsCount > 0 ? (d.rmsSum / d.rmsCount).toFixed(3) : 'n/a';
+    logAudioDiag('MIC_CAPTURE_DIAG', `session=${d.sessionId} reason=${reason} ` +
+      `recorderCreateMs=${rel(d.recorderCreateAt)} sttStartMs=${rel(d.sttStartCalledAt)} ` +
+      `speechStartMs=${rel(d.speechStartAt)} firstRmsMs=${rel(d.firstRmsAboveThresholdAt)} ` +
+      `speechEndMs=${rel(d.speechEndAt)} resultMs=${Date.now() - t0} ` +
+      `peakRms=${d.peakRms.toFixed(3)} avgRms=${avgRms} rmsSamples=${d.rmsCount} ` +
+      `transcript="${transcript.slice(0, 60)}"`);
+  }
+  // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — when benson.tflite is bundled the native TFLite engine in
+  // BensonForegroundService owns passive wake (survives JS suspension). JS then only drives the
+  // mic-ownership handoff at command/TTS/call boundaries and never runs its own wake loop.
+  const nativeWakeRef = useRef(false);
+  const nativeWakeEventAtRef = useRef(0);    // Date.now() a native wake event reached JS (for WAKE_TO_COMMAND_LATENCY)
+  const nwOwner = (o: 'WAKE' | 'COMMAND_STT' | 'TTS' | 'CALL' | 'NONE') => {
+    if (!nativeWakeRef.current) return;
+    try { nativeWakeSetOwner(o); } catch {}
+  };
+  // ── WAKE HEALTH DIAGNOSIS — real runtime state, don't trust the notification ─────────────────
+  const lastAudioAtRef = useRef(0);          // last mic RMS/volume callback = audio frames arriving
+  const a11yBoundRef = useRef<'BOUND' | 'UNBOUND' | 'UNKNOWN'>('UNKNOWN');
+  const wakeWordEnabledRef = useRef(true);   // native passive-listen kill switch
+  const wakeHealthLineRef = useRef('');      // last emitted WAKE_HEALTH line (dedupe)
+  const wakeHealthAtRef = useRef(0);
+  const notifBodyRef = useRef('');           // last body pushed to the foreground-service notification
+  // ── Treapta 1 / C1 — background lifecycle collapse ────────────────────────────────────────────
+  // Confirmed live (crash.txt 2026-08-29): after an action launches another app, BENSON's Activity
+  // is no longer resumed, so a network-TTS onDone callback never fires, endTtsBlock() never runs,
+  // speakingRef stays true forever, and every listen restart no-ops at the `|| speakingRef.current`
+  // guard — BENSON goes permanently deaf until the user taps the logo. Two backstops:
+  //   1. a hard timer in beginTtsBlock() force-drops speakingRef after TTS_MAX_BLOCK_MS no matter
+  //      what happened to the TTS callbacks;
+  //   2. returning to the foreground unconditionally resets the speaking state (see AppState 'active').
+  // Revert: TTS_MAX_BLOCK_MS = Number.POSITIVE_INFINITY disables the hard timer.
+  const TTS_MAX_BLOCK_MS = 15000;
+  const ttsHardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ttsBlockStartedAtRef = useRef(0); // Date.now() when the current TTS block was raised
+
+  // ── Runda C1 (2026-09-08) — prăbușirea ciclului de viață în fundal ───────────────────────────
+  // Simptom dovedit pe dispozitiv: „Am rămas blocat la «resume_task»" după ce BENSON lansează
+  // WhatsApp. beginTtsBlock() ridică speakingRef, WhatsApp trece în prim-plan, activitatea RN nu
+  // mai e resumed → callback-ul de final TTS nu se declanșează → endTtsBlock() nu se apelează
+  // → speakingRef rămâne true definitiv → fiecare captură cade la MIC_BLOCKED reason=tts_speaking.
+  //   C1_TTS_END_ALL_PATHS: endTtsBlock(reason) pe TOATE ieșirile (succes/eroare/întrerupere/
+  //     fundal/stop), fiecare cu TTS_BLOCK_END reason=…. Nicio cale nu lasă speakingRef ridicat.
+  //   C1_TTS_WATCHDOG: timer dur armat la beginTtsBlock — coboară forțat speakingRef după
+  //     TTS_MAX_BLOCK_MS indiferent de callback-uri. Log TTS_WATCHDOG_FIRED forcedRelease=true.
+  //   C1_RESUME_DECOUPLED: resume_task se încheie la terminarea acțiunii SAU la revenirea în
+  //     prim-plan, oricare prima; la revenire — reset speakingRef + repornire ascultare. Log RESUME.
+  //   C1_NO_SILENT_STALL: un resume_task nereluabil NU mai afișează „Am rămas blocat" — reset IDLE
+  //     curat + repornire ascultare + RESUME_FAILED reason=… recovered=idle.
+  // Toate pe false → comportamentul de azi.
+  const C1_TTS_END_ALL_PATHS = true;
+  const C1_TTS_WATCHDOG = true;
+  const C1_RESUME_DECOUPLED = true;
+  const C1_NO_SILENT_STALL = true;
+  // Marcat cât un resume_task e „în zbor" (între setBensonState('EXECUTING','resume_task') și
+  // rezultatul lui) — citit de handler-ul AppState 'active' ca să reia curat la revenire.
+  const resumeInFlightRef = useRef<{ startedAt: number } | null>(null);
+
+  // ── Runda C3 (2026-09-08) — o rostire = o singură sesiune STT ────────────────────────────────
+  // Dovedit pe dispozitiv (c1.log 08:46:38): două STT_REQUESTED trigger=conversation_mode la 2ms
+  // distanță pe aceeași rostire → două RECORDER_CREATE → două recordere se bat pe microfon → unul
+  // întoarce peakRms=32 / no_speech. Cauza: garda din capul lui doStartListening()
+  // (`if (listeningRef.current || loadingRef.current) return;`) verifică un flag care se ridică abia
+  // DUPĂ `await Promise.all([pauseHotword(), checkMicPermission()])`. Un al doilea apel care
+  // aterizează în fereastra acelui await (~ms, dus-întors pe bridge-ul nativ) trece de gardă și
+  // pornește un al doilea recorder. `sttSessionActiveRef` e o gardă SINCRONĂ, ridicată înainte de
+  // orice await și coborâtă doar la închiderea sesiunii (endSub / errorSub / fundal / eroare).
+  //   C3_SINGLE_SESSION_GATE: al doilea doStartListening() cât unul e activ → STT_REJECTED, return.
+  //   C3_SESSION_CLEANUP: la fiecare sfârșit de sesiune (rezultat/eroare/timeout/fundal) sesiunea
+  //     se marchează închisă (STT_SESSION_CLOSED) — nicio sesiune „fantomă" care ar bloca următoarea.
+  // Ambele pe false → comportamentul de azi. (Există un `C3_SINGLE_SESSION_GATE` geamăn în
+  // lib/agents/voiceAgent.ts — apărare în adâncime pentru cele 15+ căi de intrare; pune-le pe
+  // amândouă pe false pentru revert complet.)
+  const C3_SINGLE_SESSION_GATE = true;
+  const C3_SESSION_CLEANUP = true;
+  // Non-null = o sesiune STT e în zbor chiar acum (id-ul ei). Citit sincron la intrarea în
+  // doStartListening ca gardă de reintrare peste fereastra de await.
+  const sttSessionActiveRef = useRef<string | null>(null);
+
+  // ── Runda C3-fix (2026-09-08) — sesiunea STT nu se închidea niciodată ────────────────────────
+  // Dovedit în log: sesiunea js-…747825 pornește 09:15:47, captura se termină 09:15:50 cu
+  // reason=stopped, dar STT_SESSION_CLOSED NU apare → sttSessionActiveRef rămâne ridicat pe veci
+  // → fiecare încercare ulterioară e respinsă (STT_REJECTED reason=session_active) la fiecare 2s,
+  // minute în șir. BENSON complet surd. Cauza reală: doStartListening() apela stopWakeScan()
+  // ÎNAINTE de garda C3; când o captură `local` era deja în zbor, stopWakeScan() îi demonta
+  // `sharedCaptureEndSub` (variabilă partajată, prin design) → event-ul de sfârșit al capturii
+  // ajungea în gol → emitEnd() nu se declanșa → endSub nu rula → nimeni nu cobora garda.
+  // Fix, în adâncime:
+  //   1. garda C3 se mută în capul lui doStartListening (înainte de stopWakeScan) — un apel
+  //      respins nu mai atinge nimic.
+  //   2. sttSessionActiveRef se coboară DIRECT (closeSttSession) pe TOATE căile de sfârșit —
+  //      result | error | stopped | no_speech | timeout | background — nu doar prin endSub.
+  //   3. plasă de siguranță: dacă o sesiune e activă > STT_SESSION_MAX_MS, watchdog-ul o coboară
+  //      forțat (STT_SESSION_WATCHDOG fired=true) și repornește ascultarea.
+  //   4. voiceAgent.ts garantează emitEnd() în ≤500ms după orice stopRecognition(), chiar dacă
+  //      onCaptureEnd nativ nu mai livrează nimic — ca bucla hands-free (nu doar garda) să reia.
+  // Revert: STT_SESSION_MAX_MS = Number.POSITIVE_INFINITY dezarmează watchdog-ul; C3_* pe false.
+  const STT_SESSION_MAX_MS = 30000;
+
+  // ── Treapta 1 / C2 — listening does not self-heal ────────────────────────────────────────────
+  // The listen loop has no supervisor: if it stops for any reason, only a screen tap brings it
+  // back. A periodic check restarts whatever SHOULD be listening (command capture in conv mode,
+  // passive wake scan otherwise). Revert: LISTEN_SELF_HEAL_MS = 0 disables the interval.
+  const LISTEN_SELF_HEAL_MS = 2000;
+  // Timestamp a pending confirmation gate was armed — a gate still open on foreground return after
+  // this long is stale (BENSON was deaf in between, the user has moved on) and is cleared.
+  const PENDING_STALE_MS = 45000;
+  const gateArmedAtRef = useRef(0);
+
+  // ── Runda E1 (2026-09-07) — BENSON acționează EXCLUSIV la comanda/atingerea utilizatorului ────
+  // E1_USER_ONLY: nicio rostire, niciun salut, nicio întrebare de inițiere care nu urmează unei
+  //   rostiri recunoscute a utilizatorului sau unei atingeri directe a lui. O rostire blocată de
+  //   regula asta lasă log SPEAK_SUPPRESSED reason=no_user_command. Salutul de la pornire dispare;
+  //   la fel rostirile la timer / la revenire în prim-plan / după auto-reparare (Guardian).
+  //   Revert: E1_USER_ONLY = false → totul revine exact ca înainte.
+  // E1_NO_SELF_FOREGROUND: BENSON nu se mai aduce singur în prim-plan din JS (la wake). Bula +
+  //   inelul rămân ca indicatori. (Căile native au propriile constante — vezi ROUND_E1_REPORT.md.)
+  //   Revert: E1_NO_SELF_FOREGROUND = false.
+  // USER_ACTION_WINDOW_MS: cât timp după o acțiune-user o rostire mai e considerată „a userului"
+  //   (o comandă cu STT lent + execuție poate dura > 60s, de-aia 90s).
+  const E1_USER_ONLY = true;
+  const E1_NO_SELF_FOREGROUND = true;
+  const USER_ACTION_WINDOW_MS = 90000;
+
+  // ── Runda E2 (2026-09-07) ────────────────────────────────────────────────────────────────────
+  // E2_LISTEN_ON_OPEN: deschiderea aplicației / atingerea bulei = USER_TOUCH → ascultarea pornește
+  //   INSTANT (nu prin self-heal la 2s). Fără chime, fără rostire. Log LISTEN_STARTED source=user_open.
+  //   Nu încalcă E1-0 — sursa e atingerea directă. Revert: E2_LISTEN_ON_OPEN = false.
+  // E2_BUBBLE_BAND: banda scrisă lângă bulă (text transcris + stare) cât BENSON e activ peste altă
+  //   aplicație. Revert: E2_BUBBLE_BAND = false → banda nu mai apare niciodată.
+  const E2_LISTEN_ON_OPEN = true;
+  const E2_BUBBLE_BAND = true;
+  // ── Runda E3 (2026-09-07) — banda lizibilă din mașină, fără ochelari ─────────────────────────
+  // Fontul/lățimea/umbra sunt în modules/benson-overlay (BensonBubbleService.updateStatus).
+  // ROUND_BUBBLE_STATE_DESYNC_FIX_1 — cât timp banda rămâne vizibilă după „GATA" e acum decis
+  // NATIV (BensonBubbleService.TERMINAL_DISMISS_MS, ~2.5s), nu de un setTimeout aici — un timer JS
+  // nu supraviețuiește suspendării RN pe fundal (dovedit live în alte runde ale acestei sesiuni).
+  // E3_BAND_LINGER_MS rămâne doar ca document istoric al valorii vechi (6000ms) — nu mai e folosit.
+  // E3-3 — sunetul SF de „microfon deschis". Se redă la fiecare start de ascultare INIȚIAT DE
+  // UTILIZATOR (atingere / deschidere app / wake word) — NU la self-heal / re-armare conv mode.
+  // Nativul (WakeSound.kt) tace singur pe silențios și scalează după volumul media. „Doar Mut" al
+  // lui BENSON îl oprește aici. Revert: WAKE_SOUND_ENABLED = false → fără sunet nou; wake word-ul
+  // revine la vechea `playWakeChime()`.
+  const WAKE_SOUND_ENABLED = true;
+  function playListenStartSound() {
+    if (!WAKE_SOUND_ENABLED) return;
+    if (mutedRef.current || silencedRef.current) return;
+    try { playWakeSound(); } catch {}
+  }
+  // E3-2 — starea agentului → mișcarea punctelor din bulă. Doar LISTENING rotește; EXECUTING
+  // pulsează; restul stă. Gated pe serviciul activ ca să nu pornim serviciul bulei degeaba.
+  function pushBubbleMotion(state: string) {
+    if (!serviceActiveRef.current) return;
+    const motion = state === 'LISTENING' ? 'listening' : state === 'EXECUTING' ? 'executing' : 'static';
+    try { setBubbleMotion(motion); } catch {}
+  }
+  // Ultima rostire transcrisă a utilizatorului — arătată în banda de lângă bulă.
+  const lastUserTranscriptRef = useRef('');
+  // Dacă banda e afișată acum — ca să nu pokăm serviciul nativ când n-avem nimic de ascuns.
+  const bandVisibleRef = useRef(false);
+  // Timer-ul de „mai ține GATA vizibil E3_BAND_LINGER_MS".
+  const bandHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Starea curentă → cuvântul scurt din bandă (E3: MAJUSCULE, gold). IDLE/BLOCKED/PAUSED → fără
+  // etichetă → banda dispare (cu excepția lingerului de după GATA).
+  const E2_STATE_LABEL: Partial<Record<'IDLE'|'LISTENING'|'THINKING'|'CONFIRMING'|'EXECUTING'|'DONE'|'ERROR'|'BLOCKED', string>> = {
+    LISTENING: 'ASCULT',
+    THINKING: 'AM ÎNȚELES',
+    CONFIRMING: 'AM ÎNȚELES',
+    EXECUTING: 'EXECUT',
+    DONE: 'GATA',
+    ERROR: 'GATA',
+  };
+  function clearBandHideTimer() {
+    if (bandHideTimerRef.current) { clearTimeout(bandHideTimerRef.current); bandHideTimerRef.current = null; }
+  }
+  function hideBubbleBandNow() {
+    clearBandHideTimer(); // vestigial (see below) — harmless no-op now that native owns dismiss timing
+    if (!bandVisibleRef.current) return;
+    bandVisibleRef.current = false;
+    // ROUND_BUBBLE_STATE_DESYNC_FIX_1 — an explicit hide request. Native treats this identically
+    // to its own auto-dismiss (dismissNow()) and is idempotent — a no-op if native already
+    // auto-dismissed on its own by the time this arrives (the normal case: native's
+    // TERMINAL_DISMISS_MS is always shorter than STATE_DONE_CLEAR_MS/STATE_ERROR_CLEAR_MS, so
+    // this JS-side call essentially never beats native to it — it exists for the non-terminal
+    // paths, e.g. leaving the foreground/silencing, where nothing else would ever hide the band).
+    try { updateBubbleStatus('', '', false, false, Date.now()); } catch {}
+  }
+  // Împinge banda spre overlay-ul nativ. Se afișează DOAR cât BENSON NU e aplicația din prim-plan
+  // (pe ecranul lui propriu, transcrierea e deja în chat).
+  // ROUND_ASSISTANT_SESSION_UX_FIX_1 — this call is now ALWAYS non-terminal (`terminal=false`),
+  // even for DONE/ERROR ("GATA"): reaching that state does NOT by itself mean the result is done
+  // being read — BENSON may still be speaking it (a long reply easily outlasts the old fixed
+  // ~2.5s dismiss, confirmed live: the HandyParken result vanished mid-speech). The ONLY place
+  // that ever sends terminal=true now is scheduleResultDismiss() below, called once TTS for the
+  // result has actually finished (or immediately if none was needed) — see endTtsBlock() and
+  // finishHandledMission()'s ack-skip branch. Until then, this just keeps the card up via
+  // native's long non-terminal safety-net, identically to LISTENING/THINKING/EXECUTING/CONFIRMING.
+  function pushBubbleBand(state: string) {
+    if (!E2_BUBBLE_BAND) return;
+    const label = (E2_STATE_LABEL as Record<string, string | undefined>)[state];
+    const canShow = !isForegroundRef.current && !silencedRef.current && serviceActiveRef.current;
+    logAudioDiag('UI_STATE_JS', `state=${state} label=${label ?? ''} canShow=${canShow}`);
+
+    if (label && canShow) {
+      bandVisibleRef.current = true;
+      if (state === 'DONE' || state === 'ERROR') logAudioDiag('RESULT_SHOW', `state=${state}`);
+      try { updateBubbleStatus(label, lastUserTranscriptRef.current, true, false, Date.now()); } catch {}
+      return;
+    }
+
+    // No label (IDLE/BLOCKED) or can't show right now (foreground/silenced/no service).
+    hideBubbleBandNow();
+  }
+
+  // ROUND_ASSISTANT_SESSION_UX_FIX_1 — the ONE place a result is ever marked terminal. Called
+  // once the result is truly done being read/spoken: from endTtsBlock() once real TTS for it has
+  // finished (RESULT_DWELL_AFTER_TTS_MS — "do not dismiss while its TTS is still playing"), or
+  // immediately from finishHandledMission()'s ack-already-spoken skip branch when no additional
+  // TTS plays for the final message at all (RESULT_DWELL_NO_TTS_MS, longer — nothing else marks
+  // the moment the user could start reading it). Native then owns the actual countdown
+  // (BensonBubbleService's Handler.postDelayed, survives JS suspension) — this only decides WHEN
+  // to start it and how long, not whether it fires.
+  const RESULT_DWELL_AFTER_TTS_MS = 3000;
+  const RESULT_DWELL_NO_TTS_MS = 4500;
+  function scheduleResultDismiss(dwellMs: number) {
+    const state = bensonStateRef.current;
+    if (state !== 'DONE' && state !== 'ERROR') return; // nothing to dwell — not a result turn
+    const label = (E2_STATE_LABEL as Record<string, string | undefined>)[state];
+    const canShow = !isForegroundRef.current && !silencedRef.current && serviceActiveRef.current;
+    if (!label || !canShow) return; // foreground / silenced / no overlay to dismiss anyway
+    logAudioDiag('RESULT_READ_DWELL_START', `dwellMs=${dwellMs}`);
+    try { updateBubbleStatus(label, lastUserTranscriptRef.current, true, true, Date.now(), dwellMs); } catch {}
+  }
+  // Date.now() al ultimei rostiri recunoscute / atingeri directe. Pornește 0 → la boot nicio
+  // rostire nu e „a userului", deci salutul/ orice rostire de pornire e suprimată automat.
+  const lastUserActionAtRef = useRef(0);
+  const ackSpokenThisTurnRef = useRef(false);
+  function noteUserAction() { lastUserActionAtRef.current = Date.now(); }
+  function userActionRecent() { return Date.now() - lastUserActionAtRef.current <= USER_ACTION_WINDOW_MS; }
+  // Backstop gate for every TTS path — returns true if this utterance must be suppressed by E1-0.
+  function e1SuppressSpeak(): boolean {
+    if (!E1_USER_ONLY) return false;
+    if (userActionRecent()) return false;
+    logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command');
+    return true;
+  }
+
+  // ── Treapta 2 / C8 — explicit state machine ─────────────────────────────────────────────────
+  // One authoritative, exclusive state. Every transition is logged (STATE from=… to=… detail=…),
+  // so any later defect is reportable from the log alone. Terminal states auto-return to IDLE with
+  // the transient screen (card + last reply) cleared, so stale text never lingers (obs. 16). An
+  // EXECUTING that never terminates is force-failed by the watchdog with the phase name — never a
+  // silent hang (obs. 8). This is a NEW layer on top of the existing listening/loading/speaking
+  // refs (which stay, per anti-regression rule 2) — it observes the known transition points and
+  // owns the auto-clear + watchdog only.
+  // Reverts: EXEC_WATCHDOG_MS = Number.POSITIVE_INFINITY (no watchdog);
+  //          STATE_DONE_CLEAR_MS / STATE_ERROR_CLEAR_MS = 0 (no auto-clear).
+  const STATE_DONE_CLEAR_MS = 4000;
+  const STATE_ERROR_CLEAR_MS = 6000;
+  // Doc asked for 15000. Deviating (rule 4): the PROVEN WhatsApp call recipe (29.08 13:24) took
+  // ~20s end to end, so a 15s ceiling would kill a working call. 30s still catches the real
+  // ~60s freeze seen in r.txt/crash.txt. A true per-step watchdog needs recipe→JS step ticks
+  // (bigger change, deferred).
+  const EXEC_WATCHDOG_MS = 30000;
+  type BensonState = 'IDLE' | 'LISTENING' | 'THINKING' | 'CONFIRMING' | 'EXECUTING' | 'DONE' | 'ERROR' | 'BLOCKED';
+  const bensonStateRef = useRef<BensonState>('IDLE');
+  const stateClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const execWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const execPhaseRef = useRef('');
+
+  // Best-effort: does a BENSON reply read as a failure? Used only to label DONE vs ERROR — the
+  // auto-clear + watchdog do not depend on it being perfect.
+  function isFailureReply(text: string): boolean {
+    return /nu (am reușit|găsesc|am putut|pot)|n-am putut|could ?n['o]t|couldn't|i couldn't|opened_manual|nu am nicio aplicaț|nu este instalat|nu găsesc/i.test(text || '');
+  }
+
+  function setBensonState(next: BensonState, detail = '') {
+    const prev = bensonStateRef.current;
+    // Suppress a same-state re-entry (was noisy: repeated DONE→DONE from a second mission_result).
+    // EXECUTING is exempt so a new phase re-arms the watchdog.
+    if (prev === next && next !== 'EXECUTING') return;
+    bensonStateRef.current = next;
+    logAudioDiag('STATE', `from=${prev} to=${next}${detail ? ` detail=${detail}` : ''}`);
+    // ROUND_ASSISTANT_SESSION_UX_FIX_1 — CONFIRM_WAIT_START/END bracket exactly the window the
+    // overlay/session must stay alive for a YES/NO or clarification, regardless of how it
+    // resolves (answer, cancel, or the orchestrator's own PENDING_DISAMBIGUATION_TIMEOUT_MS).
+    if (next === 'CONFIRMING' && prev !== 'CONFIRMING') logAudioDiag('CONFIRM_WAIT_START', `detail=${detail}`);
+    else if (prev === 'CONFIRMING' && next !== 'CONFIRMING') logAudioDiag('CONFIRM_WAIT_END', `to=${next} detail=${detail}`);
+
+    if (stateClearTimerRef.current) { clearTimeout(stateClearTimerRef.current); stateClearTimerRef.current = null; }
+
+    if (next === 'EXECUTING') {
+      if (detail) execPhaseRef.current = detail;
+      if (execWatchdogRef.current) clearTimeout(execWatchdogRef.current);
+      if (Number.isFinite(EXEC_WATCHDOG_MS)) {
+        execWatchdogRef.current = setTimeout(() => {
+          execWatchdogRef.current = null;
+          if (bensonStateRef.current !== 'EXECUTING') return;
+          logAudioDiag('EXEC_WATCHDOG', `phase=${execPhaseRef.current || 'unknown'} timeoutMs=${EXEC_WATCHDOG_MS}`);
+          setLoading(false); loadingRef.current = false;
+          // ── C1 TASK 4 — a stuck resume_task is NOT a "Am rămas blocat" dead end. Clean IDLE
+          // recovery + restart listening. A butler frozen mid-handoff must not be a resting state.
+          if (C1_NO_SILENT_STALL && execPhaseRef.current === 'resume_task') {
+            logAudioDiag('RESUME_FAILED', `reason=exec_watchdog elapsedMs=${EXEC_WATCHDOG_MS} recovered=idle`);
+            resumeInFlightRef.current = null;
+            try { setActiveCard(null); } catch {}
+            try { setLastReply(''); } catch {}
+            setBensonState('IDLE', 'resume_recover');
+            try { resumeListeningAfterUnblock(); } catch {}
+            return;
+          }
+          const stuck = replyLangRef.current.toLowerCase().startsWith('ro')
+            ? `Am rămas blocat la „${execPhaseRef.current || 'un pas'}", ${getAddress()}. Am oprit.`
+            : `I got stuck at "${execPhaseRef.current || 'a step'}", ${getAddress()}. Stopped.`;
+          addMessage('benson', stuck);
+          // E1-0: timer-triggered — no unsolicited speech. The stuck state is visible on screen and
+          // in the log (EXEC_WATCHDOG above). Revert: E1_USER_ONLY = false.
+          if (E1_USER_ONLY) logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command source=exec_watchdog');
+          else speak(stuck);
+          setBensonState('ERROR', 'exec_watchdog');
+        }, EXEC_WATCHDOG_MS);
+      }
+    } else if (execWatchdogRef.current) {
+      clearTimeout(execWatchdogRef.current); execWatchdogRef.current = null;
+    }
+
+    if (next === 'DONE' || next === 'ERROR') {
+      const ms = next === 'DONE' ? STATE_DONE_CLEAR_MS : STATE_ERROR_CLEAR_MS;
+      if (ms > 0) {
+        stateClearTimerRef.current = setTimeout(() => {
+          stateClearTimerRef.current = null;
+          try { setActiveCard(null); } catch {}
+          try { setLastReply(''); } catch {}
+          setBensonState('IDLE', 'autoclear');
+        }, ms);
+      }
+    }
+
+    // E2-2 — reflect the state (and the last transcript) in the written band next to the bubble.
+    // On DONE/ERROR the band shows "gata" for STATE_DONE_CLEAR_MS, then the auto-IDLE above clears it.
+    pushBubbleBand(next);
+    // E3-2 — reflect the state in the bubble's inner dots (rotate while LISTENING, pulse while
+    // EXECUTING, still otherwise).
+    pushBubbleMotion(next);
+  }
   // Fragment-assembly buffer (product-owner-directed 2026-07-31, root cause confirmed live the
   // same day): every STT session — final result (resultSub) or the partial-fallback (endSub) —
   // ends at the same ~1.2-1.8s silence timeout tuned for command capture (see startRecognition's
@@ -458,7 +1004,41 @@ export default function BensonApp() {
   // which is out of reach here, so this is a content-based mitigation: anything BENSON says is
   // remembered for a few seconds, and an incoming transcript that closely echoes it is treated as
   // mic feedback, not a real command.
-  const lastSpokenRef = useRef<{ normalized: string; at: number } | null>(null);
+  // A rolling list, not a single slot (product-owner-confirmed live 2026-08-23 regression): a
+  // single "last spoken" slot only protects against echo of the MOST RECENT utterance. Confirmed
+  // live that BENSON's own boot greeting ("BENSON online, Master. What can I do for you?") was
+  // picked up by the mic and transcribed almost verbatim ("De skip benson online, master, what can
+  // it do for you?", 73% word overlap) — well above the 60% self-echo threshold below — yet was
+  // NOT rejected, because local Whisper transcription can now take well over a minute (worse since
+  // the small-model upgrade), and something else got spoken in between, overwriting the single slot
+  // before the delayed check ever ran. Keeping the last few spoken phrases (pruned by the same
+  // ECHO_WINDOW_MS below) instead of just one closes that gap without changing the matching logic.
+  const lastSpokenRef = useRef<Array<{ normalized: string; at: number }>>([]);
+  // Circuit breaker for the self-sustaining "I did not quite catch that" loop (product-owner-
+  // confirmed live 2026-08-25): BENSON says its own generic fallback reply, its own mic hears
+  // that TTS played back through the speaker, Whisper mangles the echo differently each time
+  // (real captures: "He died not Kitekehat, Master...", "nu-ti chintecati dat, master.") so
+  // looksLikeSelfEcho's word-overlap/fingerprint check doesn't always catch it, the mangled text
+  // still doesn't match any real command, Claude/OpenAI's OWN generic fallback ("I did not quite
+  // catch that") gets spoken again, and the cycle repeats — confirmed live running 3+ times in a
+  // row with the user unable to get a word in. Content-based detection (looksLikeSelfEcho) is
+  // inherently unreliable here since the mangling varies every cycle; this instead watches the
+  // MECHANISM directly — BENSON about to speak the exact same reply it just spoke — which is true
+  // regardless of what garbled text triggered it. Independent of and complementary to
+  // looksLikeSelfEcho.
+  const repeatedReplyRef = useRef<{ text: string; count: number }>({ text: '', count: 0 });
+  const REPEAT_LOOP_BREAK_THRESHOLD = 2;
+  // Returns true if `text` is about to be spoken for at least the Nth time in a row and the
+  // conversation loop should stop re-arming listening afterward instead of continuing the cycle.
+  function noteSpokenAndCheckRepeatLoop(text: string): boolean {
+    const norm = normalizeForEcho(text);
+    if (repeatedReplyRef.current.text === norm) {
+      repeatedReplyRef.current.count += 1;
+    } else {
+      repeatedReplyRef.current = { text: norm, count: 1 };
+    }
+    return repeatedReplyRef.current.count >= REPEAT_LOOP_BREAK_THRESHOLD;
+  }
   // Throttle for the WaitingUser re-announce-on-foreground handler — see its own comment.
   const lastWaitingUserAnnounceRef = useRef<{ text: string; at: number } | null>(null);
   const WAITING_USER_ANNOUNCE_COOLDOWN_MS = 60000;
@@ -472,6 +1052,24 @@ export default function BensonApp() {
   const pendingVignetteRef  = useRef<BorderCrossing | null>(null);
   const pendingNoteActionRef = useRef<ParsedNote | null>(null);
   const pendingMissionTaskRef = useRef<{ plan: MissionPlan; taskIndex: number } | null>(null);
+  // ROUND_CONTACT_IDENTITY_CONTINUITY_1 — a brain-classified action named/implied a person the
+  // local ContextResolver could not resolve to exactly one identity ("Te referi la Hannah?" or a
+  // short list). Holds enough to replay the SAME action once the user picks — never re-asks the
+  // LLM, never re-executes anything until a candidate is actually chosen.
+  const pendingPersonChoiceRef = useRef<{
+    action: KnownAction; params: Record<string, string>; candidates: ResolutionCandidate[];
+  } | null>(null);
+  // Set immediately after a successful RESOLVED/NEEDS_CONFIRMATION-then-picked person resolution,
+  // for logging/diagnostics only — the actual value used by execution is params.contact itself.
+  const lastResolvedPersonRef = useRef<ResolvedPerson | null>(null);
+  // ROUND_EMERGENCY_CORE_1 — a generic "ajutor" / "urgență" awaiting a spoken "Sun la 112?" reply.
+  // Checked before every other gate so a stale mission/confirmation can never intercept it, and
+  // one reprompt on UNKNOWN then a clean cancel.
+  const pendingEmergencyConfirmRef = useRef(false);
+  const emergencyRepromptRef = useRef(0);
+  // ORCH-FIX-1 — consecutive UNKNOWN replies to an open confirmation gate. Reset to 0 when a gate
+  // is resolved (YES/NO); at MAX_CONFIRM_REPROMPTS the gate is cancelled cleanly (no infinite loop).
+  const confirmRepromptCountRef = useRef(0);
   // Stage 4 – Anthropic conversation history
   const historyRef      = useRef<AnthropicMsg[]>([]);
 
@@ -484,6 +1082,9 @@ export default function BensonApp() {
   apiKeyRef.current      = apiKey;
   tavilyKeyRef.current   = tavilyKey;
   openaiKeyRef.current   = openaiKey;
+  setOpenAIKeyForStt(openaiKey || null);
+  geminiKeyRef.current   = geminiKey;
+  setGeminiKeyForStt(geminiKey || null);
   ttsProviderRef.current = ttsProvider;
   modelProviderRef.current = modelProvider;
   sttEngineRef.current = sttEngine;
@@ -539,7 +1140,61 @@ export default function BensonApp() {
     // Real mic level for the listening indicator (see BensonMainScreen's ListeningWaveform) —
     // user-requested 2026-07-30: it was a decorative Math.random() animation, not tied to actual
     // audio at all.
-    const volumeSub = addVolumeListener((level) => setMicVolume(level));
+    const volumeSub = addVolumeListener((level) => {
+      lastAudioAtRef.current = Date.now();
+      setMicVolume(level);
+      if (listeningRef.current) { try { setMicLevel(level, true); } catch {} }
+      const d = micCaptureDiagRef.current;
+      if (d.active) {
+        d.rmsSum += level; d.rmsCount += 1;
+        if (level > d.peakRms) d.peakRms = level;
+        if (d.firstRmsAboveThresholdAt < 0 && level >= MIC_RMS_THRESHOLD) d.firstRmsAboveThresholdAt = Date.now();
+      }
+    });
+    const speechStartSub = addSpeechStartListener(() => {
+      const d = micCaptureDiagRef.current;
+      if (d.active && d.speechStartAt < 0) d.speechStartAt = Date.now();
+    });
+    const speechEndSub = addSpeechEndListener(() => {
+      const d = micCaptureDiagRef.current;
+      if (d.active && d.speechEndAt < 0) d.speechEndAt = Date.now();
+    });
+    // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — fires from the native foreground service's own Handler
+    // timer, delivered as an event (works while backgrounded, unlike a JS setTimeout). The native
+    // side already ignores a stale/superseded session id (STT_WATCHDOG_STALE_IGNORED); this check
+    // is a second, cheap correctness guard, not the timing authority.
+    const sttWatchdogSub = addSttWatchdogTimeoutListener((sessionId) => {
+      if (sttSessionActiveRef.current !== sessionId) return;
+      logAudioDiag('STT_SESSION_RECOVERED', `session=${sessionId}`);
+      closeSttSession('timeout');
+      try { stopRecognition(); } catch {}
+      setListening(false); listeningRef.current = false;
+      setTimeout(() => { try { resumeListeningAfterUnblock(); } catch {} }, 600);
+    });
+    // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO reply capture result. Entirely
+    // survives BENSON being backgrounded (WhatsApp/etc. foreground) since the listening WINDOW
+    // itself is timed natively, not by a JS timer. A stale result (confirmationId no longer the
+    // pending one — e.g. the mission gate was already superseded/cancelled) is ignored, never
+    // resurrecting an old mission.
+    const confirmResultSub = addConfirmationResultListener((confirmationId, verdict, transcript) => {
+      if (pendingConfirmationIdRef.current !== confirmationId) {
+        logAudioDiag('CONFIRM_LISTEN_STALE_IGNORED', `confirmationId=${confirmationId} current=${pendingConfirmationIdRef.current ?? 'none'}`);
+        return;
+      }
+      pendingConfirmationIdRef.current = null;
+      try { setMicLevel(0, false); } catch {}
+      logAudioDiag('CONFIRM_LISTEN_RESULT', `confirmationId=${confirmationId} verdict=${verdict} text="${transcript.slice(0, 60)}"`);
+      if (!transcript.trim()) {
+        // No reply heard (TIMEOUT/UNKNOWN with empty audio) — fall back to the existing generic
+        // reprompt policy by resuming the ordinary hands-free loop, same as before this round.
+        try { resumeListeningAfterUnblock(); } catch {}
+        return;
+      }
+      // Reuses the EXACT SAME path a normal STT result takes (classifyConfirmation, pendingMissionTaskRef
+      // consumption, resumePendingTask) — only the capture mechanism differs here.
+      lastUserTranscriptRef.current = transcript;
+      handleIncomingText(transcript, { viaVoice: true, utteranceBytes: -1 });
+    });
 
     // result: transcript arrived. Explicitly stop recognition here (not just flip the
     // `listening` flag) so the native recognizer releases the mic/AudioRecord before TTS
@@ -561,15 +1216,34 @@ export default function BensonApp() {
         return;
       }
       lastPartialTranscriptRef.current = null;
+      logMicCaptureDiag('final', transcript);
+      // A real final arrived — cancel any pending partial-fallback grace timer from a prior 'end'.
+      if (partialFallbackTimerRef.current) {
+        clearTimeout(partialFallbackTimerRef.current);
+        partialFallbackTimerRef.current = null;
+        logAudioDiag('STT_PARTIAL_FALLBACK', `session=${sid} outcome=superseded_by_final`);
+      }
       try { stopRecognition(); } catch {}
       setListening(false);
       listeningRef.current = false;
+      closeSttSession('result'); // C3-fix — close directly, do not wait for endSub (may not fire)
       if (transcript) {
-        if (looksLikeSelfEcho(transcript)) {
-          logAudioDiag('TRANSCRIPT_ACCEPTED', `session=${sid} text="${transcript}" language=${langRef.current} REJECTED_self_echo=true`);
+        // BENSON_STABILIZATION_1 — the authoritative gate: BENSON_OUTPUT can never become USER_INPUT.
+        const gate = userMicGate(sid);
+        if (!gate.ok) {
+          logAudioDiag('STT_DROP', `session=${sid} reason=${gate.reason} text="${transcript.slice(0, 40)}"`);
+        } else if (looksLikeSelfEcho(transcript)) {
+          logAudioDiag('STT_DROP', `session=${sid} reason=SELF_ECHO_CONTENT text="${transcript.slice(0, 40)}"`);
         } else {
-          logAudioDiag('TRANSCRIPT_ACCEPTED', `session=${sid} text="${transcript}" language=${langRef.current}`);
+          logAudioDiag('USER_INPUT_ACCEPTED', `turnId=${sid} source=USER_MIC text="${transcript.slice(0, 60)}"`);
+          // ROUND_WAKE_COMMAND_HANDOFF_FIX_1 — the follow-up utterance captured after
+          // handleWakeDetected() armed listening (WAKE_COMMAND_ARMED) for a bare/control-only wake.
+          if (wakeTriggeredRef.current) logAudioDiag('WAKE_COMMAND_CAPTURED', `text="${transcript.slice(0, 60)}"`);
           sessionGotResultRef.current = true;
+          // E2-2 — show what was heard next to the bubble as soon as it lands (before dispatch/
+          // assembly). handleIncomingText overwrites it with the final assembled text.
+          lastUserTranscriptRef.current = transcript;
+          pushBubbleBand(bensonStateRef.current);
           scheduleAssembledDispatch(transcript);
         }
       }
@@ -579,9 +1253,16 @@ export default function BensonApp() {
     // error: don't restart here — 'end' always fires after and handles it
     const errorSub = addErrorListener((error) => {
       logAudioDiag('STT_ERROR', `session=${jsSttSessionIdRef.current} component=js_stt code=-1 name=${error}`);
-      if (error === 'aborted') return;
+      logMicCaptureDiag(`error_${error}`, '');
+      if (error === 'aborted') { closeSttSession('stopped'); return; } // deliberate stop; endSub follows
       setListening(false);
       listeningRef.current = false;
+      // C3-fix — close the session directly on EVERY error kind (endSub may never fire — the bug).
+      closeSttSession(
+        error === 'no-speech' || error === 'no_speech' ? 'no_speech'
+        : error === 'stopped' ? 'stopped'
+        : 'error',
+      );
     });
 
     // ── KEY FIX: 'end' drives the hands-free loop ──────────────────────────
@@ -591,24 +1272,48 @@ export default function BensonApp() {
       const sid = jsSttSessionIdRef.current;
       if (listenWatchdogRef.current) { clearTimeout(listenWatchdogRef.current); listenWatchdogRef.current = null; }
       logAudioDiag('STT_STOPPED', `session=${sid} component=js_stt convMode=${convModeRef.current} wakeTriggered=${wakeTriggeredRef.current}`);
+      logMicCaptureDiag('end_no_terminal', '');
+      try { setMicLevel(0, false); } catch {}
       try { setSystemSoundsMuted(false); } catch {}
       setListening(false);
       listeningRef.current = false;
+      // C3-fix — mark closed here too (idempotent: resultSub/errorSub usually got here first).
+      // reason=result if a transcript landed, else stopped (endpointer / deliberate stop).
+      closeSttSession(sessionGotResultRef.current ? 'result' : 'stopped');
 
       // See resultSub's partial-fallback comment above — this session ended with a captured
-      // partial transcript that never got a true final callback. Process it now instead of
-      // silently dropping it; handleIncomingText's own reply flow re-arms listening afterward, so
-      // this returns before the normal immediate-restart path below.
+      // partial transcript that never got a true final callback. Do NOT treat it as final
+      // immediately: wait PARTIAL_FALLBACK_GRACE_MS for a real final to still land (resultSub
+      // clears this timer if one does), and only then dispatch the partial, logged distinctly as
+      // STT_PARTIAL_FALLBACK. A self-echo partial is rejected right away (no grace, falls through).
       const fallback = lastPartialTranscriptRef.current;
       if (fallback && fallback.sessionId === sid && fallback.text.trim()) {
         lastPartialTranscriptRef.current = null;
         const fallbackText = fallback.text.trim();
         if (looksLikeSelfEcho(fallbackText)) {
-          logAudioDiag('TRANSCRIPT_ACCEPTED', `session=${sid} text="${fallbackText}" language=${langRef.current} source=partial_fallback REJECTED_self_echo=true`);
+          logAudioDiag('STT_PARTIAL_FALLBACK', `session=${sid} outcome=rejected_self_echo text="${fallbackText}"`);
         } else {
-          logAudioDiag('TRANSCRIPT_ACCEPTED', `session=${sid} text="${fallbackText}" language=${langRef.current} source=partial_fallback`);
-          sessionGotResultRef.current = true;
-          scheduleAssembledDispatch(fallbackText);
+          const PARTIAL_FALLBACK_GRACE_MS = 900;
+          if (partialFallbackTimerRef.current) clearTimeout(partialFallbackTimerRef.current);
+          logAudioDiag('STT_PARTIAL_FALLBACK', `session=${sid} outcome=grace_started ms=${PARTIAL_FALLBACK_GRACE_MS} text="${fallbackText}"`);
+          partialFallbackTimerRef.current = setTimeout(() => {
+            partialFallbackTimerRef.current = null;
+            // Stale if a new STT session has since started, or something is already processing.
+            if (jsSttSessionIdRef.current !== sid || loadingRef.current) {
+              logAudioDiag('STT_PARTIAL_FALLBACK', `session=${sid} outcome=dropped_stale`);
+              return;
+            }
+            // BENSON_STABILIZATION_1 — same USER_MIC gate as the final path.
+            const g = userMicGate(sid);
+            if (!g.ok) {
+              logAudioDiag('STT_DROP', `session=${sid} reason=${g.reason} source=partial_fallback text="${fallbackText.slice(0, 40)}"`);
+              return;
+            }
+            logAudioDiag('STT_PARTIAL_FALLBACK', `session=${sid} outcome=accepted_no_final`);
+            logAudioDiag('USER_INPUT_ACCEPTED', `turnId=${sid} source=USER_MIC text="${fallbackText.slice(0, 60)}" via=partial_fallback`);
+            sessionGotResultRef.current = true;
+            scheduleAssembledDispatch(fallbackText);
+          }, PARTIAL_FALLBACK_GRACE_MS);
           return;
         }
       }
@@ -630,16 +1335,7 @@ export default function BensonApp() {
         }, 700);
         return;
       }
-      // Nothing was captured this cycle and nothing is pending a reply — rather than blindly
-      // restarting JS's own SpeechRecognizer session again (confirmed live 2026-07-18: doing this
-      // unconditionally on every empty/no-speech ending created a ~6s self-restart loop that fought
-      // the native hotword loop for the mic every single cycle, degrading actual audio capture
-      // enough that neither engine reliably transcribed real speech during an entire multi-minute
-      // test — not just wasted battery, an actual capture-quality problem), hand the mic back to
-      // the native, foreground-service-backed hotword loop instead. It already knows how to wake
-      // JS back up the moment it hears "Benson" (wakeWordSub below), and a real conversational
-      // reply resumes JS directly via resultSub's handleIncomingText -> speakText flow — neither of
-      // those paths ever reaches this block, since loadingRef/speakingRef guards it out above.
+      // Nothing was captured this cycle and nothing is pending a reply.
       if (!loadingRef.current && !speakingRef.current) {
         // Explicit user attempt (medallion tap or wake-word command) that captured NOTHING: give a
         // short spoken cue instead of dying silently. This is the "pressed the medallion, heard a
@@ -654,9 +1350,33 @@ export default function BensonApp() {
         }
         if (missedExplicit) {
           logAudioDiag('STT_MISS_FEEDBACK', `session=${sid} trigger=${sttTriggerRef.current} engine=${sttEngineRef.current}`);
-          speak(`Nu am auzit nimic, ${getAddress()}. Mai încearcă o dată.`);
+          // E1-0: "Recunoaștere eșuată → zero reacție. Tăcere, nu mesaj de rezervă."
+          if (E1_USER_ONLY) logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command source=stt_miss');
+          else speak(`Nu am auzit nimic, ${getAddress()}. Mai încearcă o dată.`);
         }
-        try { resumePassiveWake(); } catch {}
+        // Fixed 2026-08-23 (real bug, confirmed live): this used to ALWAYS call resumePassiveWake()
+        // here, unconditionally — including while conversation mode was ON. That handed the mic to
+        // the SEPARATE wake-scan loop (startLocalWakeLoop) instead of just continuing to listen,
+        // which meant (a) "conversation mode" silently stopped being continuous — the user had to
+        // say "Benson" again for every follow-up turn, defeating its entire purpose, and (b) the
+        // wake-scan loop's own self-restart (setTimeout 150ms) then raced directly against conv
+        // mode's reactive restarts for the same mic/whisper pipeline — confirmed in logcat as
+        // interleaved WAKE_SCAN_START / STT_REQUESTED trigger=conversation_mode within the same
+        // ~300ms window, on every single cycle. (The historical 2026-07-18 comment this replaces
+        // predates startLocalWakeLoop entirely — it was written when "the passive hotword loop" and
+        // "conversation mode's idle state" were the same native SpeechRecognizer loop; they are two
+        // separate, independently-restarting subsystems now, and only one should ever own the mic
+        // for a given mode.) While conv mode is on, keep listening directly — no wake word needed
+        // for follow-up turns. Only hand off to wake-scan when conv mode is actually off.
+        if (convModeRef.current && isForegroundRef.current) {
+          setTimeout(() => {
+            if (convModeRef.current && isForegroundRef.current && !loadingRef.current && !speakingRef.current && !listeningRef.current) {
+              doStartListening();
+            }
+          }, 400);
+        } else {
+          try { resumePassiveWake(); } catch {}
+        }
       }
     });
 
@@ -680,8 +1400,17 @@ export default function BensonApp() {
 
     // Floating bubble tap — same activation as the notification's LISTEN action.
     const bubbleTapSub = addBubbleTappedListener(() => {
+      // E2-1 — a bubble tap is a direct user touch: bring the app up AND start listening
+      // immediately, no chime, no speech. Not blocked by E1-0 — the source is the tap itself.
+      noteUserAction();
       bringToForeground();
-      if (convModeRef.current) doStartListening();
+      if (E2_LISTEN_ON_OPEN && !silencedRef.current) {
+        logAudioDiag('LISTEN_STARTED', 'source=user_open');
+        playListenStartSound(); // E3-3
+        doStartListening();
+      } else if (convModeRef.current) {
+        doStartListening();
+      }
     });
 
     // The native "Benson" hotword loop (inside BensonForegroundService) heard the word — it
@@ -690,8 +1419,56 @@ export default function BensonApp() {
     // same breath ("Benson, deschide Waze"), native hands back the tail — process it immediately
     // instead of starting a second, empty listening session; otherwise capture the command now.
     const wakeWordSub = addWakeWordDetectedListener((commandTail) => {
+      nativeWakeEventAtRef.current = Date.now(); // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — for WAKE_TO_COMMAND_LATENCY
       logAudioDiag('WAKE_EVENT_RECEIVED_IN_JS', `commandTail="${commandTail}" source=native`);
+      // ROUND_WAKE_NATIVE_TO_JS_ACK_1 — clears the native durable pending-wake flag (this IS the
+      // ack) so the heartbeat-poll fallback below never re-delivers the same wake a second time.
+      try { takePendingWakeCommand(); } catch {}
       handleWakeDetected(commandTail || '');
+    });
+
+    // ROUND_WAKE_STATE_BUG_1 — native heartbeat (~3 s). Executes even while BENSON is backgrounded
+    // (it's an EVENT, not a JS timer). Re-arms the local wake loop when it should be scanning but
+    // the frozen setTimeout(startLocalWakeLoop) chain left it stopped — the proven root cause of
+    // "wake works sometimes / dead sometimes" after a background / app-launch transition.
+    const wakePokeSub = addWakePokeListener(() => {
+      // ROUND_WAKE_NATIVE_TO_JS_ACK_1 — diagnostic-only, unconditional: proves whether the JS side
+      // of this event is ever actually invoked while backgrounded/screen-off. Every prior claim of
+      // "the heartbeat channel is proven reliable" only ever checked NWW_HEALTH/WAKE_POKE, which
+      // are NATIVE-side logs that fire regardless of whether sendEvent() ever reaches this
+      // callback — never independently verified from the JS side until now.
+      logAudioDiag('WAKE_POKE_JS_RECEIVED', `ts=${Date.now()}`);
+      try {
+        // Fallback consumption of a durable pending wake command that the live onWakeWordDetected
+        // event failed to deliver. takePendingWakeCommand() is an atomic read+clear, so if the
+        // live path already consumed it this is always a safe no-op (returns null).
+        const pendingTail = takePendingWakeCommand();
+        if (pendingTail !== null) {
+          logAudioDiag('WAKE_PENDING_CONSUMED', `commandTail="${pendingTail}" source=heartbeat_fallback`);
+          nativeWakeEventAtRef.current = Date.now();
+          handleWakeDetected(pendingTail);
+        }
+        // URGENT_WAKE_FRESH_SESSION_1 — REVERTED (was URGENT_REPAIR_AND_ADVANCE_1's conv-mode
+        // self-heal, added to recover a JS setTimeout retry that dies while backgrounded during a
+        // WhatsApp confirmation wait). Proven live, with a smoking-gun log trace, that this was
+        // actively harmful: convMode is ALWAYS on by design (see enterChatMode()), so this fired
+        // on every single ~3s poke — including one instance that forcibly stopped NativeCloudWake
+        // (WAKE_NATIVE_STOP) mid-VAD-capture (WAKE_VAD_BEGIN rms=2935 with no matching VAD_END —
+        // the user's own "Benson" utterance, killed before cloud STT could even run) to force a
+        // COMMAND_STT session instead. That confirmation-recovery job is now handled correctly and
+        // more robustly by the native one-shot confirmation listener (URGENT_CONFIRMATION_NATIVE_1,
+        // armed directly in endTtsBlock() — see startConfirmationListening below), which needs no
+        // JS heartbeat backstop at all. Revert: re-add the staleness-gated block removed here.
+        if (silencedRef.current || convModeRef.current || loadingRef.current || speakingRef.current) return;
+        if (whatsappCallMicHoldUntilRef.current > Date.now() || waCallMicHoldActiveSafe()) return;
+        if (Date.now() < micResumeAtRef.current) return;
+        if (wakeEngineRef.current !== 'local') return;
+        if (wakeScanningRef.current || listeningRef.current || wakeTriggeredRef.current) return;
+        logAudioDiag('WAKE_SELF_HEAL_START', `reason=native_poke foreground=${isForegroundRef.current}`);
+        try { startLocalWakeLoop(); } catch {}
+        logAudioDiag(wakeScanningRef.current ? 'WAKE_SELF_HEAL_OK' : 'WAKE_SELF_HEAL_FAIL',
+          `reason=native_poke scanning=${wakeScanningRef.current}`);
+      } catch {}
     });
 
     // Resume hands-free listening when the user returns to BENSON after the app was
@@ -703,33 +1480,164 @@ export default function BensonApp() {
       isForegroundRef.current = next === 'active';
 
       if (next !== 'active') {
+        // E2-2 — BENSON just went behind another app: surface the written band with whatever
+        // state/transcript is current (it was hidden while BENSON's own screen was up).
+        pushBubbleBand(bensonStateRef.current);
+        // Round D (2026-08-31) — kill any TTS and its queue the instant we leave the foreground,
+        // UNCONDITIONALLY. A network-TTS utterance (OpenAI/Gemini) can't play while backgrounded;
+        // it was surfacing LATE on the next foreground return, so BENSON spoke a stale reply
+        // ("Am deschis Waze" right after opening YouTube). Nothing spoken now survives a
+        // background transition.
+        try { stopSpeaking(); } catch {}
+        try { stopOpenAITTS().catch(() => {}); } catch {}
+        try { stopGeminiTTS().catch(() => {}); } catch {}
+        endTtsBlock('background'); // C1 TASK 1 — never leave speakingRef raised on a bg transition
+        // ROUND_WAKE_NATIVE_GENERIC_1 — release native wake ownership independent of conv-mode/
+        // sttEngine. beginTtsBlock() calls nwOwner('TTS') UNCONDITIONALLY (any STT engine); the
+        // conv-mode/local-engine branch just below only ever existed to hand the mic to the OLD
+        // MicroWakeWord/legacy hotword loop and never ran while nativeWakeRef.current was false
+        // (no native engine was ever actually armable before this round). Confirmed live on
+        // 9c1464eb this round: without this, micOwner stayed stuck at "TTS" forever after any
+        // backgrounding that interrupted a TTS utterance (NWW_HEALTH micOwner=TTS running=false
+        // for 20+ seconds, native wake never re-arming) whenever the default 'local' STT engine
+        // was selected, since sttEngineRef.current !== 'local' below is then always false.
+        // Gated on nativeWakeRef.current so the untouched 'local'-engine-only path (leave the
+        // current JS capture loop running, per the comment below) is completely unaffected when
+        // no native engine is configured. Revert: delete this block.
+        if (nativeWakeRef.current) { try { nwOwner('WAKE'); } catch {} }
+
         // Leaving the foreground (screen off, Home pressed, another app opened manually) — JS's
-        // own conv-mode SpeechRecognizer session is not a safe mic owner here (see isForegroundRef
-        // doc above: confirmed live 2026-07-18 it can silently die with no recovery), so hand the
-        // mic back to the native, foreground-service-backed hotword loop instead. Without this,
-        // BENSON went completely deaf until the user manually reopened the app — the exact
-        // "always have to search for and open the app" complaint, since conv mode being on by
-        // default meant JS grabbed the mic away from the native loop on every launch and never
-        // gave it back on its own.
-        if (convModeRef.current) {
+        // own conv-mode SpeechRecognizer session ('cloud'/'ondevice' engines) is not a safe mic
+        // owner here (see isForegroundRef doc above: confirmed live 2026-07-18 it can silently die
+        // with no recovery), so hand the mic back to the native, foreground-service-backed hotword
+        // loop instead. Without this, BENSON went completely deaf until the user manually reopened
+        // the app — the exact "always have to search for and open the app" complaint, since conv
+        // mode being on by default meant JS grabbed the mic away from the native loop on every
+        // launch and never gave it back on its own.
+        //
+        // The 'local' engine (the default) is DIFFERENT and exempt from this (product-owner-
+        // directed 2026-08-24): it's the same AudioRecord+VAD capture, backed by the same
+        // foreground service, either way — not the fragile SpeechRecognizer this caution was
+        // written for. Stopping and hopping to the native hotword fallback here was leaving
+        // BENSON silently unable to hear anything at all while backgrounded with conv mode on
+        // (startLocalWakeLoop() itself no-ops whenever convModeRef is true, by design — see its
+        // own comment — so this handoff produced neither engine actually listening). The floating
+        // bubble is the visible cue this is happening: as long as it's up, BENSON should stay
+        // awake and reachable without repeating the wake word, exactly like still being in
+        // foreground — so for 'local', just leave the current capture loop running untouched.
+        if (convModeRef.current && sttEngineRef.current !== 'local') {
           try { stopRecognition(); } catch {}
           setListening(false); listeningRef.current = false;
+          closeSttSession('background'); // C3 — recognizer torn down here; free the gate
           try { resumePassiveWake(); } catch {}
         }
         return;
       }
 
-      // Whenever BENSON's own Activity comes back to the foreground (returnToBenson() after a
-      // WhatsApp automation, or the user just switching back manually), the bubble shown during
-      // the handoff has no reason to keep floating on top of BENSON's own full-screen UI —
-      // unconditional and harmless to call even if it was never shown.
-      hideBubble();
-      if (!convModeRef.current) return;
+      // E2-2 — BENSON's own screen is up again; the written band (only for the over-another-app
+      // case) comes down. The transcript stays in the chat log instead. isForegroundRef is already
+      // true here, so pushBubbleBand computes visible=false and hides it.
+      pushBubbleBand('IDLE');
+
+      // AUTO-RETURN-AFTER-CALL — this foreground transition was triggered by the native call-
+      // lifecycle watcher (it verified a WhatsApp call ended and fired the explicit MainActivity
+      // Intent). Re-arm WAKE mode ONLY: never conversation mode, never STT_REQUESTED
+      // trigger=conversation_mode. Then return — skip every other 'active'-restart branch below.
+      let callEndedReturn = false;
+      try { callEndedReturn = consumeCallEndedReturnPending(); } catch {}
+      if (callEndedReturn) {
+        whatsappCallMicHoldUntilRef.current = 0;
+        try { clearWhatsAppCallMicHold(); } catch {}
+        if (convModeRef.current) { convModeRef.current = false; setConvMode(false); }
+        wakeTriggeredRef.current = false;
+        try { hideWakeRing(); } catch {}
+        if (speakingRef.current || ttsHardTimerRef.current) { try { stopSpeaking(); } catch {} try { stopOpenAITTS().catch(() => {}); } catch {} endTtsBlock('interrupt'); }
+        if (sttSessionActiveRef.current) { try { stopRecognition(); } catch {} setListening(false); listeningRef.current = false; closeSttSession('background'); }
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'call_ended_return');
+        setTimeout(() => { if (!silencedRef.current) { try { resumePassiveWake(); } catch {} } }, 400);
+        logAudioDiag('WAKE_MODE_RESTORED', 'reason=call_ended convMode=false');
+        return;
+      }
+
+      // WA-CALL-STAYS-LIVE — the mic was held closed after placing a WhatsApp call so the call
+      // kept the mic. The user being back on BENSON's screen means they are done with (or have
+      // put on speaker) that call: lift the hold (JS ref + the native source of truth) so the
+      // wake word / listening work again.
+      if (whatsappCallMicHoldUntilRef.current > Date.now() || waCallMicHoldActiveSafe()) {
+        logAudioDiag('MIC_HOLD', 'reason=whatsapp_call_live cleared=foreground_return');
+        whatsappCallMicHoldUntilRef.current = 0;
+        try { clearWhatsAppCallMicHold(); } catch {}
+      }
+
+      // ── C1: unconditional speaking-state reset on foreground return ──────────────────────────
+      // A network-TTS onDone (or the device TTS callback) that never fired while backgrounded
+      // leaves speakingRef stuck true; every restart below then no-ops and BENSON is deaf. The
+      // user coming back to the app is an unambiguous "reset" signal — clear it hard.
+      if (speakingRef.current || ttsHardTimerRef.current) {
+        logAudioDiag('TTS_FORCE_UNBLOCK', 'reason=foreground_return');
+        try { stopSpeaking(); } catch {}
+        try { stopOpenAITTS().catch(() => {}); } catch {}
+        endTtsBlock('interrupt');
+      }
+
+      // ── C3 — a single-session gate left set across a background gap (endSub never fired while JS
+      // timers were suspended) would block every restart below (C1's resumeListeningAfterUnblock,
+      // the self-heal, the endSub timers) — BENSON would return deaf. Returning to the foreground
+      // is an unambiguous "sessions are over" signal; close it here.
+      if (sttSessionActiveRef.current) {
+        try { stopRecognition(); } catch {}
+        setListening(false); listeningRef.current = false;
+        closeSttSession('background');
+      }
+
+      // ── C1 TASK 3 — resume_task decoupled from the (frozen) activity thread ──────────────────
+      // If a resume_task was in flight while backgrounded, the user coming back IS the "whichever
+      // comes first" signal: speaking state is already reset above, and listening restarts below.
+      // The awaited resumePendingTask() still resolves when the native action finishes (its own
+      // handler runs then). If the state got stuck at EXECUTING/resume_task with nothing coming,
+      // TASK 4's watchdog recovers it — never "Am rămas blocat".
+      if (C1_RESUME_DECOUPLED && (resumeInFlightRef.current || (bensonStateRef.current === 'EXECUTING' && execPhaseRef.current === 'resume_task'))) {
+        logAudioDiag('RESUME', `source=foreground_return state=${bensonStateRef.current}`);
+        setLoading(false); loadingRef.current = false;
+        setTimeout(() => { try { resumeListeningAfterUnblock(); } catch {} }, 250);
+      }
+      // C1: a confirmation gate still open after a long deaf gap is stale — the user has moved on.
+      if (gateArmedAtRef.current && Date.now() - gateArmedAtRef.current > PENDING_STALE_MS) {
+        if (pendingMissionTaskRef.current || pendingNoteActionRef.current || pendingVignetteRef.current) {
+          logAudioDiag('STATE_CLEARED', `after=foreground_stale ageMs=${Date.now() - gateArmedAtRef.current}`);
+          pendingMissionTaskRef.current = null;
+          pendingNoteActionRef.current = null;
+          pendingVignetteRef.current = null;
+        }
+        gateArmedAtRef.current = 0;
+      }
+
+      // Removed unconditional hideBubble() here (2026-08-25, product-owner-directed): the bubble
+      // is now meant to stay visible ALWAYS — a permanent, always-there indicator that BENSON is
+      // awake and reachable (tap it or say the wake word), not just a "way back" shown only while
+      // another app has focus.
+      // C1: restart listening on return even in wake-word (non-conv) mode — previously this handler
+      // only ever restarted for conv mode, so after an action in wake mode BENSON stayed idle.
+      if (!convModeRef.current) {
+        if (!silencedRef.current && !wakeTriggeredRef.current && !loadingRef.current) {
+          setTimeout(() => { if (!speakingRef.current) { try { resumePassiveWake(); } catch {} } }, 400);
+        }
+        return;
+      }
       // A wake-word-triggered session (native bringActivityToFront() also fires this same
       // 'active' transition) already owns its own doStartListening() call via wakeWordSub —
       // skip here so the two don't race for the mic (confirmed live 2026-07-14: this was firing
       // its own doStartListening() ~500ms after the wake-word flow's, overlapping/killing both).
       if (loadingRef.current || speakingRef.current || listeningRef.current || wakeTriggeredRef.current) return;
+      // E2-1 — opening the app is a direct user action: start listening NOW, not after a 500ms
+      // grace timer and not via the 2s self-heal. No chime, no speech. Revert: E2_LISTEN_ON_OPEN=false.
+      if (E2_LISTEN_ON_OPEN && convModeRef.current && !silencedRef.current) {
+        logAudioDiag('LISTEN_STARTED', 'source=user_open');
+        playListenStartSound(); // E3-3
+        doStartListening();
+        return;
+      }
       setTimeout(() => {
         if (convModeRef.current && !loadingRef.current && !speakingRef.current && !listeningRef.current && !wakeTriggeredRef.current) {
           doStartListening();
@@ -737,16 +1645,117 @@ export default function BensonApp() {
       }, 500);
     });
 
+    // ── C2: listen-loop self-heal ────────────────────────────────────────────────────────────
+    // Every LISTEN_SELF_HEAL_MS: if nothing is speaking/loading/in the TTS tail and the loop that
+    // SHOULD be running isn't, restart it. Both restart paths self-guard against double-starts.
+    const listenHealTimer = LISTEN_SELF_HEAL_MS > 0 ? setInterval(() => {
+      // WA-LIFECYCLE-FIX-1 — consume a native "verified WhatsApp call ended" signal FIRST, before
+      // any of the guards below. This path must work while BENSON is still backgrounded (no
+      // AppState 'active' has fired): after a post-call service kill/revive the native
+      // recoverWhatsAppCallLifecycle() finalizes CALL_ENDED and publishes the signal here.
+      try {
+        let sig = 0;
+        try { sig = getWhatsAppCallEndedSignalAt() || 0; } catch {}
+        let pending = false;
+        try { pending = consumeCallEndedReturnPending(); } catch {}
+        if (pending || (sig > 0 && sig !== lastCallEndedSignalRef.current)) {
+          lastCallEndedSignalRef.current = sig || Date.now();
+          const wasHeld = whatsappCallMicHoldUntilRef.current !== 0 || waCallMicHoldActiveSafe();
+          whatsappCallMicHoldUntilRef.current = 0;
+          try { clearWhatsAppCallMicHold(); } catch {}
+          logAudioDiag('WA_CALL_ENDED_NATIVE', `via=self_heal sigAt=${sig} wasHeld=${wasHeld}`);
+          logAudioDiag('WAKE_MODE_RESTORED', 'reason=call_ended_native');
+          if (!silencedRef.current && !convModeRef.current) {
+            try { resumePassiveWake(); } catch {}
+          }
+          logAudioDiag(
+            'WAKE_RUNTIME',
+            `serviceAlive=${serviceActiveRef.current} micHold=${waCallMicHoldActiveSafe()} ` +
+              `wakeLoop=${wakeScanningRef.current} detectorActive=${!listeningRef.current && !wakeTriggeredRef.current && !speakingRef.current}`,
+          );
+        }
+      } catch {}
+
+      // WAKE HEALTH — refresh the async pieces (cheap, fire-and-forget) then emit the consolidated
+      // line + drive the honest notification. Runs every tick, BEFORE the early-returns below so
+      // health is reported even while speaking / loading.
+      try { getA11yConnectionState().then((s) => { a11yBoundRef.current = s === 'enabled_connected' ? 'BOUND' : 'UNBOUND'; }).catch(() => {}); } catch {}
+      try { Promise.resolve(isWakeWordEnabled()).then((e) => { wakeWordEnabledRef.current = e !== false; }).catch(() => {}); } catch {}
+      try { emitWakeHealth(); } catch {}
+
+      if (silencedRef.current || loadingRef.current) return;
+
+      // BENSON_STABILIZATION_1 — state RECOVERING: a stuck speakingRef (a TTS onDone that never
+      // fired) must never wedge the recognizer. If speaking has been "on" longer than the hard
+      // watchdog window, force-clear it and re-arm.
+      if (speakingRef.current) {
+        const heldMs = ttsBlockStartedAtRef.current ? Date.now() - ttsBlockStartedAtRef.current : 0;
+        if (heldMs > TTS_MAX_BLOCK_MS + 2000) {
+          logAudioDiag('WAKE_SELF_HEAL_START', `reason=stale_speaking heldMs=${heldMs}`);
+          logAudioDiag('AUDIO_STATE', 'from=TTS_SPEAKING to=RECOVERING');
+          logAudioDiag('WAKE_SELF_HEAL_ACTION', 'action=clear_stale_speaking');
+          endTtsBlock('watchdog');
+          afterPromptRearm(convModeRef.current || wakeTriggeredRef.current);
+          logAudioDiag('WAKE_SELF_HEAL_OK', 'reason=stale_speaking');
+        }
+        return;
+      }
+      if (Date.now() < micResumeAtRef.current) return; // TTS tail
+
+      if (convModeRef.current) {
+        if (!listeningRef.current && !wakeTriggeredRef.current) {
+          logAudioDiag('LISTEN_HEALED', 'silent=true reason=conv_idle');
+          doStartListening();
+        }
+        return;
+      }
+      // BENSON_STABILIZATION_1 — dropped the isForegroundRef gate: the local wake loop must
+      // self-heal whether the RN Activity is foreground or backgrounded (as long as JS runs).
+      if (serviceActiveRef.current && wakeEngineRef.current === 'local'
+          && !wakeScanningRef.current && !listeningRef.current && !wakeTriggeredRef.current) {
+        logAudioDiag('WAKE_SELF_HEAL_START', 'reason=wake_loop_stopped');
+        logAudioDiag('WAKE_SELF_HEAL_ACTION', 'action=restart_local_wake_loop');
+        try { resumePassiveWake(); } catch {}
+        logAudioDiag(wakeScanningRef.current ? 'WAKE_SELF_HEAL_OK' : 'WAKE_SELF_HEAL_FAIL',
+          wakeScanningRef.current ? 'reason=wake_loop_stopped' : 'reason=resume_no_effect');
+      }
+    }, LISTEN_SELF_HEAL_MS) : null;
+
     return () => {
+      if (partialFallbackTimerRef.current) { clearTimeout(partialFallbackTimerRef.current); partialFallbackTimerRef.current = null; }
+      if (listenHealTimer) clearInterval(listenHealTimer);
+      endTtsBlock('stop'); // C1 TASK 1 — app teardown must not leave speakingRef raised
+      if (ttsHardTimerRef.current) { clearTimeout(ttsHardTimerRef.current); ttsHardTimerRef.current = null; }
+      if (stateClearTimerRef.current) { clearTimeout(stateClearTimerRef.current); stateClearTimerRef.current = null; }
+      if (execWatchdogRef.current) { clearTimeout(execWatchdogRef.current); execWatchdogRef.current = null; }
+      if (bandHideTimerRef.current) { clearTimeout(bandHideTimerRef.current); bandHideTimerRef.current = null; }
+      if (sttSessionActiveRef.current) { try { cancelSttSessionWatchdog(sttSessionActiveRef.current); } catch {} }
       resultSub.remove(); errorSub.remove(); endSub.remove(); volumeSub.remove();
+      speechStartSub.remove(); speechEndSub.remove(); sttWatchdogSub.remove(); confirmResultSub.remove();
+      if (pendingConfirmationIdRef.current) { try { cancelConfirmationListening(pendingConfirmationIdRef.current); } catch {} }
       stopReqSub.remove(); listenReqSub.remove(); bubbleTapSub.remove();
-      wakeWordSub.remove(); appStateSub.remove();
+      wakeWordSub.remove(); wakePokeSub.remove(); appStateSub.remove();
     };
   }, []);
 
   // ── Stage 6: load device TTS voices once ──────────────────────────────────
   useEffect(() => {
-    getAvailableVoices().then(setVoices).catch(() => {});
+    getAvailableVoices().then((vs) => {
+      setVoices(vs);
+      // Diagnostic (product-owner-directed 2026-08-23): expo-speech's Voice type carries no
+      // gender/timbre metadata (identifier, name, quality, language only) — there is no way to
+      // programmatically pick a "baritone"/butler-toned voice from code. Logged once per app start
+      // so the real on-device voice list (name/identifier/quality per language) can be read via
+      // `adb logcat -s BENSON_AUDIO` and picked by ear (Settings' voice Preview ▶ button), instead
+      // of guessing from an identifier string.
+      for (const target of ['ro-RO', 'en-GB', 'de-DE', 'en-US', 'ro', 'en', 'de']) {
+        const matches = vs.filter((v) => v.language === target);
+        if (matches.length) {
+          logAudioDiag('VOICE_LIST', `lang=${target} count=${matches.length} voices=${matches.map((v) => `${v.name}(${v.identifier},${v.quality})`).join(' | ')}`);
+        }
+      }
+      logAudioDiag('VOICE_LIST', `TOTAL count=${vs.length} allLanguages=${Array.from(new Set(vs.map((v) => v.language))).join(',')}`);
+    }).catch(() => {});
   }, []);
 
   // Mission Governance (Waze/WhatsApp, Phase 1) — cold-start restore + resume status on return.
@@ -756,7 +1765,10 @@ export default function BensonApp() {
     hydrateActiveMission().then((mission) => {
       if (mission && (mission.state === 'WaitingConfirmation' || mission.state === 'WaitingUser')) {
         addMessage('benson', mission.userMessage);
-        speak(mission.userMessage);
+        // E1-0: cold-start restore — not a user command. Show it; do not speak it. The mission
+        // stays persisted and resolves on the user's next utterance. Revert: E1_USER_ONLY = false.
+        if (E1_USER_ONLY) logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command source=mission_hydrate');
+        else speak(mission.userMessage);
         lastWaitingUserAnnounceRef.current = { text: mission.userMessage, at: Date.now() };
       }
     });
@@ -774,6 +1786,8 @@ export default function BensonApp() {
         const last = lastWaitingUserAnnounceRef.current;
         const isDuplicate = last && last.text === mission.userMessage && Date.now() - last.at < WAITING_USER_ANNOUNCE_COOLDOWN_MS;
         if (isDuplicate) return;
+        // E1-0: re-announce on foreground return is a system-callback trigger, not a user command.
+        if (E1_USER_ONLY) { logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command source=waiting_user_return'); return; }
         addMessage('benson', mission.userMessage);
         speak(mission.userMessage);
         lastWaitingUserAnnounceRef.current = { text: mission.userMessage, at: Date.now() };
@@ -800,7 +1814,10 @@ export default function BensonApp() {
     const watch = startAccessibilityWatch({
       onDropped: () => {
         a11yLastReminderRef.current = Date.now(); // the drop message counts as the first reminder
-        speak('Serviciul de accesibilitate tocmai s-a dezactivat. Nu mai pot citi ecranul sau apăsa butoane până nu-l reactivezi din Setări.');
+        // E1-0: poll-triggered (60s), not a user command → no unsolicited speech. The persistent
+        // on-screen banner (accessibilityDown) + the tappable notification still alert the user.
+        if (E1_USER_ONLY) logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command source=a11y_dropped');
+        else speak('Serviciul de accesibilitate tocmai s-a dezactivat. Nu mai pot citi ecranul sau apăsa butoane până nu-l reactivezi din Setări.');
       },
       onStatus: (connected) => {
         setAccessibilityDown(!connected);
@@ -812,7 +1829,9 @@ export default function BensonApp() {
         const idle = isForegroundRef.current && !listeningRef.current && !loadingRef.current && !speakingRef.current;
         if (idle && now - a11yLastReminderRef.current >= a11yReminderMsRef.current) {
           a11yLastReminderRef.current = now;
-          speak(`Reamintire blândă, ${getAddress()}: serviciul de accesibilitate e încă oprit. Când ai un moment, reactivează-l din Setări ca să pot ajuta din nou complet.`);
+          // E1-0: periodic timer reminder — the banner stays up regardless; no spoken nag.
+          if (E1_USER_ONLY) logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command source=a11y_reminder');
+          else speak(`Reamintire blândă, ${getAddress()}: serviciul de accesibilitate e încă oprit. Când ai un moment, reactivează-l din Setări ca să pot ajuta din nou complet.`);
         }
       },
     });
@@ -832,11 +1851,15 @@ export default function BensonApp() {
     isAppPermOnboardingDone().then(done => { if (!done) setAppPermOpen(true); });
   }, [phase]);
 
-  // Wake word — passive "Benson" listening runs natively inside BensonForegroundService
-  // (independent of this Activity/screen state), and starts itself as soon as the service
-  // starts. Just need the service running as soon as the main screen is reached — requires mic
-  // permission, since Android refuses background mic access to an app with no active
-  // foreground service.
+  // Wake word — the foreground service auto-starts ITS OWN native SpeechRecognizer-based hotword
+  // loop the instant it starts (BensonForegroundService's own onCreate/onStartCommand), regardless
+  // of which engine this app actually wants to use. wakeEngineRef defaults to 'local' (the working
+  // Whisper-based path — see RMS_THRESHOLD fix), but nothing handed off to it at boot before this
+  // fix: resumePassiveWake() was only ever called reactively, after a JS STT cycle's 'end' event —
+  // which never happens if the native loop is the only thing running and stuck. Confirmed live
+  // 2026-08-23: on a fresh install/launch, saying "Benson" did nothing because the native loop was
+  // cycling BURST_WATCHDOG_TIMEOUT with no handoff ever triggered. Explicit resumePassiveWake()
+  // right after the service starts makes the handoff happen at boot, not just reactively.
   useEffect(() => {
     if (phase !== 'chat') return;
     (async () => {
@@ -844,6 +1867,23 @@ export default function BensonApp() {
       const granted = await checkMicPermission();
       if (!granted) return;
       if (!serviceActiveRef.current) await startBackgroundService();
+      // E2-1 — reaching the chat screen IS the user opening the app: in conv mode (the default),
+      // start listening immediately, not via the 2s self-heal. resumePassiveWake() below still
+      // handles wake-word-only mode. No chime, no speech. Revert: E2_LISTEN_ON_OPEN = false.
+      if (E2_LISTEN_ON_OPEN && convModeRef.current && !silencedRef.current) {
+        logAudioDiag('LISTEN_STARTED', 'source=user_open');
+        playListenStartSound(); // E3-3
+        doStartListening();
+      }
+      try { resumePassiveWake(); } catch {}
+      // Confirmed live 2026-08-23: the FIRST resumePassiveWake() call above still loses the race —
+      // startListeningService()/startBackgroundService() only fire-and-forget the native service
+      // start; pauseHotword() then runs before the native service has actually reached its own
+      // onCreate/onStartCommand (which unconditionally starts the native hotword loop), so there is
+      // nothing to pause yet — it resolves as a no-op, and the native loop then starts moments
+      // later, uncontrolled, regardless of wakeEngineRef being 'local'. A second, delayed call
+      // catches it: by 900ms the native service has always finished starting on this device.
+      setTimeout(() => { try { resumePassiveWake(); } catch {} }, 900);
     })();
   }, [phase]);
 
@@ -861,6 +1901,14 @@ export default function BensonApp() {
       try { wasRecovery = await consumeRecoveryFlag(); } catch {}
       if (!wasRecovery) return;
 
+      // E1-0: this runs after a native OxygenOS-kill resurrection — "după o auto-reparare", which
+      // E1-0 forbids as a speech trigger, explicitly. No "BENSON a revenit online", no spoken
+      // accessibility warning here. The visual accessibility banner (watchdog onStatus) still
+      // covers the disabled-service case. Revert: E1_USER_ONLY = false.
+      if (E1_USER_ONLY) {
+        logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command source=guardian_recovery');
+        return;
+      }
       const guard = await ensureAccessibilityReady().catch(() => null);
       if (guard && guard.state !== 'enabled_connected') {
         speak(ACCESSIBILITY_DOWN_SPOKEN_MESSAGE_RO);
@@ -919,7 +1967,7 @@ export default function BensonApp() {
       if (m === 5 || m === 15 || m === 30) { setReminderMins(m); a11yReminderMsRef.current = m * 60 * 1000; }
     }).catch(() => {});
 
-    const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, tp, cm, acm, cda, cdn, vig, rl, mp, se, ww] = await Promise.all([
+    const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, gk, tp, cm, acm, cda, cdn, vig, rl, mp, se, ww, wn] = await Promise.all([
       AsyncStorage.getItem('masterName'),
       AsyncStorage.getItem('anthropicKey'),
       AsyncStorage.getItem('bensonLang'),
@@ -934,6 +1982,7 @@ export default function BensonApp() {
       AsyncStorage.getItem('tavilyKey'),
       AsyncStorage.getItem('bensonVoiceId'),
       AsyncStorage.getItem('openaiKey'),
+      AsyncStorage.getItem('geminiKey'),
       AsyncStorage.getItem('bensonTtsProvider'),
       AsyncStorage.getItem('bensonCarMode'),
       AsyncStorage.getItem('bensonAutoCarMode'),
@@ -944,6 +1993,7 @@ export default function BensonApp() {
       AsyncStorage.getItem('bensonModelProvider'),
       AsyncStorage.getItem('bensonSttEngine'),
       AsyncStorage.getItem('bensonWakeWordEnabled'),
+      AsyncStorage.getItem('bensonWakeName'),
     ]);
 
     if (sl) { setLang(sl); langRef.current = sl; try { setSttLanguage(sl); } catch {} }
@@ -957,8 +2007,9 @@ export default function BensonApp() {
     if (tk) { setTavilyKey(tk); tavilyKeyRef.current = tk; }
     if (vid) { setVoiceId(vid); voiceIdRef.current = vid; }
     if (ok) { setOpenaiKey(ok); openaiKeyRef.current = ok; }
-    if (tp === 'openai' || tp === 'device') { setTtsProvider(tp); ttsProviderRef.current = tp; }
-    if (mp === 'openai' || mp === 'claude') { setModelProvider(mp); modelProviderRef.current = mp; }
+    if (gk) { setGeminiKey(gk); geminiKeyRef.current = gk; setGeminiKeyForStt(gk); }
+    if (tp === 'openai' || tp === 'device' || tp === 'gemini') { setTtsProvider(tp); ttsProviderRef.current = tp; }
+    if (mp === 'openai' || mp === 'claude' || mp === 'gemini') { setModelProvider(mp); modelProviderRef.current = mp; }
     // STT engine restore + one-time cloud→local migration. Cloud is proven unreliable on this
     // device (see AUDIO_DIAGNOSIS_REPORT.md / the sttEngine useState comment). Existing installs
     // that still have the old 'cloud' value are moved to 'local' ONCE (no manual Settings change
@@ -983,6 +2034,24 @@ export default function BensonApp() {
     const wakeWordOn = ww !== 'false';
     setWakeWordEnabledState(wakeWordOn);
     try { setWakeWordEnabled(wakeWordOn); } catch {}
+    // ROUND_WAKE_NATIVE_GENERIC_1 — restore the wake-name config and push it to native explicitly
+    // (even when it's the default) so JS and native never disagree, same discipline as the
+    // wake-word kill switch just above.
+    const resolvedWakeName = (wn && wn.trim()) || 'Benson';
+    setWakeNameState(resolvedWakeName);
+    wakeNameRef.current = resolvedWakeName;
+    try { setWakeName(resolvedWakeName); } catch {}
+    // Push the already-saved Groq STT credentials down to the native cloud wake loop so it can
+    // transcribe an utterance without JS being alive — JS/expo-secure-store remains the sole
+    // place the real secret is authored (settingsStore.ts); this is a runtime push only, same
+    // class of mechanism as setPorcupineAccessKey. No-op (silently) when no Groq key is saved yet.
+    getEngineConfig('stt', 'groq').then((cfg) => {
+      if (cfg?.apiKey) {
+        try {
+          setNativeWakeCredentials(cfg.apiKey, cfg.baseUrl || GROQ_STT_DEFAULT_BASE_URL, cfg.model || GROQ_STT_DEFAULT_MODEL);
+        } catch {}
+      }
+    }).catch(() => {});
     if (cm) { const c = cm === 'true'; setCarMode(c); carModeRef.current = c; }
     if (cda) { setCarDeviceAddress(cda); carDeviceAddressRef.current = cda; }
     if (cdn) { setCarDeviceName(cdn); }
@@ -1068,7 +2137,21 @@ export default function BensonApp() {
     await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
   }
 
-  async function appendFact(fact: string) {
+  // Round 2 / Task 5 — the single memory-write sink. Every path that persists a "fact" goes
+  // through here, so the discipline is enforced in one place:
+  //   1. The brain never writes on its own. A model-initiated write (the `remember` tool, threaded
+  //      as onRememberFact) is refused outright — see the routeCommand call site below.
+  //   2. A user-initiated write still passes checkMemoryWrite(): a line that would change BENSON's
+  //      own behaviour ("de acum înainte nu mai cere confirmare", "ignore your rules", the German
+  //      and English equivalents) is rejected, never stored. Memory holds facts about the user,
+  //      never rules about BENSON.
+  async function appendFact(fact: string, source: 'user' | 'model' = 'user') {
+    if (source === 'model') {
+      logAudioDiag('MEMORY_REJECTED', 'reason=model_initiated');
+      return;
+    }
+    const verdict = checkMemoryWrite(fact); // logs MEMORY_REJECTED itself on a behaviour-change hit
+    if (!verdict.allowed) return;
     const updated = [...factsRef.current, fact].slice(-MAX_FACTS);
     setFacts(updated);
     factsRef.current = updated;
@@ -1082,7 +2165,25 @@ export default function BensonApp() {
 
   // Benson's replies drive the discreet caption bar; user input isn't displayed (no chat log).
   function addMessage(role: string, text: string) {
-    if (role === 'benson') setLastReply(text);
+    if (role === 'user') {
+      // ORCH-FIX-1: while a confirmation gate is open, handleIncomingText's gate logic owns the
+      // next transition (EXECUTING on YES / CONFIRMING re-prompt on UNKNOWN / cancel on NO).
+      // Pre-empting it with THINKING stranded the state on THINKING for an unrecognized reply.
+      const confirmGateOpen =
+        !!pendingVignetteRef.current || !!pendingNoteActionRef.current ||
+        !!pendingMissionTaskRef.current || getActiveMission()?.state === 'WaitingConfirmation';
+      if (!confirmGateOpen) setBensonState('THINKING');
+      return;
+    }
+    if (role === 'benson') {
+      setLastReply(text);
+      // Only auto-classify the terminal state from a plain conversational reply (state still
+      // THINKING). Mission/confirm paths set CONFIRMING / EXECUTING / DONE / ERROR explicitly and
+      // must not be overridden here.
+      if (bensonStateRef.current === 'THINKING') {
+        setBensonState(isFailureReply(text) ? 'ERROR' : 'DONE', 'reply');
+      }
+    }
   }
 
   // Lowercase, strips diacritics and non-alphanumeric characters — good enough to compare a
@@ -1096,8 +2197,12 @@ export default function BensonApp() {
       .trim();
   }
 
+  const MAX_REMEMBERED_SPOKEN = 5;
   function rememberSpoken(text: string) {
-    lastSpokenRef.current = { normalized: normalizeForEcho(text), at: Date.now() };
+    const now = Date.now();
+    const pruned = lastSpokenRef.current.filter((e) => now - e.at <= ECHO_WINDOW_MS);
+    pruned.push({ normalized: normalizeForEcho(text), at: now });
+    lastSpokenRef.current = pruned.slice(-MAX_REMEMBERED_SPOKEN);
   }
 
   // True if `transcript` looks like BENSON hearing its own recent TTS rather than a real command
@@ -1112,20 +2217,46 @@ export default function BensonApp() {
   // genuine new mission each time it did. 60s comfortably exceeds every observed cycle gap; a
   // legitimate repeat of the exact same command a full minute later is rare enough to accept the
   // small risk of suppressing it, against a loop that otherwise re-opens Waze indefinitely.
-  const ECHO_WINDOW_MS = 60000;
+  // Widened to 120s (2026-08-23, same day as the ggml-small model upgrade): confirmed live that a
+  // boot-greeting echo wasn't caught even by the rolling-list fix above, because the delay between
+  // BENSON speaking and local Whisper finishing transcription was ~70s that same session (model
+  // load + a 15s clip on the now-larger model) — past the old 60s window before the check ever ran.
+  // 120s keeps healthy margin above that observed worst case.
+  // E2-fix-1 (2026-09-07, product-owner-directed): cut to 3s. 120s + the substring check below
+  // ("deschide youtube".includes("deschid")) turned E1-5's short ACK ("Deschid.") into a 2-minute
+  // block on any real command that starts with the same words. If BENSON hasn't spoken in the last
+  // 3s, the self-echo filter no longer applies at all. Revert: 120000.
+  const ECHO_WINDOW_MS = 3000; // was 120000 (E2-fix-1) — earlier 60000 / 12000 / 6000
+  // Timing-independent fingerprint of BENSON's OWN stock fallback line ("I did not quite catch
+  // that, {address}", claudeAgent.ts/openaiAgent.ts) — product-owner-confirmed live 2026-08-24 as
+  // a self-sustaining feedback loop: BENSON says this line when it doesn't understand something,
+  // the mic re-hears its own voice, Whisper mangles it differently each time ("He did not catch
+  // that master." / "E de notquente que é a chance da Master." / "He did not catch that, mas de.",
+  // all real captures from the same live loop), and the word-overlap check above — which depends
+  // on comparing against a specific recent spoken entry within a time window — missed roughly half
+  // of these because the mangling varied too much turn to turn. Each miss triggered ANOTHER "I did
+  // not quite catch that" reply, which the mic then re-heard again — three-plus rounds observed
+  // live, each one a real spoken interruption exactly like the "no unsolicited speech" rule
+  // forbids. Recognizing the phrase's own distinctive fragments directly — independent of timing,
+  // staleness, or which exact entry is compared against — closes that gap structurally instead of
+  // trying to tune the fuzzy-overlap threshold further.
+  const SELF_ECHO_FINGERPRINTS = ['quite catch', 'did not catch', 'not catch that'];
   function looksLikeSelfEcho(transcript: string): boolean {
-    const last = lastSpokenRef.current;
-    if (!last) return false;
-    if (Date.now() - last.at > ECHO_WINDOW_MS) return false;
     const norm = normalizeForEcho(transcript);
     if (norm.length < 4) return false;
-    if (last.normalized.includes(norm) || norm.includes(last.normalized)) return true;
-
-    const spokenWords = new Set(last.normalized.split(' ').filter((w) => w.length > 1));
-    const heardWords = norm.split(' ').filter((w) => w.length > 1);
-    if (spokenWords.size === 0 || heardWords.length === 0) return false;
-    const overlap = heardWords.filter((w) => spokenWords.has(w)).length;
-    return overlap / heardWords.length >= 0.6;
+    if (SELF_ECHO_FINGERPRINTS.some((f) => norm.includes(f))) return true;
+    const recent = lastSpokenRef.current;
+    if (recent.length === 0) return false;
+    const now = Date.now();
+    return recent.some((last) => {
+      if (now - last.at > ECHO_WINDOW_MS) return false;
+      if (last.normalized.includes(norm) || norm.includes(last.normalized)) return true;
+      const spokenWords = new Set(last.normalized.split(' ').filter((w) => w.length > 1));
+      const heardWords = norm.split(' ').filter((w) => w.length > 1);
+      if (spokenWords.size === 0 || heardWords.length === 0) return false;
+      const overlap = heardWords.filter((w) => spokenWords.has(w)).length;
+      return overlap / heardWords.length >= 0.6;
+    });
   }
 
   // Fragment-assembly window: 400-600ms was the specified range; 500ms chosen as the midpoint.
@@ -1156,8 +2287,120 @@ export default function BensonApp() {
     pending.timer = setTimeout(() => {
       const assembled = pendingAssemblyRef.current.text;
       pendingAssemblyRef.current = { text: '', timer: null };
-      if (assembled) handleIncomingText(assembled);
+      // Voice path — carry the byte size of the utterance that produced this transcript so an
+      // empty-audio "da" can't satisfy a Confirmation Gate (see handleIncomingText / Task 2).
+      if (assembled) handleIncomingText(assembled, { viaVoice: true, utteranceBytes: getLastUtteranceBytes() });
     }, FRAGMENT_ASSEMBLY_WINDOW_MS);
+  }
+
+  // Called at the very start of every TTS utterance: raise the speaking flag and hard-stop any
+  // capture that is already running (command STT or the passive wake scan), so nothing records
+  // while BENSON talks. Idempotent — safe if TTS chains sentence-by-sentence.
+  function beginTtsBlock() {
+    if (!speakingRef.current) { logAudioDiag('MIC_BLOCKED', 'reason=tts_speaking'); logAudioDiag('AUDIO_STATE', 'from=LISTENING to=TTS_SPEAKING'); }
+    nwOwner('TTS'); // native wake must not hear BENSON's own voice
+    speakingRef.current = true; setSpeaking(true);
+    if (listeningRef.current || wakeScanningRef.current) {
+      try { stopRecognition(); } catch {}
+      try { stopWakeScan(); } catch {}
+      listeningRef.current = false; setListening(false);
+      wakeScanningRef.current = false;
+      // URGENT_REPAIR_AND_ADVANCE_1 — proven live: stopRecognition() here does not reliably fire
+      // a local-engine 'end' event when interrupted mid-capture, leaving sttSessionActiveRef stuck
+      // (C3 gate) until the native watchdog's 30s timeout — long after a spoken "da" was missed.
+      // closeSttSession() is idempotent, so this is a no-op if the session already closed normally.
+      try { closeSttSession('stopped'); } catch {}
+      try { setMicLevel(0, false); } catch {}
+    }
+    // C1 TASK 2 — hard watchdog on speakingRef: if no TTS callback ever fires (app backgrounded
+    // mid-utterance), speakingRef is force-dropped after TTS_MAX_BLOCK_MS no matter what.
+    ttsBlockStartedAtRef.current = Date.now();
+    if (ttsHardTimerRef.current) clearTimeout(ttsHardTimerRef.current);
+    if (C1_TTS_WATCHDOG && Number.isFinite(TTS_MAX_BLOCK_MS)) {
+      ttsHardTimerRef.current = setTimeout(() => {
+        ttsHardTimerRef.current = null;
+        const elapsedMs = ttsBlockStartedAtRef.current ? Date.now() - ttsBlockStartedAtRef.current : TTS_MAX_BLOCK_MS;
+        logAudioDiag('TTS_WATCHDOG_FIRED', `forcedRelease=true elapsedMs=${elapsedMs}`);
+        endTtsBlock('watchdog');
+        resumeListeningAfterUnblock();
+      }, TTS_MAX_BLOCK_MS);
+    }
+  }
+
+  // C1 TASK 1 — called on EVERY TTS exit path. `reason` ∈ success|error|interrupt|background|stop
+  // (plus 'watchdog' for the hard timer). Drops speakingRef, disarms the hard timer, arms the tail.
+  // Nothing leaves speakingRef raised.
+  type TtsEndReason = 'success' | 'error' | 'interrupt' | 'background' | 'stop' | 'watchdog';
+  function endTtsBlock(reason: TtsEndReason = 'success') {
+    const wasBlocking = speakingRef.current || !!ttsHardTimerRef.current || !!ttsBlockStartedAtRef.current;
+    if (ttsHardTimerRef.current) { clearTimeout(ttsHardTimerRef.current); ttsHardTimerRef.current = null; }
+    speakingRef.current = false; setSpeaking(false);
+    ttsEndedAtRef.current = Date.now();
+    micResumeAtRef.current = ttsEndedAtRef.current + TTS_TAIL_MS;
+    ttsBlockStartedAtRef.current = 0;
+    if (C1_TTS_END_ALL_PATHS && wasBlocking) { logAudioDiag('TTS_BLOCK_END', `reason=${reason}`); logAudioDiag('AUDIO_STATE', 'from=TTS_SPEAKING to=WAITING_USER_REPLY'); }
+    // ROUND_ASSISTANT_SESSION_UX_FIX_1 — TTS for this turn just finished (or was cut short — an
+    // interrupt/watchdog/background end still counts as "no longer speaking", so the overlay
+    // isn't stuck waiting forever on a TTS that will never cleanly finish). If the state is
+    // CURRENTLY a terminal result, this is the moment it becomes eligible for the readable dwell
+    // — not whenever the state first flipped to DONE/ERROR, which could be well before a long
+    // reply actually finishes being spoken (the HandyParken bug this round fixes).
+    if (wasBlocking && (bensonStateRef.current === 'DONE' || bensonStateRef.current === 'ERROR')) {
+      logAudioDiag('RESULT_TTS_DONE', `reason=${reason}`);
+      scheduleResultDismiss(RESULT_DWELL_AFTER_TTS_MS);
+    }
+    // URGENT_CONFIRMATION_NATIVE_1 — a mission is waiting for a YES/NO reply (e.g. "Îl trimit?").
+    // Arm the native one-shot listener instead of relying on the JS mic loop to re-arm itself:
+    // proven live that BENSON backgrounded in WhatsApp leaves those JS retry timers inert, so a
+    // spoken "da" was never even heard. The listening window itself is now native-timed.
+    if (wasBlocking && pendingMissionTaskRef.current) {
+      const confirmationId = `confirm-${Date.now()}`;
+      pendingConfirmationIdRef.current = confirmationId;
+      logAudioDiag('CONFIRM_LISTEN_ARM', `confirmationId=${confirmationId} timeoutMs=${CONFIRMATION_LISTEN_TIMEOUT_MS}`);
+      try { setMicLevel(0.3, true); } catch {}
+      try { startConfirmationListening(confirmationId, CONFIRMATION_LISTEN_TIMEOUT_MS); } catch {}
+    }
+  }
+
+  // Restart whatever should be listening after a forced unblock / foreground return. Both
+  // doStartListening() and startLocalWakeLoop() self-guard against double-starts.
+  function resumeListeningAfterUnblock() {
+    if (silencedRef.current) return;
+    if (whatsappCallMicHoldUntilRef.current > Date.now() || waCallMicHoldActiveSafe()) {
+      logAudioDiag('MIC_BLOCKED', 'reason=whatsapp_call_live');
+      return;
+    }
+    if (convModeRef.current) { doStartListening(); return; }
+    try { resumePassiveWake(); } catch {}
+  }
+
+  // ── BENSON_STABILIZATION_1 — the ONE guaranteed post-TTS re-arm. Called from EVERY prompt
+  // branch (success / fail / cancel / timeout / ambiguity). Exactly one recognizer is re-armed
+  // for the expected next state; never leaves wake_loop_stopped / speakingRef stuck.
+  function afterPromptRearm(expectReply: boolean) {
+    logAudioDiag('WAKE_REARM_AFTER_TTS', `expectReply=${expectReply} conv=${convModeRef.current} wakeTriggered=${wakeTriggeredRef.current}`);
+    if (silencedRef.current) { logAudioDiag('WAKE_REARM_FAIL', 'reason=silenced'); return; }
+    if (speakingRef.current) { endTtsBlock('watchdog'); }
+    if (whatsappCallMicHoldUntilRef.current > Date.now() || waCallMicHoldActiveSafe()) {
+      logAudioDiag('WAKE_REARM_FAIL', 'reason=whatsapp_call_mic_hold');
+      return;
+    }
+    if (expectReply || convModeRef.current || wakeTriggeredRef.current) { try { doStartListening(); } catch {} }
+    else { try { resumePassiveWake(); } catch {} }
+    logAudioDiag('WAKE_REARM_OK', `mode=${(expectReply || convModeRef.current || wakeTriggeredRef.current) ? 'command' : 'wake'}`);
+  }
+
+  // BENSON_STABILIZATION_1 — is `transcript` (from STT session `sid`) a genuine USER_MIC turn, or
+  // BENSON's own speech / a stale callback? A capture whose window overlapped TTS (or the tail
+  // guard), or from a superseded session, is BENSON_OUTPUT and MUST be dropped.
+  function userMicGate(sid: string): { ok: true } | { ok: false; reason: string } {
+    if (sid !== jsSttSessionIdRef.current) return { ok: false, reason: 'STALE_SESSION' };
+    if (speakingRef.current) return { ok: false, reason: 'TTS_ACTIVE' };
+    const captureStarted = sttCaptureStartedAtRef.current;
+    if (captureStarted > 0 && captureStarted <= ttsEndedAtRef.current + AUDIO_TAIL_GUARD_MS) {
+      return { ok: false, reason: 'TTS_TAIL' };
+    }
+    return { ok: true };
   }
 
   function speakOnDevice(text: string, onFinished?: () => void) {
@@ -1166,29 +2409,34 @@ export default function BensonApp() {
     // SpeechRecognizer). Without a fallback, speakingRef stays stuck true forever, and
     // doStartListening()'s guard (`|| speakingRef.current`) then silently no-ops on every future
     // call — BENSON just goes deaf with zero log trace, since the guard returns before the first
-    // log line. ~110ms/word (slow-ish spoken pace) + 4s buffer, so real long replies aren't cut
-    // short; only a genuinely stuck callback trips this.
+    // log line.
+    // 2026-08-28: the old `max(6000, words*110+4000)` fired at 6s for a 12-word confirmation
+    // question ("Deschid WhatsApp, caut «X», aleg primul rezultat și apăs apelul vocal. Confirmi?")
+    // — before it was even spoken — releasing speakingRef so the mic reopened mid-sentence and
+    // BENSON heard its own question. System TTS on this device runs closer to ~400ms/word once
+    // engine start-up and sentence pauses are counted; the watchdog is a last-resort safety net,
+    // not a real timeout, so it is deliberately generous: never below 8s.
     let settled = false;
     const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
-    const watchdogMs = Math.max(6000, wordCount * 110 + 4000);
-    const settle = () => {
+    const watchdogMs = Math.max(8000, wordCount * 400 + 5000);
+    const settle = (reason: TtsEndReason) => {
       if (settled) return;
       settled = true;
       if (watchdogTimer) clearTimeout(watchdogTimer);
-      speakingRef.current = false; setSpeaking(false); onFinished?.();
+      endTtsBlock(reason); onFinished?.();
     };
     const watchdogTimer = setTimeout(() => {
       logAudioDiag('TTS_WATCHDOG_TIMEOUT', `wordCount=${wordCount} timeoutMs=${watchdogMs}`);
-      settle();
+      settle('error');
     }, watchdogMs);
     speakNow(text, {
       language: replyLangRef.current,
       pitch:    voicePitchRef.current,
       rate:     voiceRateRef.current,
       voice:    voiceIdRef.current || undefined,
-      onDone:    () => settle(),
-      onError:   () => settle(),
-      onStopped: () => { if (!settled) { settled = true; clearTimeout(watchdogTimer); speakingRef.current = false; setSpeaking(false); } },
+      onDone:    () => settle('success'),
+      onError:   () => settle('error'),
+      onStopped: () => { if (!settled) { settled = true; clearTimeout(watchdogTimer); endTtsBlock('interrupt'); } },
     });
   }
 
@@ -1208,14 +2456,22 @@ export default function BensonApp() {
   function speakText(text: string, onFinished?: () => void, instructions?: string) {
     if (silencedRef.current || mutedRef.current) { onFinished?.(); return; }
     if (!voiceEnabledRef.current) { onFinished?.(); return; }
+    // E1-0 backstop — no speech that isn't downstream of a recent user command/touch. onFinished
+    // is still called so a caller chaining doStartListening() in the callback keeps listening.
+    if (e1SuppressSpeak()) { onFinished?.(); return; }
     rememberSpoken(text);
     bumpSessionKeepAwake();
     stopSpeaking();
-    speakingRef.current = true; setSpeaking(true);
-    if (ttsProviderRef.current === 'openai' && openaiKeyRef.current) {
+    beginTtsBlock();
+    if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
+      speakWithGemini(
+        text, geminiKeyRef.current, 'Kore',
+        () => { endTtsBlock('success'); onFinished?.(); },
+      ).catch(() => speakOnDevice(text, onFinished));
+    } else if (ttsProviderRef.current === 'openai' && openaiKeyRef.current) {
       speakWithOpenAI(
         text, openaiKeyRef.current, 'onyx',
-        () => { speakingRef.current = false; setSpeaking(false); onFinished?.(); },
+        () => { endTtsBlock('success'); onFinished?.(); },
         instructions ?? currentVoiceInstructions(),
       ).catch(() => speakOnDevice(text, onFinished));
     } else {
@@ -1228,13 +2484,21 @@ export default function BensonApp() {
     rate = voiceRateRef.current, pitch = voicePitchRef.current) {
     if (silencedRef.current || mutedRef.current) return;
     if (!enabled) return;
+    // E1-0 backstop — see e1SuppressSpeak / speakText.
+    if (e1SuppressSpeak()) return;
     rememberSpoken(text);
     bumpSessionKeepAwake();
-    if (ttsProviderRef.current === 'openai' && openaiKeyRef.current) {
-      speakWithOpenAI(text, openaiKeyRef.current, 'onyx', undefined, currentVoiceInstructions())
-        .catch(() => speakNow(text, { language: l, pitch, rate, voice: voiceIdRef.current || undefined }));
+    // Fire-and-forget still blocks the mic for the duration + tail (previously it did NOT touch
+    // speakingRef at all, so the mic stayed open through these replies — a real echo source).
+    beginTtsBlock();
+    if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
+      speakWithGemini(text, geminiKeyRef.current, 'Kore', () => endTtsBlock('success'))
+        .catch(() => speakOnDevice(text));
+    } else if (ttsProviderRef.current === 'openai' && openaiKeyRef.current) {
+      speakWithOpenAI(text, openaiKeyRef.current, 'onyx', () => endTtsBlock('success'), currentVoiceInstructions())
+        .catch(() => speakOnDevice(text));
     } else {
-      speakNow(text, { language: l, pitch, rate, voice: voiceIdRef.current || undefined });
+      speakOnDevice(text);
     }
   }
 
@@ -1290,7 +2554,7 @@ export default function BensonApp() {
     const msg  = (GREETINGS[l] || GREETINGS['en-GB']).replace('{name}', addr);
     addMessage('benson', msg);
     if (!enabled) { speak(msg, l, enabled, rate, pitch); return; }
-    speakText(msg, () => { if (convModeRef.current) doStartListening(); });
+    speakText(msg, () => afterPromptRearm(false));
   }
 
   // Conversation mode is on by default — no button needed. Called whenever the
@@ -1301,6 +2565,9 @@ export default function BensonApp() {
     convModeRef.current = true;
     setConvMode(true);
     if (backgroundModeRef.current) startBackgroundService();
+    // E1-0: no greeting on app start — not a message, not a chat bubble, not TTS. BENSON just
+    // enters silent listening; the phase='chat' useEffect + listen self-heal start the mic.
+    if (E1_USER_ONLY) { logAudioDiag('SPEAK_SUPPRESSED', 'reason=no_user_command source=boot_greeting'); return; }
     greet(name, l, enabled, rate, pitch);
   }
 
@@ -1416,6 +2683,17 @@ export default function BensonApp() {
     try { setWakeWordEnabled(v); } catch {}
   }
 
+  // ROUND_WAKE_NATIVE_GENERIC_1 — change the ONE authoritative wake name (default "Benson"),
+  // pushed to native immediately so the native cloud wake loop uses it on its very next cycle.
+  // Not a secret — plain AsyncStorage, like the other non-key settings on this screen.
+  async function changeWakeName(v: string) {
+    setWakeNameState(v);
+    const resolved = v.trim() || 'Benson';
+    wakeNameRef.current = resolved;
+    await AsyncStorage.setItem('bensonWakeName', v);
+    try { setWakeName(resolved); } catch {}
+  }
+
   async function changeCharacter(c: Character) {
     setCharacter(c); characterRef.current = c;
     await AsyncStorage.setItem('bensonCharacter', c);
@@ -1430,12 +2708,29 @@ export default function BensonApp() {
     const ak = apiKey.trim();
     const tk = tavilyKey.trim();
     const ok = openaiKey.trim();
+    const gk = geminiKey.trim();
+    const grq = groqKey.trim();
     apiKeyRef.current = ak;
     tavilyKeyRef.current = tk;
     openaiKeyRef.current = ok;
+    geminiKeyRef.current = gk;
+    setGeminiKeyForStt(gk || null);
     await AsyncStorage.multiSet([
-      ['anthropicKey', ak], ['tavilyKey', tk], ['openaiKey', ok],
+      ['anthropicKey', ak], ['tavilyKey', tk], ['openaiKey', ok], ['geminiKey', gk],
     ]);
+    // Groq key goes to expo-secure-store (settingsStore), not AsyncStorage — only written when the
+    // field is non-empty, so an untouched blank field never clears a previously saved key.
+    if (grq) {
+      try {
+        await saveEngineConfig('stt', 'groq', { apiKey: grq });
+        setSavedGroqMasked(maskApiKey(grq));
+        setGroqKey('');
+        // ROUND_WAKE_NATIVE_GENERIC_1 — re-push to native immediately so a key entered/rotated
+        // while the app is open takes effect on the native cloud wake loop's very next cycle,
+        // without needing an app restart.
+        try { setNativeWakeCredentials(grq, GROQ_STT_DEFAULT_BASE_URL, GROQ_STT_DEFAULT_MODEL); } catch {}
+      } catch {}
+    }
     addMessage('benson', `API keys updated, ${getAddress()}.`);
   }
 
@@ -1471,6 +2766,16 @@ export default function BensonApp() {
     stopOpenAITTS().catch(() => {});
     speakWithOpenAI(`This is how I sound, ${getAddress()}.`, openaiKeyRef.current, 'onyx', undefined, currentVoiceInstructions())
       .catch(() => addMessage('benson', `I could not reach the OpenAI voice service, ${getAddress()}.`));
+  }
+
+  function previewGeminiVoice() {
+    if (!geminiKeyRef.current) {
+      addMessage('benson', `I need a Gemini API key to use that voice, ${getAddress()}.`);
+      return;
+    }
+    stopGeminiTTS().catch(() => {});
+    speakWithGemini(`This is how I sound, ${getAddress()}.`, geminiKeyRef.current, 'Kore')
+      .catch(() => addMessage('benson', `I could not reach the Gemini voice service, ${getAddress()}.`));
   }
 
   async function toggleBackgroundMode(v: boolean) {
@@ -1593,7 +2898,7 @@ export default function BensonApp() {
   function speakOrShow(reply: string) {
     addMessage('benson', reply);
     if (convModeRef.current) {
-      speakText(reply, () => { if (convModeRef.current) doStartListening(); });
+      speakText(reply, () => afterPromptRearm(false));
     } else {
       speak(reply);
     }
@@ -1610,7 +2915,8 @@ export default function BensonApp() {
     if (valid) {
       speakOrShow(`${getAddress()}, intrăm în ${border.country} în aproximativ ${km} km. Vinieta este valabilă.`);
     } else {
-      pendingVignetteRef.current = border;
+      pendingVignetteRef.current = border; gateArmedAtRef.current = Date.now();
+      setBensonState('CONFIRMING', 'vignette');
       speakOrShow(
         `${getAddress()}, intrăm în ${border.country} în aproximativ ${km} km. ` +
         `Nu am găsit vinietă valabilă. Doriți să o pregătesc acum?`
@@ -1676,10 +2982,16 @@ export default function BensonApp() {
   // detectWakeWord: does the transcript contain "Benson"? Whisper commonly mis-hears the name, so
   // we accept a small set of near-spellings plus a fuzzy check on each token.
   const WAKE_VARIANTS = ['benson', 'bensen', 'benzon', 'bension', 'pension', 'penson', 'benton', 'bensons'];
+  // "wake up" as a standalone alternative wake phrase (product-owner-directed 2026-08-25) \u2014 until
+  // now it only ever worked as a no-op SUFFIX after "Benson" (see WAKE_NOOP_SUFFIXES below); it
+  // never worked alone as its own activation trigger. Same fuzzy tolerance rationale as "Benson"
+  // above \u2014 this local Whisper setup regularly mis-hears short phrases.
+  const WAKE_UP_VARIANTS = ['wake up', 'wakeup', 'weyk up', 'weck up'];
   function detectWakeWord(text: string): boolean {
     const norm = (text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     if (!norm.trim()) return false;
     if (WAKE_VARIANTS.some((w) => norm.includes(w))) return true;
+    if (WAKE_UP_VARIANTS.some((w) => norm.includes(w))) return true;
     // fuzzy: any single token within edit-distance 1 of "benson"
     return norm.split(/[^a-z]+/).some((tok) => tok.length >= 5 && lev(tok, 'benson') <= 1);
   }
@@ -1694,12 +3006,31 @@ export default function BensonApp() {
     }
     return prev[n];
   }
+  // "Benson wake up" (product-owner-directed 2026-08-23) is meant to behave EXACTLY like bare
+  // "Benson" \u2014 a pure activation phrase, not a command. Without this list, stripWakeWord would
+  // extract "wake up" as a commandTail and hand it straight to handleIncomingText, which would
+  // route it through the full orchestrator/LLM pipeline as if it were a real (nonsensical) command.
+  const WAKE_NOOP_SUFFIXES = ['wake up', 'treze\u0219te-te', 'trezeste-te', 'trezire'];
+  // ROUND_WAKE_COMMAND_HANDOFF_FIX_1 \u2014 the ONE place "is this text just a wake-control phrase, not
+  // a real command" is decided, shared by stripWakeWord() (below, for the JS-local engine, which
+  // extracts its own tail from a raw transcript) AND handleWakeDetected() (the single shared
+  // post-wake handler every engine funnels through). Confirmed live: a NATIVE-sourced wake event
+  // (legacy regex engine or NativeCloudWake) extracts its OWN commandTail independently and has no
+  // knowledge of WAKE_NOOP_SUFFIXES \u2014 "Benson wake up" reached handleWakeDetected with
+  // commandTail="wake up" and was dispatched as a real command ("AM \u00ceN\u021aELES: wake up", no action).
+  // Reuses the SAME list \u2014 no second phrase table.
+  function isWakeControlPhrase(text: string): boolean {
+    const norm = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[,.:;!?-]+$/, '').trim();
+    return WAKE_NOOP_SUFFIXES.includes(norm);
+  }
   // stripWakeWord: return whatever the user said AFTER "Benson" as the command tail (so
-  // "Benson, deschide Waze" runs "deschide Waze" in one breath); empty if only the wake word.
+  // "Benson, deschide Waze" runs "deschide Waze" in one breath); empty if only the wake word (or a
+  // no-op activation suffix like "wake up" \u2014 see WAKE_NOOP_SUFFIXES above).
   function stripWakeWord(text: string): string {
     const idx = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').search(/bens|benz|bent|pens/);
     if (idx < 0) return '';
     const after = text.slice(idx).replace(/^[^\s]+[\s,.:;!?-]*/, '').trim(); // drop the wake token itself
+    if (isWakeControlPhrase(after)) return '';
     return after;
   }
 
@@ -1707,23 +3038,142 @@ export default function BensonApp() {
   // Whisper scan loop, so there is exactly ONE wake-handling path (no duplication).
   async function handleWakeDetected(commandTail: string) {
     if (silencedRef.current) return; // fully off — ignore wake events entirely
+    // A recognized wake word IS a direct user action — everything downstream this turn is allowed
+    // to speak (E1-0).
+    noteUserAction();
+    // E1-1: BENSON no longer brings its own Activity to the front on wake. The native side still
+    // shows the bubble + wake ring (WindowManager overlays) as the visible "heard you" cue; the
+    // user surfaces the full UI by tapping the bubble. Revert: E1_NO_SELF_FOREGROUND = false.
+    if (!E1_NO_SELF_FOREGROUND) { try { bringToForeground(); } catch {} }
     // Immediate non-verbal "I heard you" — plays the instant "Benson" is recognized, before the
     // mic is handed off. Suppressed in mute-only mode (still listens, just makes no sound).
-    if (!mutedRef.current) playWakeChime();
+    // E3-3: wake word is a LISTEN_STARTED source too → the new SF tone. WAKE_SOUND_ENABLED=false
+    // falls back to the old chime.
+    logAudioDiag('LISTEN_STARTED', 'source=wake_word');
+    if (!mutedRef.current) {
+      if (WAKE_SOUND_ENABLED) playListenStartSound();
+      else playWakeChime();
+    }
     stopWakeScan();
     wakeScanningRef.current = false;
     wakeTriggeredRef.current = true;
     bumpSessionKeepAwake();
     try { await pauseHotword(); } catch {}
-    const tail = (commandTail || '').trim();
+    const rawTail = (commandTail || '').trim();
+    // ROUND_WAKE_COMMAND_HANDOFF_FIX_1 — "Benson wake up" (or any WAKE_NOOP_SUFFIXES phrase) must
+    // behave exactly like bare "Benson", regardless of which engine extracted the tail natively.
+    const isControlOnly = !!rawTail && isWakeControlPhrase(rawTail);
+    if (isControlOnly) logAudioDiag('WAKE_CONTROL_CONSUMED', `phrase="${rawTail}"`);
+    const tail = isControlOnly ? '' : rawTail;
     if (tail) {
       logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=same_breath_command_tail');
       tap();
-      handleIncomingText(tail);
+      handleIncomingText(tail, { viaVoice: true, utteranceBytes: getLastUtteranceBytes() });
     } else {
-      logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=bare_wake_word_prompt_then_listen');
-      const msg = WAKE_LISTENING_PROMPT[replyLangRef.current] || WAKE_LISTENING_PROMPT['en-GB'];
-      speakText(msg, () => doStartListening());
+      // E1-0: bare "Benson" (or "Benson wake up") gets the non-verbal chime above and goes
+      // straight to listening — no spoken "Te ascult." (that reads as BENSON initiating
+      // conversation; "Tăcerea e implicită"). Revert: E1_USER_ONLY = false restores the prompt.
+      logAudioDiag('WAKE_HANDOFF_TO_STT', E1_USER_ONLY ? 'mode=bare_wake_word_chime_then_listen' : 'mode=bare_wake_word_prompt_then_listen');
+      logAudioDiag('WAKE_COMMAND_ARMED', `reason=${isControlOnly ? 'control_phrase_consumed' : 'bare_wake_word'}`);
+      if (E1_USER_ONLY) {
+        doStartListening();
+      } else {
+        const msg = WAKE_LISTENING_PROMPT[replyLangRef.current] || WAKE_LISTENING_PROMPT['en-GB'];
+        speakText(msg, () => doStartListening());
+      }
+    }
+  }
+
+  // ── WAKE HEALTH DIAGNOSIS ────────────────────────────────────────────────────────────────────
+  // The single truth about whether saying "Benson" can actually activate right now — computed
+  // from real runtime refs, NOT the notification. `reason` is the FIRST broken stage (the ladder
+  // mirrors startLocalWakeLoop's own guards). Also picks the honest notification body.
+  function computeWakeHealth() {
+    const now = Date.now();
+    const micHold = waCallMicHoldActiveSafe() || whatsappCallMicHoldUntilRef.current > now;
+    const audioReceiving = now - lastAudioAtRef.current < 3500;
+    const engine = wakeEngineRef.current;
+    const localScanning = engine === 'local' && wakeScanningRef.current;
+    const commandListening = listeningRef.current;
+    const transcript = lastUserTranscriptRef.current || '';
+    let wakeMatch = false;
+    try { wakeMatch = !!transcript && detectWakeWord(transcript); } catch {}
+
+    // reason ladder — first hit wins.
+    let reason = 'ok';
+    if (!serviceActiveRef.current) reason = 'service_dead';
+    else if (silencedRef.current) reason = 'silenced_by_user';
+    else if (!wakeWordEnabledRef.current) reason = 'wake_word_disabled';
+    else if (micHold) reason = 'whatsapp_call_mic_hold';
+    else if (speakingRef.current) reason = 'tts_speaking';
+    else if (now < micResumeAtRef.current) reason = 'tts_tail';
+    else if (convModeRef.current) reason = commandListening ? 'conv_mode_listening' : 'conv_mode_idle';
+    else if (engine !== 'local') reason = 'engine_native_state_unknown';
+    else if (wakeTriggeredRef.current || loadingRef.current) reason = 'processing_command';
+    else if (!localScanning && !commandListening) reason = 'wake_loop_stopped';
+    else if (localScanning && !audioReceiving) reason = 'no_audio_frames';
+
+    const listeningNow = localScanning || commandListening || reason === 'conv_mode_listening';
+    const recognizer =
+      listeningNow ? 'LISTENING'
+      : (reason === 'no_audio_frames' ? 'ERROR' : 'STOPPED');
+    // "activation READY" only when nothing is blocking AND the recognizer can take audio.
+    const transient = reason === 'tts_speaking' || reason === 'tts_tail' || reason === 'processing_command' || reason === 'conv_mode_idle';
+    const activation = (reason === 'ok' || reason === 'conv_mode_listening') ? 'READY' : (transient ? 'READY' : 'BLOCKED');
+
+    // Honest notification body — "listening" ONLY when actually listening + receiving audio.
+    let notifBody: string;
+    if (listeningNow && audioReceiving && (reason === 'ok' || reason === 'conv_mode_listening')) notifBody = 'BENSON is listening.';
+    else if (transient) notifBody = 'BENSON is listening.'; // brief, don't flap the notification
+    else if (reason === 'whatsapp_call_mic_hold') notifBody = 'BENSON microphone blocked';
+    else if (reason === 'silenced_by_user') notifBody = 'BENSON silenced — tap LISTEN';
+    else if (reason === 'wake_word_disabled') notifBody = 'BENSON wake word off';
+    else if (reason === 'service_dead') notifBody = 'BENSON wake inactive';
+    else notifBody = 'BENSON wake inactive';
+
+    // ROUND_WAKE_STATE_BUG_1 §4 — WAKE_READY is true ONLY when every wake precondition holds.
+    const wakeReady =
+      serviceActiveRef.current &&
+      a11yBoundRef.current === 'BOUND' &&
+      recognizer === 'LISTENING' &&
+      !micHold &&
+      !speakingRef.current &&
+      audioReceiving &&
+      activation === 'READY';
+
+    return {
+      service: serviceActiveRef.current ? 'ALIVE' : 'DEAD',
+      a11y: a11yBoundRef.current,
+      recognizer,
+      micHold,
+      speaking: speakingRef.current,
+      audio: audioReceiving ? 'RECEIVING' : 'NONE',
+      transcript: transcript.slice(0, 60),
+      wakeMatch,
+      activation,
+      reason,
+      wakeReady,
+      notifBody,
+    };
+  }
+
+  // Emit WAKE_HEALTH (deduped; at least every 30s) and push the honest notification body.
+  function emitWakeHealth() {
+    const h = computeWakeHealth();
+    const line =
+      `service=${h.service} a11y=${h.a11y} recognizer=${h.recognizer} micHold=${h.micHold} ` +
+      `speaking=${h.speaking} audio=${h.audio} lastTranscript=${JSON.stringify(h.transcript)} wakeMatch=${h.wakeMatch} ` +
+      `activation=${h.activation} WAKE_READY=${h.wakeReady} reason=${h.wakeReady ? 'ok' : h.reason}`;
+    const now = Date.now();
+    if (line !== wakeHealthLineRef.current || now - wakeHealthAtRef.current > 30000) {
+      wakeHealthLineRef.current = line;
+      wakeHealthAtRef.current = now;
+      logAudioDiag('WAKE_HEALTH', line);
+    }
+    if (h.notifBody !== notifBodyRef.current && h.service === 'ALIVE') {
+      notifBodyRef.current = h.notifBody;
+      try { updateNotification('BENSON', h.notifBody); } catch {}
+      logAudioDiag('WAKE_NOTIF_UPDATED', `body=${JSON.stringify(h.notifBody)} reason=${h.reason}`);
     }
   }
 
@@ -1732,11 +3182,25 @@ export default function BensonApp() {
   // capture, TTS, or an in-flight session.
   function startLocalWakeLoop() {
     if (silencedRef.current) return;
+    if (whatsappCallMicHoldUntilRef.current > Date.now() || waCallMicHoldActiveSafe()) { logAudioDiag('MIC_BLOCKED', 'reason=whatsapp_call_live'); return; }
     if (wakeEngineRef.current !== 'local') return;
     if (!serviceActiveRef.current) return;
     if (wakeScanningRef.current) return;
-    if (listeningRef.current || loadingRef.current || speakingRef.current || wakeTriggeredRef.current) return;
+    if (listeningRef.current || loadingRef.current || wakeTriggeredRef.current) return;
+    // Mic stays shut while BENSON speaks and for TTS_TAIL_MS after — the wake scan is a capture too.
+    if (speakingRef.current) { logAudioDiag('MIC_BLOCKED', 'reason=tts_speaking'); return; }
+    const ttsTailLeft = micResumeAtRef.current - Date.now();
+    if (ttsTailLeft > 0) { setTimeout(startLocalWakeLoop, ttsTailLeft + 20); return; }
+    // Enforced here, at the single source, not just at each call site (product-owner-directed
+    // 2026-08-23 fix) — conversation mode's own doStartListening self-restart loop and this wake
+    // scan loop must never run concurrently; they'd race for the same mic/whisper pipeline. While
+    // conv mode is on, BENSON is already continuously listening for the next command directly, so
+    // scanning for the wake word on top of that is both redundant and actively harmful.
+    if (convModeRef.current) return;
     wakeScanningRef.current = true;
+    sttCaptureStartedAtRef.current = Date.now(); // BENSON_STABILIZATION_1 — capture-window start
+    logAudioDiag('AUDIO_STATE', 'from=PROCESSING to=WAKE_LISTENING');
+    logAudioDiag('STT_SESSION_START', `sessionId=wake-${sttCaptureStartedAtRef.current} mode=WAKE`);
     logAudioDiag('WAKE_SCAN_START', `engine=local lang=${langRef.current}`);
     startWakeScan(
       langRef.current,
@@ -1746,10 +3210,21 @@ export default function BensonApp() {
           logAudioDiag('WAKE_SCAN_HIT', `text="${text}"`);
           handleWakeDetected(stripWakeWord(text));
         } else {
+          // Diagnostic (product-owner-confirmed live 2026-08-25): a MISS here previously logged
+          // nothing at all — every wake-scan cycle that failed to recognize "Benson" was a total
+          // black box, with no way to tell whether the mic never heard real speech, Whisper
+          // mangled it into something detectWakeWord's fuzzy match still couldn't catch, or the
+          // word simply wasn't said in that window. Logging the actual transcribed text on every
+          // miss (not just every hit) turns that black box into real evidence.
+          logAudioDiag('WAKE_SCAN_MISS', `text="${text}"`);
           setTimeout(startLocalWakeLoop, 150); // not the wake word — keep listening
         }
       },
-      () => { wakeScanningRef.current = false; setTimeout(startLocalWakeLoop, 150); },
+      () => {
+        wakeScanningRef.current = false;
+        logAudioDiag('WAKE_SCAN_IDLE', 'no_speech_or_capture_error');
+        setTimeout(startLocalWakeLoop, 150);
+      },
     );
   }
 
@@ -1757,6 +3232,13 @@ export default function BensonApp() {
   // Whisper loop (free, works on this device) or the native hotword loop (fallback).
   function resumePassiveWake() {
     if (silencedRef.current) return;
+    if (whatsappCallMicHoldUntilRef.current > Date.now() || waCallMicHoldActiveSafe()) { logAudioDiag('MIC_BLOCKED', 'reason=whatsapp_call_live'); return; }
+    if (nativeWakeRef.current) {
+      // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — native TFLite engine owns passive wake; just release
+      // the mic back to it. It re-arms itself inside the foreground service (survives suspension).
+      nwOwner('WAKE');
+      return;
+    }
     if (wakeEngineRef.current === 'local') {
       try { pauseHotword(); } catch {} // make sure the native SpeechRecognizer loop is off
       startLocalWakeLoop();
@@ -1765,17 +3247,104 @@ export default function BensonApp() {
     }
   }
 
+  // C3-fix — the ONE place an STT session is marked closed. Idempotent: only the first call for a
+  // live session logs STT_SESSION_CLOSED + drops the gate + disarms the session watchdog; a later
+  // endSub/errorSub for the same session is a no-op. Called from EVERY end path so the gate can
+  // never outlive its session (the "BENSON went permanently deaf" bug).
+  function closeSttSession(reason: 'result' | 'error' | 'stopped' | 'no_speech' | 'timeout' | 'background') {
+    const sid = sttSessionActiveRef.current;
+    if (!sid) return;
+    sttSessionActiveRef.current = null;
+    // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — idempotent: a session already closed by this function
+    // has sid=null above and returns before this runs, so the native watchdog is only ever
+    // cancelled once per session, from whichever end path (result/error/timeout/...) gets there first.
+    try { cancelSttSessionWatchdog(sid); } catch {}
+    if (C3_SESSION_CLEANUP) logAudioDiag('STT_SESSION_CLOSED', `session=${sid} reason=${reason}`);
+  }
+
   async function doStartListening() {
     if (silencedRef.current) return;
-    if (listeningRef.current || loadingRef.current || speakingRef.current) return;
+    // URGENT_CONFIRMATION_NATIVE_1 — a native confirmation capture owns the mic; the JS loop must
+    // not compete with it (native already refuses to re-arm passive wake for the same reason).
+    if (pendingConfirmationIdRef.current) { logAudioDiag('MIC_BLOCKED', 'reason=native_confirmation_active'); return; }
+    if (whatsappCallMicHoldUntilRef.current > Date.now() || waCallMicHoldActiveSafe()) { logAudioDiag('MIC_BLOCKED', 'reason=whatsapp_call_live'); return; }
+    if (listeningRef.current || loadingRef.current) return;
+    // ── C3-fix — single-session gate, now FIRST (before stopWakeScan below, which tears down the
+    // shared capture-end subscription a live `local` session depends on). A rejected call must
+    // touch nothing.
+    if (C3_SINGLE_SESSION_GATE && sttSessionActiveRef.current) {
+      logAudioDiag('STT_REJECTED', `reason=session_active activeSession=${sttSessionActiveRef.current} rejectedSession=js-${Date.now()}`);
+      return;
+    }
+    // Hard mic close while BENSON is speaking, and for TTS_TAIL_MS after the last word.
+    if (speakingRef.current) {
+      logAudioDiag('MIC_BLOCKED', 'reason=tts_speaking');
+      if (bensonStateRef.current !== 'CONFIRMING' && bensonStateRef.current !== 'EXECUTING') setBensonState('BLOCKED', 'tts_speaking');
+      return;
+    }
+    const ttsTailLeft = micResumeAtRef.current - Date.now();
+    if (ttsTailLeft > 0) {
+      logAudioDiag('MIC_BLOCKED', `reason=tts_tail deferMs=${ttsTailLeft}`);
+      setTimeout(() => doStartListening(), ttsTailLeft);
+      return;
+    }
+    if (ttsEndedAtRef.current) {
+      logAudioDiag('MIC_RESUMED', `afterMs=${Date.now() - ttsEndedAtRef.current}`);
+      ttsEndedAtRef.current = 0;
+    }
+    // Post-action mute net — hold off starting a capture until the window elapses (see
+    // POST_ACTION_MUTE_MS). Re-enters via the same path once the remaining time is up.
+    const muteLeft = postActionMuteUntilRef.current - Date.now();
+    if (muteLeft > 0) {
+      logAudioDiag('POST_ACTION_MUTE', `deferMs=${muteLeft}`);
+      setTimeout(() => doStartListening(), muteLeft);
+      return;
+    }
     try { stopWakeScan(); } catch {}
     wakeScanningRef.current = false;
     bumpSessionKeepAwake();
     const trigger = wakeTriggeredRef.current ? 'wake_word' : convModeRef.current ? 'conversation_mode' : 'manual_tap';
     const sessionId = `js-${Date.now()}`;
     jsSttSessionIdRef.current = sessionId;
+    sttCaptureStartedAtRef.current = Date.now(); // BENSON_STABILIZATION_1 — capture-window start
+    nwOwner('COMMAND_STT'); // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — native wake releases the mic
+    if (nativeWakeRef.current && nativeWakeEventAtRef.current > 0) {
+      logAudioDiag('WAKE_TO_COMMAND_LATENCY', `ms=${Date.now() - nativeWakeEventAtRef.current}`);
+      nativeWakeEventAtRef.current = 0;
+    }
+    logAudioDiag('COMMAND_STT_START', `sessionId=${sessionId}`);
+    logAudioDiag('AUDIO_STATE', `from=PROCESSING to=COMMAND_LISTENING`);
+    logAudioDiag('STT_SESSION_START', `sessionId=${sessionId} mode=COMMAND`);
+    // C3 — gate raised synchronously (the check itself is at the top of this function now). Set
+    // whenever either C3 flag is on so cleanup logging works standalone.
+    if (C3_SINGLE_SESSION_GATE || C3_SESSION_CLEANUP) {
+      sttSessionActiveRef.current = sessionId;
+      logAudioDiag('STT_SESSION_OPEN', `sessionId=${sessionId} owner=js_stt`);
+      // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — a session that never sees an end event (orphaned
+      // native onCaptureEnd, hung recognizer, or BENSON backgrounded mid-session e.g. during the
+      // WhatsApp write flow) is force-closed after STT_SESSION_MAX_MS. Timing lives in the native
+      // foreground service (Handler.postDelayed), NOT a JS setTimeout — proven live that the JS
+      // timer this replaced goes inert while backgrounded, leaving the gate stuck forever
+      // (STT_REJECTED reason=session_active, minutes on end, only an app restart cleared it).
+      if (Number.isFinite(STT_SESSION_MAX_MS)) {
+        try { armSttSessionWatchdog(sessionId, STT_SESSION_MAX_MS); } catch {}
+      }
+    }
+    // A new session supersedes any pending partial-fallback grace timer from the previous one.
+    if (partialFallbackTimerRef.current) { clearTimeout(partialFallbackTimerRef.current); partialFallbackTimerRef.current = null; }
     sttTriggerRef.current = trigger;
     sessionGotResultRef.current = false;
+    if (bensonStateRef.current === 'IDLE' || bensonStateRef.current === 'BLOCKED' || bensonStateRef.current === 'DONE' || bensonStateRef.current === 'ERROR') {
+      // URGENT_WAKE_FRESH_SESSION_1 — root cause of the stale-bubble bug: pushBubbleBand() always
+      // rendered lastUserTranscriptRef.current (the PREVIOUS turn's transcript, only ever
+      // overwritten once a NEW one is captured), so a fresh wake's first LISTENING paint showed
+      // whatever the user said last time. This is the one true "new session" boundary (coming
+      // from IDLE/BLOCKED/a terminal result) — clearing here, before setBensonState/pushBubbleBand
+      // fires below, leaves a mid-conversation re-listen (already LISTENING/THINKING/etc., not
+      // this branch) untouched, exactly matching "fresh on new wake, not on every turn."
+      lastUserTranscriptRef.current = '';
+      setBensonState('LISTENING', trigger);
+    }
     logAudioDiag('STT_REQUESTED', `session=${sessionId} trigger=${trigger} component=js_stt`);
     try {
       // Unconditional, regardless of caller — previously only toggleConvMode() and the wake-word
@@ -1787,7 +3356,7 @@ export default function BensonApp() {
       // mid-utterance by the other starting. pauseHotword() is idempotent (a no-op if the native
       // loop is already paused), so calling it here unconditionally is safe.
       //
-      // Run alongside requestMicPermission() (Promise.all), not sequentially before it — confirmed
+      // Run alongside checkMicPermission() (Promise.all), not sequentially before it — confirmed
       // live 2026-07-17: awaiting these one after another added a real ~200-400ms mic-handover gap
       // on every single conversation-mode turn (pause hotword -> THEN check permission -> THEN
       // create+start the recognizer), during which a user who starts talking the instant BENSON
@@ -1795,10 +3364,22 @@ export default function BensonApp() {
       // caught live as "sună-o pe mama pe WhatsApp" transcribing as just "pe mama pe WhatsApp".
       // The two calls are independent (one pauses the OTHER recognizer, the other checks THIS
       // session's own permission) — running them concurrently costs whichever is slower, not both.
-      const [, granted] = await Promise.all([
+      //
+      // checkMicPermission() (non-prompting), not requestMicPermission() (prompting) — product-
+      // owner-confirmed live regression 2026-08-23: this runs on EVERY conversation-mode turn
+      // (many times per minute), and calling the prompting requestPermissionsAsync() that often —
+      // including while BENSON is backgrounded, running only as a foreground service — was
+      // confirmed in logcat to repeatedly launch Android's own
+      // GrantPermissionsActivity even though the permission was already granted, stealing window
+      // focus from whatever app the user was actually using every single turn ("nu a reacționat
+      // și s-a închis" — a system permission dialog stealing focus looks exactly like that from
+      // the user's side). Only escalate to the prompting call in the rare case the permission
+      // isn't actually granted (e.g. revoked externally) — the common case now never prompts.
+      const [, currentlyGranted] = await Promise.all([
         pauseHotword().catch(() => {}),
-        requestMicPermission(),
+        checkMicPermission(),
       ]);
+      const granted = currentlyGranted || await requestMicPermission();
       logAudioDiag('STT_PRECHECK', `session=${sessionId} permission=${granted} component=js_stt`);
       if (!granted) {
         const noMicMsg = `I need microphone access to hear you, ${getAddress()}.`;
@@ -1807,12 +3388,19 @@ export default function BensonApp() {
         // learn why voice input stopped working, and reading text isn't an option for them.
         speak(noMicMsg);
         setConvMode(false); convModeRef.current = false;
+        closeSttSession('error'); // C3 — never leave a phantom session over a denied mic
         return;
       }
       setListening(true); listeningRef.current = true;
       try { setSystemSoundsMuted(true); } catch {}
+      micCaptureDiagRef.current = {
+        active: true, sessionId, recorderCreateAt: Date.now(), sttStartCalledAt: -1,
+        speechStartAt: -1, speechEndAt: -1, firstRmsAboveThresholdAt: -1,
+        peakRms: 0, rmsSum: 0, rmsCount: 0,
+      };
       logAudioDiag('RECORDER_CREATE', `session=${sessionId} component=js_stt engine=${sttEngineRef.current} lang=${langRef.current}`);
       startRecognition(langRef.current, sttEngineRef.current);
+      micCaptureDiagRef.current.sttStartCalledAt = Date.now();
       logAudioDiag('STT_START_CALLED', `session=${sessionId} component=js_stt`);
       // Watchdog: cloud/ondevice SpeechRecognizer can hang with no end event; local capture has a
       // 60s pre-speech native timeout. Force-close if the session is still the current one and
@@ -1823,12 +3411,14 @@ export default function BensonApp() {
         if (listeningRef.current && jsSttSessionIdRef.current === sessionId) {
           logAudioDiag('STT_WATCHDOG', `session=${sessionId} forced_stop engine=${sttEngineRef.current}`);
           try { stopRecognition(); } catch {}
+          closeSttSession('timeout'); // C3-fix — don't rely on endSub after a forced stop
         }
       }, sttEngineRef.current === 'local' ? 65000 : 12000);
     } catch (e) {
       logAudioDiag('STT_ERROR', `session=${sessionId} component=js_stt code=-1 name=JS_EXCEPTION message="${String(e)}"`);
       try { setSystemSoundsMuted(false); } catch {}
       setListening(false); listeningRef.current = false;
+      closeSttSession('error'); // C3 — the start threw; release the gate so the retry runs
       if (convModeRef.current) setTimeout(() => doStartListening(), 2000);
     }
   }
@@ -1837,6 +3427,7 @@ export default function BensonApp() {
     try { stopRecognition(); } catch {}
     try { setSystemSoundsMuted(false); } catch {}
     setListening(false); listeningRef.current = false;
+    closeSttSession('stopped'); // C3-fix — a deliberate stop closes the session immediately
   }
 
   // ── Silent / Fully-Off kill switch ────────────────────────────────────────
@@ -1853,12 +3444,13 @@ export default function BensonApp() {
     wakeScanningRef.current = false;
     wakeTriggeredRef.current = false;
     try { stopRecognition(); } catch {}
+    closeSttSession('stopped'); // C3-fix — hard stop closes any live STT session
     try { await pauseHotword(); } catch {}
     setListening(false); listeningRef.current = false;
     // stop everything that makes sound
     try { stopSpeaking(); } catch {}
     try { stopOpenAITTS(); } catch {}
-    speakingRef.current = false; setSpeaking(false);
+    endTtsBlock('stop'); // C1 TASK 1 — never leave speakingRef raised on a hard stop
     try { setSystemSoundsMuted(false); } catch {}
     try { hideWakeRing(); } catch {}
     // Hard-release system audio focus so other apps' sound (video/radio) recovers immediately,
@@ -1871,10 +3463,13 @@ export default function BensonApp() {
     try { stopListeningService(); } catch {}
     serviceActiveRef.current = false;
     try { hideBubble(); } catch {}
+    clearBandHideTimer(); // E3 — cancel any pending "GATA" linger
+    bandVisibleRef.current = false; // E2-2 — the band went down with the bubble service
     logAudioDiag('SILENT_MODE', 'state=on');
   }
 
   async function exitSilentMode() {
+    noteUserAction(); // reached only by an explicit user action (banner tap / notification / voice)
     setSilenced(false); silencedRef.current = false;
     await AsyncStorage.setItem('bensonSilenced', 'false');
     logAudioDiag('SILENT_MODE', 'state=off');
@@ -1899,7 +3494,7 @@ export default function BensonApp() {
     if (next) {
       try { stopSpeaking(); } catch {}
       try { stopOpenAITTS(); } catch {}
-      speakingRef.current = false; setSpeaking(false);
+      endTtsBlock('interrupt'); // C1 TASK 1
       try { await releaseAudioFocusMode(); } catch {} // no sound while muted → let other apps play freely
       logAudioDiag('MUTE_MODE', 'state=on');
     } else {
@@ -1919,6 +3514,23 @@ export default function BensonApp() {
       startListeningService('BENSON', 'BENSON is listening — tap LISTEN to talk, or open the app.');
       serviceActiveRef.current = true;
     } catch {}
+    // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 / ROUND_WAKE_NATIVE_GENERIC_1 — if EITHER a native model
+    // (MicroWakeWord) or native cloud STT credentials (NativeCloudWake) are available, native
+    // wake is PRIMARY: the JS Whisper wake loop stays off (wakeEngineRef !== 'local' makes
+    // startLocalWakeLoop a no-op) and JS only drives the mic-ownership handoff. Neither present ⇒
+    // nothing changes (JS Whisper wake fallback stays primary, exactly as before this round).
+    try {
+      const nw = isNativeWakeAvailable();
+      const nativeEngineActive = !!(nw?.model || nw?.cloud);
+      nativeWakeRef.current = nativeEngineActive;
+      logAudioDiag('WAKE_ENGINE', `select=${nw?.model ? 'MICROWAKEWORD_NATIVE' : nw?.cloud ? 'NATIVE_CLOUD' : 'JS_WHISPER_FALLBACK'} nativeModel=${!!nw?.model} nativeCloud=${!!nw?.cloud}`);
+      if (nativeEngineActive) {
+        wakeEngineRef.current = 'native';
+        try { stopWakeScan(); } catch {}
+        wakeScanningRef.current = false;
+        nwOwner('WAKE');
+      }
+    } catch {}
     try {
       if (!(await isIgnoringBatteryOptimizations())) requestIgnoreBatteryOptimizations();
     } catch {}
@@ -1933,6 +3545,7 @@ export default function BensonApp() {
 
   // ── Conversation Mode toggle ──────────────────────────────────────────────
   async function toggleConvMode() {
+    noteUserAction(); // direct touch / voice command reached this
     const next = !convModeRef.current;
     // Update ref FIRST so 'end' handler sees correct state immediately
     convModeRef.current = next;
@@ -1953,10 +3566,10 @@ export default function BensonApp() {
       // mode too — it's likely already running for wake word, this is just a safety net.
       if (!serviceActiveRef.current) startBackgroundService();
       // Start listening after greeting TTS finishes
-      speakText(msg, () => { if (convModeRef.current) doStartListening(); });
+      speakText(msg, () => afterPromptRearm(false));
     } else {
       doStopListening();
-      stopSpeaking(); stopOpenAITTS().catch(() => {}); speakingRef.current = false; setSpeaking(false);
+      stopSpeaking(); stopOpenAITTS().catch(() => {}); endTtsBlock('interrupt'); // C1 TASK 1
       // Background service stays on — wake word ("Benson") still needs it. Only the STOP
       // notification action actually tears it down.
       const msg = CONV_OFF[replyLangRef.current] || CONV_OFF['en-GB'];
@@ -1973,6 +3586,7 @@ export default function BensonApp() {
   // off; only fall back to toggleConvMode() when conv mode is genuinely off.
   async function handleMedallionTap() {
     if (silencedRef.current) return; // fully off — the red banner is the way back on
+    noteUserAction(); // direct touch
     if (convModeRef.current) {
       if (!listeningRef.current && !loadingRef.current && !speakingRef.current) {
         doStartListening();
@@ -2092,7 +3706,7 @@ export default function BensonApp() {
     const reply = `Noted, ${getAddress()}. I will remember that.`;
     addMessage('benson', reply);
     if (convModeRef.current) {
-      speakText(reply, () => { if (convModeRef.current) doStartListening(); });
+      speakText(reply, () => afterPromptRearm(false));
     } else {
       speak(reply);
     }
@@ -2115,10 +3729,206 @@ export default function BensonApp() {
     return loadRealDeviceContacts();
   }
 
+  // MISSION-FIX-1 — verbs that mark a concrete NEW imperative command (not a yes/no confirmation
+  // reply, not filler). Text is the diacritic-stripped, lowercased normConfirm() form. If one of
+  // these leads/appears in an UNKNOWN confirmation reply, the pending mission is superseded and the
+  // utterance is routed as a fresh command (ROUND_MISSION_DIAG_REPORT.md → invariant 1).
+  const NEW_COMMAND_VERB_RE =
+    /(?:^|\s)(?:deschide|deschideti|deschid|intra|porneste|pornesc|pune|baga|reda|redau|cauta|caut|gaseste|gasesti|sun|suna|apeleaza|apelez|telefoneaza|navigheaza|navighez|du-ma|du ma|mergi|arata|trimite|scrie|opreste|opresti|inchide|revino|intreaba|citeste|verifica|adauga|sterge|seteaza|redenumeste|open|start|play|search|find|call|dial|stop|close|show|launch|navigate|go to)(?:\s|$)/;
+
+  function looksLikeNewCommand(msg: string): boolean {
+    if (classifyConfirmation(msg) !== 'UNKNOWN') return false; // never override a clear da/nu
+    const t = normConfirm(msg);
+    if (!t || t.split(/\s+/).length < 2) return false; // 1-word filler ("hmm", "poate", "?") — not a command
+    if (NEW_COMMAND_VERB_RE.test(' ' + t + ' ')) return true;
+    try {
+      // classify() returns intent 'CHAT' (confidence 0) for anything it does not recognise as a
+      // concrete command; any other intent is a real, routable user goal.
+      const intent = parseCommandToActionRequest(msg, 'voice').intent;
+      return intent !== 'CHAT' && intent !== 'HELP';
+    } catch { return false; }
+  }
+
+  // If `msg` is a concrete new command, clear EVERY pending-confirmation representation (governed
+  // mission → Superseded; JS refs → null; reprompt counter → 0) and return true so the caller lets
+  // the SAME utterance fall through to normal routing. Returns false for a genuinely unclear reply.
+  async function supersedeStaleConfirmationIfNewCommand(msg: string): Promise<boolean> {
+    logAudioDiag('CONFIRM_UNKNOWN_CHECK_NEW_COMMAND', `text="${msg.slice(0, 60)}"`);
+    if (!looksLikeNewCommand(msg)) return false;
+    const gm = getActiveMission();
+    const oldId = gm?.id ?? '-';
+    let newIntent = '-';
+    try { newIntent = parseCommandToActionRequest(msg, 'voice').intent; } catch {}
+    logAudioDiag('CONFIRM_NEW_COMMAND_DETECTED', `oldMissionId=${oldId} newIntent=${newIntent}`);
+    pendingMissionTaskRef.current = null;
+    pendingNoteActionRef.current = null;
+    pendingVignetteRef.current = null;
+    confirmRepromptCountRef.current = 0;
+    gateArmedAtRef.current = 0;
+    if (gm && (gm.state === 'WaitingConfirmation' || gm.state === 'WaitingUser')) {
+      try { await supersedeActiveMission('new_user_command'); }
+      catch { try { await cancelActiveMission(); } catch {} }
+    }
+    logAudioDiag('MISSION_SUPERSEDED', `missionId=${oldId} reason=new_user_command`);
+    return true;
+  }
+
+  // ── ROUND_EMERGENCY_CORE_1 ────────────────────────────────────────────────────────────────
+  // Fire the native 112 route and speak the honest outcome. Native owns EMERGENCY_DIAL_START /
+  // EMERGENCY_DIRECT_CALL_ALLOWED / EMERGENCY_LOCATION_AVAILABLE / EMERGENCY_SYSTEM_DIALER_OPENED /
+  // EMERGENCY_ROUTE_FAIL; JS owns EMERGENCY_INTENT_DETECTED / _CONFIRM_REQUIRED / _CONFIRMED.
+  async function routeEmergencyNow(): Promise<void> {
+    try {
+      const ctx = getEmergencyContext();
+      if (ctx) logAudioDiag('EMERGENCY_CONTEXT_JS', `battery=${ctx.batteryPct} network=${ctx.network} location=${ctx.locationAvailable}`);
+    } catch {}
+    let res: { success: boolean; mode: string; reason: string | null };
+    try {
+      res = await routeEmergencyCall();
+    } catch (e) {
+      res = { success: false, mode: 'FAILED', reason: e instanceof Error ? e.message : String(e) };
+    }
+    logAudioDiag('EMERGENCY_ROUTE_RESULT', `success=${res.success} mode=${res.mode} reason=${res.reason ?? '-'}`);
+    if (res.success && res.mode === 'DIRECT_CALL') {
+      speakOrShow('Sun la 112.');
+    } else if (res.success) {
+      speakOrShow('Am deschis telefonul cu 112 pregătit. Apasă pe apel.');
+    } else {
+      speakOrShow('Nu am putut deschide telefonul pentru 112. Sună manual, te rog.');
+    }
+  }
+
+  // Emergency gate — runs before every other gate in handleIncomingText. Returns 'handled' when
+  // this turn was an emergency intent or a reply to the pending "Sun la 112?" prompt (caller must
+  // stop), 'pass' otherwise.
+  async function handleEmergencyTurn(msg: string): Promise<'handled' | 'pass'> {
+    // (a) a generic-help confirmation is pending — this reply decides it.
+    if (pendingEmergencyConfirmRef.current) {
+      // An explicit "sună la 112" said now escalates straight through.
+      if (classifyEmergencyIntent(msg) === 'EXPLICIT_112') {
+        pendingEmergencyConfirmRef.current = false;
+        emergencyRepromptRef.current = 0;
+        logAudioDiag('EMERGENCY_CONFIRMED', 'via=explicit_escalation');
+        await routeEmergencyNow();
+        return 'handled';
+      }
+      const verdict = classifyConfirmation(msg);
+      logAudioDiag('EMERGENCY_CONFIRM_CLASSIFY', `text="${msg.slice(0, 40)}" result=${verdict}`);
+      if (verdict === 'YES') {
+        pendingEmergencyConfirmRef.current = false;
+        emergencyRepromptRef.current = 0;
+        logAudioDiag('EMERGENCY_CONFIRMED', 'via=voice_yes');
+        await routeEmergencyNow();
+        return 'handled';
+      }
+      if (verdict === 'NO') {
+        pendingEmergencyConfirmRef.current = false;
+        emergencyRepromptRef.current = 0;
+        logAudioDiag('EMERGENCY_ROUTE_FAIL', 'reason=user_cancelled');
+        speakOrShow('Am anulat.');
+        return 'handled';
+      }
+      // UNKNOWN — one reprompt, then clean cancel.
+      if (emergencyRepromptRef.current >= 1) {
+        pendingEmergencyConfirmRef.current = false;
+        emergencyRepromptRef.current = 0;
+        logAudioDiag('EMERGENCY_ROUTE_FAIL', 'reason=reprompt_exhausted');
+        speakOrShow('Am renunțat la urgență. Dacă ai nevoie, spune „sună la 112".');
+        return 'handled';
+      }
+      emergencyRepromptRef.current += 1;
+      logAudioDiag('EMERGENCY_CONFIRM_REQUIRED', `reason=reprompt attempt=${emergencyRepromptRef.current}`);
+      speakOrShow('Sun la 112? Spune da sau nu.');
+      return 'handled';
+    }
+
+    // (b) fresh classification.
+    const kind = classifyEmergencyIntent(msg);
+    if (kind === 'EXPLICIT_112') {
+      logAudioDiag('EMERGENCY_INTENT_DETECTED', `kind=explicit text="${msg.slice(0, 40)}"`);
+      logAudioDiag('EMERGENCY_CONFIRMED', 'auto=true kind=explicit');
+      await routeEmergencyNow();
+      return 'handled';
+    }
+    if (kind === 'GENERIC_HELP') {
+      logAudioDiag('EMERGENCY_INTENT_DETECTED', `kind=generic text="${msg.slice(0, 40)}"`);
+      logAudioDiag('EMERGENCY_CONFIRM_REQUIRED', 'prompt=sun_la_112');
+      pendingEmergencyConfirmRef.current = true;
+      emergencyRepromptRef.current = 0;
+      speakOrShow('Sun la 112?');
+      return 'handled';
+    }
+    return 'pass';
+  }
+
+  // ORCH-FIX-1 — an unclear reply to an open confirmation gate: keep the pending action intact,
+  // ask once, then a single listening session follows (no silent auto-listen loop).
+  function confirmReprompt(type: string, reason: string = 'unclear_reply') {
+    confirmRepromptCountRef.current += 1;
+    logAudioDiag('CONFIRM_REPROMPT', `type=${type} reason=${reason} pendingPreserved=true attempt=${confirmRepromptCountRef.current}`);
+    setLoading(false); loadingRef.current = false;
+    setBensonState('CONFIRMING', 'confirm_reprompt');
+    const lang = replyLangRef.current.toLowerCase();
+    const rp = lang.startsWith('de')
+      ? `Bitte bestätige mit ja oder nein, ${getAddress()}.`
+      : lang.startsWith('en')
+      ? `Please confirm with yes or no, ${getAddress()}.`
+      : `Te rog confirmă cu da sau nu, ${getAddress()}.`;
+    addMessage('benson', rp);
+    speakText(rp, () => afterPromptRearm(true));
+  }
+
   // ── Central message handler — routes through the Benson Core Orchestrator ──
-  async function handleIncomingText(msg: string) {
+  async function handleIncomingText(msg: string, opts?: { viaVoice?: boolean; utteranceBytes?: number }) {
     if (!msg || loadingRef.current) return;
+    // ROUND_WAKE_COMMAND_HANDOFF_FIX_1 — captured ONCE at entry: whether this turn originated from
+    // a wake trigger (same-breath tail, e.g. "Benson, deschide calculatorul" — CASE 3 — or a
+    // follow-up utterance captured after a bare/control-only wake armed listening — CASE 4).
+    // wakeTriggeredRef itself gets cleared by various completion paths DURING this turn's
+    // processing, so a local snapshot is the only reliable way to still know at the end (used by
+    // WAKE_COMMAND_RESULT below, next to the existing ORCHESTRATOR_HANDOFF_COMPLETED log).
+    const wakeOriginated = wakeTriggeredRef.current;
+    if (wakeOriginated) logAudioDiag('WAKE_COMMAND_DISPATCH', `text=${JSON.stringify(msg.slice(0, 60))}`);
+    // ROUND_WA_WRITE_MESSAGE_PAYLOAD / CONTACT_DIAG — the exact transcript that entered routing,
+    // before normalization/parsing. First stage of the payload trace.
+    logAudioDiag('WA_PAYLOAD_RAW_STT', `text=${JSON.stringify(msg)} viaVoice=${!!opts?.viaVoice}`);
+    // BENSON_STABILIZATION_1 — only text that passed the USER_MIC gate (or a typed submit) reaches
+    // mission parsing. This is the single entry point.
+    logAudioDiag('MISSION_INPUT', `turnId=${opts?.viaVoice ? jsSttSessionIdRef.current : 'typed'} text=${JSON.stringify(msg.slice(0, 60))}`);
+    // E1-0 / E1-5 — a recognized utterance (voice) or typed submit (touch) is a direct user
+    // command: this turn's replies are allowed to speak, and the immediate-ACK path is armed fresh.
+    noteUserAction();
+    ackSpokenThisTurnRef.current = false;
+    // E2-2 — the final (assembled) command text is what the band shows.
+    lastUserTranscriptRef.current = msg;
+    pushBubbleBand(bensonStateRef.current);
+    // E1-5 — the short ACK spoken the instant the Mission Orchestrator resolves the intent, in
+    // parallel with the launch (Orchestrator fires this before the Android side effect). Voice
+    // turns only; a typed command doesn't get spoken acks.
+    const onMissionAck = opts?.viaVoice
+      ? (t: string) => { logAudioDiag('ACK', `text="${t}"`); ackSpokenThisTurnRef.current = true; speak(t); }
+      : undefined;
     bumpSessionKeepAwake();
+
+    // Task 2 (2026-08-28): refuse a voice affirmative that came from empty/near-empty audio when a
+    // Confirmation Gate is open — that "da" is a Whisper hallucination, not consent. The gate stays
+    // pending and nothing executes. A refusal, a longer utterance, a typed reply, or a
+    // SpeechRecognizer reply (utteranceBytes -1) are all exempt and fall through unchanged.
+    // ORCH-FIX-1: use the robust classifier (was YES_PATTERN, which missed "Confirme.").
+    if (opts?.viaVoice) {
+      const gateOpen =
+        !!pendingVignetteRef.current || !!pendingNoteActionRef.current || pendingEmergencyConfirmRef.current ||
+        !!pendingMissionTaskRef.current || getActiveMission()?.state === 'WaitingConfirmation';
+      if (gateOpen && classifyConfirmation(msg) === 'YES') {
+        const uttBytes = opts.utteranceBytes ?? -1;
+        if (uttBytes >= 0 && uttBytes < MIN_CONFIRM_BYTES) {
+          logAudioDiag('CONFIRM_REJECTED', `reason=empty_audio bytes=${uttBytes}`);
+          return;
+        }
+        logAudioDiag('CONFIRM_ACCEPTED', `bytes=${uttBytes}`);
+      }
+    }
+
     addMessage('user', msg);
     setLoading(true); loadingRef.current = true;
 
@@ -2131,6 +3941,14 @@ export default function BensonApp() {
     // guarantees the reset fires no matter which path — or no path — actually completes.
     try {
 
+    // ROUND_EMERGENCY_CORE_1 — explicit emergency intents are checked BEFORE every other gate, so
+    // a stale mission / open confirmation / pending note can never intercept "sună la 112" or the
+    // reply to "Sun la 112?". Not routed through the parser, the brain, or app governance.
+    if (EMERGENCY_GATE_ENABLED) {
+      const em = await handleEmergencyTurn(msg);
+      if (em === 'handled') { setLoading(false); loadingRef.current = false; return; }
+    }
+
     // A URL — open it immediately, no confirmation, no AI round-trip.
     const urlMatch = msg.match(URL_PATTERN);
     if (urlMatch) {
@@ -2141,58 +3959,270 @@ export default function BensonApp() {
       return;
     }
 
+    // ROUND_CONTACT_IDENTITY_CONTINUITY_1 — a pending "Te referi la X?" from the local
+    // ContextResolver, same priority tier as the other pending-choice gates below. Never re-asks
+    // the LLM; only replays the ORIGINAL brain-classified action with the chosen identity.
+    if (pendingPersonChoiceRef.current) {
+      const pending = pendingPersonChoiceRef.current;
+      let chosen: string | null = null;
+      if (pending.candidates.length === 1) {
+        const verdict = classifyConfirmation(msg);
+        logAudioDiag('CONFIRM_CLASSIFY', `text="${msg}" result=${verdict} type=person_choice`);
+        if (verdict === 'YES') chosen = pending.candidates[0].verifiedDisplayName;
+        else if (verdict === 'NO') {
+          pendingPersonChoiceRef.current = null;
+          setLoading(false); loadingRef.current = false;
+          setBensonState('IDLE', 'person_choice_cancelled');
+          speakOrShow(`Am anulat, ${getAddress()}.`);
+          return;
+        }
+      } else {
+        const normMsg = msg.trim().toLowerCase();
+        const matches = pending.candidates.filter((c) => normMsg.includes(c.verifiedDisplayName.toLowerCase()));
+        if (matches.length === 1) chosen = matches[0].verifiedDisplayName;
+      }
+      pendingPersonChoiceRef.current = null;
+      if (chosen) {
+        const params = { ...pending.params, contact: chosen, contactName: chosen };
+        const canonical = buildCanonicalCommand(pending.action, params, replyLangRef.current);
+        logAudioDiag('CANONICAL', `text="${canonical}" source=person_choice_resolved`);
+        if (canonical) {
+          const contacts2 = await getLiveContacts();
+          setBensonState('EXECUTING', `brain:${pending.action}`);
+          const bridged = await runMission(canonical, { source: 'voice', contacts: contacts2, onAck: onMissionAck });
+          logAudioDiag('ROUTE', `decision=command reason=person_choice_resolved handled=${bridged.handled}`);
+          // finishHandledMission() isn't declared until later in this function (TDZ) — this
+          // gate sits at the same early tier as the other pending-* gates above/below it, none of
+          // which call it either. Minimal inline equivalent, same as those.
+          const msgText = bridged.message && bridged.message.trim() ? bridged.message : `Nu am înțeles, ${getAddress()}. Spune din nou.`;
+          const isConfirming = !!bridged.disambiguation || !!bridged.pendingTask || getActiveMission()?.state === 'WaitingConfirmation';
+          setBensonState(isConfirming ? 'CONFIRMING' : (isFailureReply(msgText) ? 'ERROR' : 'DONE'), isConfirming ? 'mission_gate' : 'mission_result');
+          addMessage('benson', msgText);
+          setLoading(false); loadingRef.current = false;
+          if (bridged.pendingTask) { pendingMissionTaskRef.current = bridged.pendingTask; gateArmedAtRef.current = Date.now(); }
+          speakText(msgText, () => afterPromptRearm(true));
+          return;
+        }
+      }
+      // Not a recognized pick — falls through to normal handling below rather than looping forever.
+    }
+
     // Context Engine – pending vignette confirmation takes priority
+    // ORCH-FIX-1: classify FIRST, consume the ref only on a real decision.
     if (pendingVignetteRef.current) {
-      const border = pendingVignetteRef.current;
-      pendingVignetteRef.current = null;
-      if (YES_PATTERN.test(msg)) {
-        await Linking.openURL(border.vignetteUrl).catch(() => {});
+      const verdict = classifyConfirmation(msg);
+      logAudioDiag('CONFIRM_CLASSIFY', `text="${msg}" result=${verdict}`);
+      logAudioDiag('CONFIRM_PENDING', 'type=vignette present=true');
+      if (verdict === 'YES') {
+        const border = pendingVignetteRef.current;
+        pendingVignetteRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CONSUME', 'type=vignette');
+        logAudioDiag('CONFIRM_EXECUTE_START', 'type=vignette');
+        let ok = true;
+        try { await Linking.openURL(border.vignetteUrl); } catch { ok = false; }
+        logAudioDiag('CONFIRM_EXECUTE_END', `type=vignette success=${ok}`);
         setLoading(false); loadingRef.current = false;
+        setBensonState(ok ? 'DONE' : 'ERROR', 'confirm_result');
         speakOrShow(`Am deschis pagina pentru vinieta ${border.country}, ${getAddress()}.`);
         return;
       }
-      // Anything else — drop the pending confirmation and handle the message normally.
+      if (verdict === 'NO') {
+        pendingVignetteRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CANCEL', 'type=vignette');
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'confirm_cancelled');
+        speakOrShow(`Am anulat, ${getAddress()}.`);
+        return;
+      }
+      if (confirmRepromptCountRef.current >= MAX_CONFIRM_REPROMPTS) {
+        pendingVignetteRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CANCEL', 'type=vignette reason=reprompt_exhausted');
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'confirm_giveup');
+        return;
+      }
+      confirmReprompt('vignette');
+      return;
     }
 
     // Smart Voice Notepad – pending calendar/message confirmation takes priority
+    // ORCH-FIX-1: classify FIRST, consume the ref only on a real decision.
     if (pendingNoteActionRef.current) {
-      const note = pendingNoteActionRef.current;
-      pendingNoteActionRef.current = null;
-      if (YES_PATTERN.test(msg)) {
+      const verdict = classifyConfirmation(msg);
+      logAudioDiag('CONFIRM_CLASSIFY', `text="${msg}" result=${verdict}`);
+      logAudioDiag('CONFIRM_PENDING', 'type=note present=true');
+      if (verdict === 'YES') {
+        const note = pendingNoteActionRef.current;
+        pendingNoteActionRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CONSUME', 'type=note');
+        logAudioDiag('CONFIRM_EXECUTE_START', `type=note action=${note.actions.join('|')}`);
         setLoading(false); loadingRef.current = false;
-        if (note.actions.includes('create_calendar')) {
-          const reply = await createCalendarEvent(note, getAddress());
-          speakOrShow(reply);
-          setActiveCard({ kind: 'note', noteType: 'calendar', summary: note.content });
-        } else if (note.actions.includes('send_message') && note.person) {
-          const quickPhone = quickContacts.find(
-            q => q.name.toLowerCase() === note.person!.toLowerCase()
-          )?.phone;
-          const reply = await sendMessageToPerson(note.person, note.content, getAddress(), quickPhone);
-          speakOrShow(reply);
-          setActiveCard({ kind: 'note', noteType: 'message', summary: `${note.person}: ${note.content}` });
-        }
+        let ok = true;
+        try {
+          if (note.actions.includes('create_calendar')) {
+            const reply = await createCalendarEvent(note, getAddress());
+            speakOrShow(reply);
+            setActiveCard({ kind: 'note', noteType: 'calendar', summary: note.content });
+          } else if (note.actions.includes('send_message') && note.person) {
+            const quickPhone = quickContacts.find(
+              q => q.name.toLowerCase() === note.person!.toLowerCase()
+            )?.phone;
+            const reply = await sendMessageToPerson(note.person, note.content, getAddress(), quickPhone);
+            speakOrShow(reply);
+            setActiveCard({ kind: 'note', noteType: 'message', summary: `${note.person}: ${note.content}` });
+          }
+        } catch { ok = false; }
+        logAudioDiag('CONFIRM_EXECUTE_END', `type=note success=${ok}`);
         return;
       }
-      // Anything else — drop the pending confirmation and handle the message normally.
+      if (verdict === 'NO') {
+        pendingNoteActionRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CANCEL', 'type=note');
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'confirm_cancelled');
+        speakOrShow(`Am anulat, ${getAddress()}.`);
+        return;
+      }
+      if (confirmRepromptCountRef.current >= MAX_CONFIRM_REPROMPTS) {
+        pendingNoteActionRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CANCEL', 'type=note reason=reprompt_exhausted');
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'confirm_giveup');
+        return;
+      }
+      confirmReprompt('note');
+      return;
     }
 
-    // Mission Orchestrator — pending mission task awaiting confirmation takes priority, same
-    // yes/no pattern as pendingNoteActionRef/pendingVignetteRef above.
+    // Mission Orchestrator — pending mission task awaiting confirmation takes priority.
+    // ORCH-FIX-1: classify FIRST; consume the ref only on YES; NO cancels (incl. the governed
+    // mission); UNKNOWN keeps it and re-prompts (bounded, no infinite loop).
     if (pendingMissionTaskRef.current) {
-      const pending = pendingMissionTaskRef.current;
-      pendingMissionTaskRef.current = null;
-      if (YES_PATTERN.test(msg)) {
-        const resumeResult = await resumePendingTask(pending, await getLiveContacts());
+      // ROUND_WA_REPLY_CONTEXT_1 — a pending task waiting for a dictated message body (BENSON just
+      // asked "Ce să-i scriu?") is NOT a yes/no confirmation: the reply itself IS the missing data,
+      // never classified, never treated as a new command. classifyConfirmation() would otherwise
+      // misread a body like "nu mai vin" as a cancellation.
+      const pendingTaskForBody = pendingMissionTaskRef.current.plan.tasks[pendingMissionTaskRef.current.taskIndex];
+      const isAwaitingMessageBody = !!pendingTaskForBody?.input?.waAwaitingMessageBody;
+      logAudioDiag('WA_REPLY_RAW_STT', `missionId=${pendingMissionTaskRef.current.plan.id} expectedReplyType=${isAwaitingMessageBody ? 'MESSAGE_BODY' : 'CONFIRMATION'} rawText=${JSON.stringify(msg)}`);
+      if (isAwaitingMessageBody) {
+        // No separate normalization stage for this text — `msg` is already the single canonical
+        // form by this point (BENSON_STABILIZATION_1's USER_MIC gate already ran upstream).
+        logAudioDiag('WA_REPLY_NORMALIZED', `missionId=${pendingMissionTaskRef.current.plan.id} normalizedText=${JSON.stringify(msg)}`);
+        logAudioDiag('WA_REPLY_CONTEXT_BEFORE', `missionId=${pendingMissionTaskRef.current.plan.id} contact=${JSON.stringify(pendingTaskForBody?.input?.waWriteContact ?? '')} message_body=null state=WAITING_MESSAGE_BODY`);
+      }
+      const verdict = isAwaitingMessageBody ? 'YES' : classifyConfirmation(msg);
+      if (!isAwaitingMessageBody) logAudioDiag('CONFIRM_CLASSIFY', `text="${msg}" result=${verdict}`);
+      logAudioDiag('CONFIRM_PENDING', 'type=mission present=true');
+      if (verdict === 'NO') {
+        pendingMissionTaskRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CANCEL', 'type=mission');
+        try { if (getActiveMission()) await cancelActiveMission(); } catch {}
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'confirm_cancelled');
+        speakOrShow(`Am anulat, ${getAddress()}.`);
+        return;
+      }
+      if (verdict === 'UNKNOWN') {
+        // MISSION-FIX-1 — an UNKNOWN reply might be a brand-new command, not an unclear yes/no.
+        // If so, drop this pending mission task and let the same utterance route normally.
+        if (await supersedeStaleConfirmationIfNewCommand(msg)) {
+          // fall through — do NOT return; normal routing below handles `msg`.
+        } else if (confirmRepromptCountRef.current >= MAX_CONFIRM_REPROMPTS) {
+          pendingMissionTaskRef.current = null;
+          confirmRepromptCountRef.current = 0;
+          logAudioDiag('CONFIRM_CANCEL', 'type=mission reason=reprompt_exhausted');
+          try { if (getActiveMission()) await cancelActiveMission(); } catch {}
+          setLoading(false); loadingRef.current = false;
+          setBensonState('IDLE', 'confirm_giveup');
+          return;
+        } else {
+          confirmReprompt('mission', 'true_ambiguity');
+          return;
+        }
+      }
+      // verdict === 'YES' — capture, consume, execute exactly once. (MISSION-FIX-1: guarded
+      // explicitly so an UNKNOWN reply that was superseded into a new command falls through here
+      // instead of trying to resume a now-null pending task.)
+      if (verdict === 'YES' && pendingMissionTaskRef.current) {
+        const pending = pendingMissionTaskRef.current;
+        pendingMissionTaskRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CONSUME', 'type=mission');
+        logAudioDiag('CONFIRM_EXECUTE_START', 'type=mission');
+        setBensonState('EXECUTING', 'resume_task');
+        // C1 TASK 3 — mark the resume "in flight" so the AppState 'active' handler can recover
+        // cleanly if the app backgrounds (WhatsApp/Waze) mid-await and comes back.
+        resumeInFlightRef.current = { startedAt: Date.now() };
+        let resumeResult: Awaited<ReturnType<typeof resumePendingTask>>;
+        try {
+          resumeResult = await resumePendingTask(pending, await getLiveContacts(), onMissionAck, isAwaitingMessageBody ? msg : undefined);
+        } catch (e) {
+          // C1 TASK 4 — the resume threw (native rejected / state corrupt): no "Am rămas blocat",
+          // clean IDLE recovery + restart listening.
+          resumeInFlightRef.current = null;
+          logAudioDiag('RESUME_FAILED', `reason=exception detail=${JSON.stringify(String(e)).slice(0, 120)} recovered=idle`);
+          logAudioDiag('CONFIRM_EXECUTE_END', 'type=mission success=false');
+          setLoading(false); loadingRef.current = false;
+          if (C1_NO_SILENT_STALL) {
+            setBensonState('IDLE', 'resume_recover');
+            resumeListeningAfterUnblock();
+            return;
+          }
+          throw e;
+        }
+        resumeInFlightRef.current = null;
+        postActionMuteUntilRef.current = Date.now() + POST_ACTION_MUTE_MS;
+        // C1 TASK 4 — a resume that finished with no message is a silent stall: recover to IDLE.
+        if (C1_NO_SILENT_STALL && (!resumeResult || !resumeResult.message || !resumeResult.message.trim()) && !resumeResult?.pendingTask) {
+          logAudioDiag('RESUME_FAILED', 'reason=empty_message recovered=idle');
+          logAudioDiag('CONFIRM_EXECUTE_END', 'type=mission success=false');
+          setLoading(false); loadingRef.current = false;
+          setBensonState('IDLE', 'resume_recover');
+          resumeListeningAfterUnblock();
+          return;
+        }
+        setBensonState(
+          resumeResult.pendingTask ? 'CONFIRMING' : (isFailureReply(resumeResult.message) ? 'ERROR' : 'DONE'),
+          'resume_result',
+        );
+        logAudioDiag('RESUME', `source=action_done state=${bensonStateRef.current}`);
+        logAudioDiag('CONFIRM_EXECUTE_END', `type=mission success=${!isFailureReply(resumeResult.message)}`);
         console.log('[MissionOrchestrator] resumed mission=', pending.plan.id, 'status=', resumeResult.plan?.status, 'message=', resumeResult.message);
         addMessage('benson', resumeResult.message);
         setLoading(false); loadingRef.current = false;
-        if (resumeResult.pendingTask) pendingMissionTaskRef.current = resumeResult.pendingTask;
+        if (resumeResult.pendingTask) { pendingMissionTaskRef.current = resumeResult.pendingTask; gateArmedAtRef.current = Date.now(); }
         // Same fire-and-forget speak() gap as the initial confirmation question above — a
         // multi-step mission's next confirmation ("da" to step 1, then a second "Confirmi?" for
         // step 2) would otherwise go silent the exact same way.
         const expectsReply2 = !!resumeResult.pendingTask;
-        speakText(resumeResult.message, () => {
+        // WA-CALL-STAYS-LIVE — this resume just placed a WhatsApp voice call and it succeeded. The
+        // native executor already verified the call screen is live and, by contract, does nothing
+        // more. BENSON must now do nothing either: no result speech, no mic reopen, no wake-loop
+        // restart (that concurrent mic grab kills the call). Hold the mic closed until BENSON is
+        // foregrounded again or WA_CALL_MIC_HOLD_MS elapses.
+        const resumedTask = pending.plan.tasks[pending.taskIndex];
+        const wasWhatsAppVoiceCall =
+          !!resumedTask &&
+          resumedTask.type === 'PREPARE_MESSAGE' &&
+          (resumedTask.input as { mode?: string } | undefined)?.mode === 'voice_call';
+        if (WA_CALL_MIC_HOLD_MS > 0 && wasWhatsAppVoiceCall && !expectsReply2 && !isFailureReply(resumeResult.message)) {
+          whatsappCallMicHoldUntilRef.current = Date.now() + WA_CALL_MIC_HOLD_MS;
+          nwOwner('CALL'); // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — suspend native wake for the call
+          wakeTriggeredRef.current = false;
+          try { hideWakeRing(); } catch {}
+          logAudioDiag('SPEAK_SUPPRESSED', 'reason=whatsapp_call_live');
+          logAudioDiag('MIC_HOLD', `reason=whatsapp_call_live untilMs=${WA_CALL_MIC_HOLD_MS}`);
+          return;
+        }
+        const afterResumeSpeak = () => {
           if (expectsReply2) { doStartListening(); return; }
           if (convModeRef.current) { doStartListening(); return; }
           if (wakeTriggeredRef.current) {
@@ -2200,10 +4230,21 @@ export default function BensonApp() {
             try { hideWakeRing(); } catch {}
             try { resumePassiveWake(); } catch {}
           }
-        });
+        };
+        // E1-5 — "O sun." was already spoken in parallel with the WhatsApp/Waze side effect;
+        // suppress the long final line on a clean success (still shown in the transcript above).
+        if (ackSpokenThisTurnRef.current && !expectsReply2 && !isFailureReply(resumeResult.message)) {
+          logAudioDiag('SPEAK_SUPPRESSED', 'reason=ack_already_spoken');
+          afterResumeSpeak();
+          // ROUND_ASSISTANT_SESSION_UX_FIX_1 — no additional TTS plays for this result (the ACK
+          // already covered it); nothing else marks "the user could start reading this now".
+          scheduleResultDismiss(RESULT_DWELL_NO_TTS_MS);
+        } else {
+          speakText(resumeResult.message, afterResumeSpeak);
+        }
         return;
       }
-      // Anything else — drop the pending mission task and handle the message normally.
+      // (every verdict above returns — no fall-through)
     }
 
     // Mission Governance (Waze/WhatsApp, Phase 1) — pending confirmation / awaiting user
@@ -2211,16 +4252,50 @@ export default function BensonApp() {
     // catches confirmations from the Claude tool-use path (lib/agents/tools.ts), which has no
     // pendingMissionTaskRef of its own — the AsyncStorage-backed store is what lets that path be
     // confirmed on a later turn regardless of which one asked the question.
+    // ORCH-FIX-1: same YES / NO / UNKNOWN classifier as the pending-* gates above.
     const governedMission = getActiveMission();
     if (governedMission?.state === 'WaitingConfirmation') {
-      if (YES_PATTERN.test(msg)) {
+      const verdict = classifyConfirmation(msg);
+      logAudioDiag('CONFIRM_CLASSIFY', `text="${msg}" result=${verdict}`);
+      logAudioDiag('CONFIRM_PENDING', 'type=governed present=true');
+      if (verdict === 'YES') {
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CONSUME', 'type=governed');
+        logAudioDiag('CONFIRM_EXECUTE_START', 'type=governed');
+        setBensonState('EXECUTING', 'confirm_mission');
         const outcome = await confirmActiveMission(await getLiveContacts());
+        postActionMuteUntilRef.current = Date.now() + POST_ACTION_MUTE_MS;
+        logAudioDiag('CONFIRM_EXECUTE_END', `type=governed success=${!!outcome && !isFailureReply(outcome.message)}`);
         setLoading(false); loadingRef.current = false;
+        setBensonState(!outcome || isFailureReply(outcome.message) ? 'ERROR' : 'DONE', 'confirm_result');
         if (outcome) { addMessage('benson', outcome.message); speak(outcome.message); }
         return;
       }
-      await cancelActiveMission();
-      // Anything else — drop the pending confirmation and handle the message normally.
+      if (verdict === 'NO') {
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CANCEL', 'type=governed');
+        await cancelActiveMission();
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'confirm_cancelled');
+        speakOrShow(`Am anulat, ${getAddress()}.`);
+        return;
+      }
+      // UNKNOWN — MISSION-FIX-1: is this a brand-new command rather than an unclear yes/no?
+      // If so, mark the pending mission Superseded and let the SAME utterance route normally.
+      if (await supersedeStaleConfirmationIfNewCommand(msg)) {
+        // fall through — do NOT return; `governedMission` local is now stale, the block below
+        // (`else if … WaitingUser`) is skipped, and normal routing handles `msg`.
+      } else if (confirmRepromptCountRef.current >= MAX_CONFIRM_REPROMPTS) {
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('CONFIRM_CANCEL', 'type=governed reason=reprompt_exhausted');
+        await cancelActiveMission();
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'confirm_giveup');
+        return;
+      } else {
+        confirmReprompt('governed', 'true_ambiguity');
+        return;
+      }
     } else if (governedMission?.state === 'WaitingUser') {
       const resolved = await resolveActiveMissionFromUtterance(msg);
       if (resolved) {
@@ -2245,32 +4320,68 @@ export default function BensonApp() {
       return;
     }
 
-    // Mission Orchestrator (BENSON 21) — the new upper brain: normalize -> Goal Extractor ->
-    // Problem Solver -> Mission Planner -> execute tasks through the unchanged App Governance
-    // Engine (governAction). Anything it doesn't recognize (handled=false) falls through
-    // unchanged to the existing routeCommand/Claude path below, same invariant as BENSON 20.
+    // Build B — a "call a contact" utterance the deterministic parser will handle: run the SHARED
+    // sanity checkpoint FIRST (same function the brain route uses, one physical impl in
+    // lib/engines/actionSanity.ts), so "sună wake up" / a bare verb / foreign-script text never
+    // reaches the Mission Orchestrator's contact resolution. BENSON asks who instead.
+    if (CALL_PATTERN.test(msg)) {
+      const cm = msg.match(/\b(?:call|sun[aăo]?|ruf|appelle)(?:-[oli]l?)?\s*(.*)$/i);
+      const parsedContact = (cm?.[1] ?? '').replace(/^(?:o|l|le|îl|il|pe|la|lui)\s+/i, '').trim();
+      if (parsedContact && !sanityCheckContactParam('parser', parsedContact, replyLangRef.current).ok) {
+        const q = askWhoToCall(replyLangRef.current, getAddress());
+        logAudioDiag('ROUTE', 'decision=clarify reason=bad_contact_param source=parser');
+        addMessage('benson', q);
+        setLoading(false); loadingRef.current = false;
+        speakText(q, () => afterPromptRearm(true));
+        return;
+      }
+    }
+
+    // Mission Orchestrator (BENSON 21) — the deterministic upper brain. Round 2 / Build B keeps it
+    // as the FAST PATH for obvious commands: whatever it recognizes here executes straight away,
+    // unchanged. Anything it does NOT recognize (handled=false) now goes to the brain below instead
+    // of the old English fallback — the deterministic parser no longer has the last word.
     logAudioDiag('ORCHESTRATOR_HANDOFF_REQUESTED', `text="${msg}"`);
     const contactsForMission = MAY_NEED_CONTACTS_PATTERN.test(msg) ? await getLiveContacts() : [];
-    const missionResult = await runMission(msg, { source: 'voice', contacts: contactsForMission });
-    logAudioDiag('ORCHESTRATOR_HANDOFF_COMPLETED', `handled=${missionResult.handled} missionId=${missionResult.plan?.id ?? 'none'}`);
-    if (missionResult.handled) {
-      console.log('[MissionOrchestrator] mission=', missionResult.plan?.id, 'status=', missionResult.plan?.status, 'message=', missionResult.message);
-      addMessage('benson', missionResult.message);
+
+    // Speaks a Mission Orchestrator result + wires the resume-listening / self-echo-loop logic.
+    // Shared by the fast-path run and the brain-intent bridge run below so both behave identically.
+    const finishHandledMission = (mr: Awaited<ReturnType<typeof runMission>>) => {
+      console.log('[MissionOrchestrator] mission=', mr.plan?.id, 'status=', mr.plan?.status, 'message=', mr.message);
+
+      // Round D — a handled mission with NO message must never leave BENSON silent.
+      if (!mr.message || !mr.message.trim()) {
+        const nf = replyLangRef.current.toLowerCase().startsWith('ro')
+          ? `N-am înțeles, ${getAddress()}. Spune din nou.`
+          : replyLangRef.current.toLowerCase().startsWith('de')
+          ? `Ich habe das nicht verstanden, ${getAddress()}. Sag es noch mal.`
+          : `I didn't catch that, ${getAddress()}. Say it again.`;
+        setBensonState('ERROR', 'empty_mission_reply');
+        addMessage('benson', nf);
+        setLoading(false); loadingRef.current = false;
+        speakText(nf, () => afterPromptRearm(true));
+        return;
+      }
+
+      // Round D — a "which one?" proposal is a real pending state now (the orchestrator holds the
+      // candidate list and routes the next utterance to it). Render it as CONFIRMING so it is not
+      // auto-cleared off screen while the user decides.
+      const isDisambig = !!mr.disambiguation;
+      const isConfirming = isDisambig || !!mr.pendingTask || getActiveMission()?.state === 'WaitingConfirmation';
+      setBensonState(
+        isConfirming ? 'CONFIRMING' : (isFailureReply(mr.message) ? 'ERROR' : 'DONE'),
+        isConfirming ? (isDisambig ? 'disambiguation' : 'mission_gate') : 'mission_result',
+      );
+      addMessage('benson', mr.message);
       setLoading(false); loadingRef.current = false;
-      if (missionResult.pendingTask) pendingMissionTaskRef.current = missionResult.pendingTask;
-      // A response expects a direct spoken reply next either when a task is formally pending
-      // confirmation ("Confirmi?"), or when no plan was ever created at all — that only happens
-      // on the Mission Orchestrator's own clarification branches ("Pentru cine?",
-      // problem.suggestedNextStep), never on a completed/failed mission run (which always carries
-      // a plan). Executed-action results (WhatsApp end/mute call, a resolved bridge repair) do
-      // carry outcomes of their own and fall back to the same conv-mode/wake-triggered rule as a
-      // normal informational reply.
-      const expectsReply = !!missionResult.pendingTask || !missionResult.plan;
-      // speak() is explicitly fire-and-forget (no onFinished hook) -- using it here meant a
-      // spoken "Confirmi?"/"Pentru cine?" never resumed listening for the answer, so BENSON
-      // looked dead right after asking its own question. speakText() mirrors the
-      // routeCommand/Claude path's resume logic below.
-      speakText(missionResult.message, () => {
+      if (mr.pendingTask) { pendingMissionTaskRef.current = mr.pendingTask; gateArmedAtRef.current = Date.now(); }
+      const expectsReply = !!mr.pendingTask || isDisambig || !mr.plan;
+      const afterFinalSpeak = () => {
+        if (noteSpokenAndCheckRepeatLoop(mr.message)) {
+          if (wakeTriggeredRef.current) { wakeTriggeredRef.current = false; try { hideWakeRing(); } catch {} }
+          try { resumePassiveWake(); } catch {}
+          return;
+        }
         if (expectsReply) { doStartListening(); return; }
         if (convModeRef.current) { doStartListening(); return; }
         if (wakeTriggeredRef.current) {
@@ -2278,8 +4389,156 @@ export default function BensonApp() {
           try { hideWakeRing(); } catch {}
           try { resumePassiveWake(); } catch {}
         }
-      });
+      };
+      // E1-5 — the short ACK ("Pornesc traseul." / "Deschid.") was already spoken in parallel with
+      // the launch (see the onAck below). On a clean success, don't also speak the final line —
+      // "confirmarea lungă de la final dispare". It still shows in the transcript (addMessage
+      // above). A CONFIRMING result (needs the user's reply) or a failure is always spoken.
+      if (ackSpokenThisTurnRef.current && !isConfirming && !isFailureReply(mr.message)) {
+        logAudioDiag('SPEAK_SUPPRESSED', 'reason=ack_already_spoken');
+        afterFinalSpeak();
+        // ROUND_ASSISTANT_SESSION_UX_FIX_1 — no additional TTS plays for this result; mark it
+        // readable now (the longer, no-TTS dwell — nothing else signals "shown to the user").
+        scheduleResultDismiss(RESULT_DWELL_NO_TTS_MS);
+      } else {
+        speakText(mr.message, afterFinalSpeak);
+      }
+    };
+
+    const missionResult = await runMission(msg, { source: 'voice', contacts: contactsForMission, onAck: onMissionAck });
+    logAudioDiag('ORCHESTRATOR_HANDOFF_COMPLETED', `handled=${missionResult.handled} missionId=${missionResult.plan?.id ?? 'none'}`);
+    // ROUND_WAKE_COMMAND_HANDOFF_FIX_1 — EXECUTION-stage outcome for a wake-originated command
+    // (CASE 3/4). Deliberately scoped to this one call site (the mission/orchestrator action
+    // path, which is what "deschide calculatorul" goes through) — not sprinkled across every one
+    // of handleIncomingText's other early-return branches (URL/vignette/note/emergency), per
+    // instruction not to touch neighboring systems blindly.
+    if (wakeOriginated) logAudioDiag('WAKE_COMMAND_RESULT', `handled=${missionResult.handled} missionId=${missionResult.plan?.id ?? 'none'}`);
+    if (missionResult.handled) {
+      logAudioDiag('ROUTE', 'decision=command reason=mission_orchestrator');
+      finishHandledMission(missionResult);
       return;
+    }
+
+    // ── Build B — brain as the conversation + intent route ────────────────────────────────────
+    // Everything the fast path did not handle. The brain classifies the utterance against the
+    // CLOSED KnownAction list and returns speak / clarify / action — it NEVER executes. Only active
+    // when a CREIER/Groq key is configured; otherwise brainOut is null and the existing
+    // claude/openai/gemini routeCommand path runs unchanged.
+    const brainOut = await routeThroughBrain({
+      utterance: msg,
+      lang: replyLangRef.current,
+      history: historyRef.current,
+      facts: factsRef.current,
+      screenText: SCREEN_READ_PATTERN.test(msg)
+        ? (() => { try { const s = getLastScreenSnapshot(); return s ? JSON.stringify(s).slice(0, 4000) : undefined; } catch { return undefined; } })()
+        : undefined,
+    });
+    if (brainOut) {
+      if (brainOut.kind === 'action') {
+        logAudioDiag('BRAIN_INTENT', `raw="${msg}" kind=action action=${brainOut.action} params=${JSON.stringify(brainOut.params)} confidence=${brainOut.confidence ?? '-'}`);
+        const contact = contactParamOf(brainOut.action, brainOut.params);
+        if (contact && !sanityCheckContactParam('brain', contact, replyLangRef.current).ok) {
+          const q = askWhoToCall(replyLangRef.current, getAddress());
+          logAudioDiag('ROUTE', 'decision=clarify reason=bad_contact_param source=brain');
+          addMessage('benson', q);
+          setLoading(false); loadingRef.current = false;
+          speakText(q, () => afterPromptRearm(true));
+          return;
+        }
+        // ROUND_WHATSAPP_REGRESSION_REVERT_1 (2026-09-13, device-log-proven) — resolvePerson()'s
+        // fuzzy local-contact matching produced unrelated candidates ("Peter Pane Johannes
+        // Günzel" for "Hana"), blocking plain CALL/WRITE commands that worked before today.
+        // Per explicit instruction: the new resolver/fuzzy-matching code itself is NOT touched
+        // (still intact below, dead), only disabled at this call site. Restores the pre-existing
+        // behavior — the raw name the user said becomes the contact param unchanged. Revert:
+        // PERSON_RESOLVE_ENABLED = true once the resolver's precision is fixed in its own round.
+        const PERSON_RESOLVE_ENABLED = false;
+        let effectiveParams = brainOut.params;
+        if (PERSON_RESOLVE_ENABLED && brainOut.entities?.person && (brainOut.action === 'call_contact' || brainOut.action === 'send_whatsapp_message')) {
+          const [verifiedIdentities, liveContactsForResolve] = await Promise.all([getVerifiedIdentities(), getLiveContacts()]);
+          const resolution = resolvePerson({ personRef: brainOut.entities.person, verifiedIdentities, localContacts: liveContactsForResolve });
+          logAudioDiag('PERSON_RESOLVE', `type=${brainOut.entities.person.referenceType} surface=${JSON.stringify(brainOut.entities.person.surfaceText)} status=${resolution.status}`);
+          if (resolution.status === 'RESOLVED' && resolution.resolved) {
+            lastResolvedPersonRef.current = resolution.resolved;
+            effectiveParams = { ...brainOut.params, contact: resolution.resolved.verifiedDisplayName, contactName: resolution.resolved.verifiedDisplayName };
+          } else if (resolution.status === 'NEEDS_CONFIRMATION' && resolution.candidates && resolution.candidates.length > 0) {
+            pendingPersonChoiceRef.current = { action: brainOut.action, params: brainOut.params, candidates: resolution.candidates };
+            const q = resolution.candidates.length === 1
+              ? `Te referi la ${resolution.candidates[0].verifiedDisplayName}?`
+              : `Te referi la ${resolution.candidates.map((c) => c.verifiedDisplayName).join(' sau ')}?`;
+            logAudioDiag('ROUTE', 'decision=clarify reason=person_ambiguous source=context_resolver');
+            addMessage('benson', q);
+            setLoading(false); loadingRef.current = false;
+            speakText(q, () => afterPromptRearm(true));
+            return;
+          }
+          // UNRESOLVED — falls through unchanged: the raw surfaceText/contact param is used exactly
+          // as before this round (no regression for a genuinely new/unverified name).
+        } else if (brainOut.entities?.person?.surfaceText && (brainOut.action === 'call_contact' || brainOut.action === 'send_whatsapp_message') && !contactParamOf(brainOut.action, brainOut.params)) {
+          // params.contact is empty but the brain named a person only via entities.person (its
+          // OUTPUT_CONTRACT allows this) — with the resolver disabled above, use that raw name
+          // directly, same as if the brain had put it in params.contact itself.
+          const raw = brainOut.entities.person.surfaceText;
+          effectiveParams = { ...brainOut.params, contact: raw, contactName: raw };
+        }
+        const canonical = buildCanonicalCommand(brainOut.action, effectiveParams, replyLangRef.current);
+        logAudioDiag('CANONICAL', `text="${canonical}"`);
+        if (canonical) {
+          try {
+            const pr = parseCommandToActionRequest(canonical, 'voice');
+            logAudioDiag('PARSE_RESULT', `problemType=${pr.intent} params=${JSON.stringify(pr.parameters)}`);
+          } catch { logAudioDiag('PARSE_RESULT', 'problemType=parse_error params={}'); }
+          const contacts2 = MAY_NEED_CONTACTS_PATTERN.test(canonical) ? await getLiveContacts() : contactsForMission;
+          setBensonState('EXECUTING', `brain:${brainOut.action}`);
+          const bridged = await runMission(canonical, { source: 'voice', contacts: contacts2, onAck: onMissionAck });
+          logAudioDiag('ROUTE', `decision=command reason=brain_intent handled=${bridged.handled}`);
+          if (bridged.handled) { finishHandledMission(bridged); return; }
+          // Brain classified a command the deterministic executor could not run — ask, don't guess.
+          setBensonState('ERROR', 'brain_bridge_unhandled');
+          const nf = replyLangRef.current.toLowerCase().startsWith('ro')
+            ? `N-am putut duce asta la capăt, ${getAddress()}. Poți spune comanda altfel?`
+            : replyLangRef.current.toLowerCase().startsWith('de')
+            ? `Ich konnte das nicht ausführen, ${getAddress()}. Sag den Befehl bitte anders.`
+            : `I couldn't carry that out, ${getAddress()}. Try saying the command differently.`;
+          addMessage('benson', nf);
+          setLoading(false); loadingRef.current = false;
+          speakText(nf, () => afterPromptRearm(true));
+          return;
+        }
+        // canonical === '' -> search_web / set_reminder: the deterministic executor doesn't own
+        // those. Fall through to routeCommand() on the ORIGINAL utterance (its search / notepad
+        // regex agents handle them). No return here.
+        logAudioDiag('PARSE_RESULT', `problemType=delegated params="${msg}"`);
+      } else if (brainOut.kind === 'clarify') {
+        logAudioDiag('BRAIN_INTENT', `raw="${msg}" kind=clarify action=- params=- confidence=${brainOut.confidence ?? '-'}`);
+        logAudioDiag('ROUTE', 'decision=conversation reason=brain_clarify');
+        setBensonState('CONFIRMING', 'brain_clarify');
+        addMessage('benson', brainOut.question);
+        await appendHistory(msg, brainOut.question);
+        setLoading(false); loadingRef.current = false;
+        speakText(brainOut.question, () => afterPromptRearm(true));
+        return;
+      } else {
+        logAudioDiag('BRAIN_INTENT', `raw="${msg}" kind=speak action=- params=- confidence=-`);
+        logAudioDiag('ROUTE', 'decision=conversation reason=brain_speak');
+        addMessage('benson', brainOut.text);
+        await appendHistory(msg, brainOut.text);
+        setLoading(false); loadingRef.current = false;
+        speakText(brainOut.text, () => {
+          if (noteSpokenAndCheckRepeatLoop(brainOut.text)) {
+            if (wakeTriggeredRef.current) { wakeTriggeredRef.current = false; try { hideWakeRing(); } catch {} }
+            try { resumePassiveWake(); } catch {}
+            return;
+          }
+          if (convModeRef.current) { doStartListening(); return; }
+          if (wakeTriggeredRef.current) {
+            wakeTriggeredRef.current = false;
+            try { hideWakeRing(); } catch {}
+            try { resumePassiveWake(); } catch {}
+          }
+        });
+        return;
+      }
     }
 
     const drivingContext = !carModeRef.current ? '' :
@@ -2294,8 +4553,21 @@ export default function BensonApp() {
       urgency: carModeRef.current && roadTypeRef.current === 'highway' ? 'high' : undefined,
       speaker: detectSpeaker(msg, familyRef.current),
     });
+    // Set from inside the try block below once routeCommand resolves — declared here (not
+    // `const result` inside try) so this callback, defined before that value exists, can still
+    // read it by closure once it actually fires (after sentenceSpeaker.finish(), which only
+    // happens after the assignment below).
+    let lastReplyTextForLoopCheck = '';
     const sentenceSpeaker = (convModeRef.current || wakeTriggeredRef.current)
       ? createSentenceSpeaker(() => {
+          // See repeatedReplyRef's doc comment — same repeat-fallback-loop breaker as the Mission
+          // Orchestrator branch above, applied here to the Claude/OpenAI conversational path,
+          // which is where the live-confirmed "I did not quite catch that" loop actually occurs.
+          if (noteSpokenAndCheckRepeatLoop(lastReplyTextForLoopCheck)) {
+            if (wakeTriggeredRef.current) { wakeTriggeredRef.current = false; try { hideWakeRing(); } catch {} }
+            try { resumePassiveWake(); } catch {}
+            return;
+          }
           if (convModeRef.current) { doStartListening(); return; }
           if (wakeTriggeredRef.current) {
             wakeTriggeredRef.current = false;
@@ -2309,6 +4581,7 @@ export default function BensonApp() {
         address:   getAddress(),
         apiKey:    apiKeyRef.current,
         openaiKey: openaiKeyRef.current,
+        geminiKey: geminiKeyRef.current,
         tavilyKey: tavilyKeyRef.current,
         modelProvider: modelProviderRef.current,
         character: characterRef.current,
@@ -2319,8 +4592,12 @@ export default function BensonApp() {
         drivingContext,
         onSentence: sentenceSpeaker ? (s) => sentenceSpeaker.push(s) : undefined,
         onStartCarMode: () => toggleCarMode(true),
-        onRememberFact: (fact) => appendFact(fact),
+        // Task 5.1 — this is the model-initiated path (the `remember` tool). appendFact refuses it
+        // and logs MEMORY_REJECTED reason=model_initiated; only an explicit user "remember that …"
+        // (tryStoreFact, REMEMBER_PATTERN) actually writes.
+        onRememberFact: (fact) => appendFact(fact, 'model'),
       }, (progress) => addMessage('benson', progress));
+      lastReplyTextForLoopCheck = result.reply;
 
       recordEvent({
         command_type: classifyCommand(result),
@@ -2334,7 +4611,8 @@ export default function BensonApp() {
       addMessage('benson', result.reply);
       setActiveCard(result.card ?? null);
       if (result.pendingNote) {
-        pendingNoteActionRef.current = result.pendingNote;
+        pendingNoteActionRef.current = result.pendingNote; gateArmedAtRef.current = Date.now();
+        setBensonState('CONFIRMING', 'note');
         // "message" notes save to the family profile immediately — only sending waits for confirmation.
         if (result.pendingNote.type === 'message' && result.pendingNote.person) {
           const updatedFamily = saveFamilyNote(family, result.pendingNote.person, result.pendingNote.content);
@@ -2366,7 +4644,7 @@ export default function BensonApp() {
         error_type: 'exception',
         session_duration_seconds: Math.round((Date.now() - startedAt) / 1000),
       }).catch(() => {});
-      const err = `Connection issue, ${getAddress()}. Please check your network.`;
+      const err = conversationFallbackLine(replyLangRef.current, getAddress());
       addMessage('benson', err);
       setLoading(false); loadingRef.current = false;
       // Always spoken now (previously only when conv mode was already on) — a blind user typing
@@ -2607,6 +4885,17 @@ export default function BensonApp() {
                 <Text style={[s.dangerTxt, { color: GOLD }]}>App Permissions</Text>
               </TouchableOpacity>
 
+              {/* Închide complet — moved here from the main screen's top bar (product-owner-directed
+                  2026-08-23: it was easy to miss floating over the medallion). Left in the default
+                  red dangerBtn styling (unlike the GOLD-overridden buttons above) since this is the
+                  one genuinely destructive action on this screen — stops listening AND sound until
+                  explicitly turned back on via the red banner it produces on the main screen. */}
+              <TouchableOpacity style={[s.dangerBtn, { marginTop: 10 }]}
+                onPress={() => { tap(); toggleSilence(); }}
+                accessibilityLabel="Închide complet Benson — oprește ascultarea și sunetul" accessibilityRole="button">
+                <Text style={s.dangerTxt}>{silenced ? 'Pornește Benson' : 'Închide complet'}</Text>
+              </TouchableOpacity>
+
               {/* Floating bubble — "draw over other apps" can't be silently granted; this opens
                   the system settings screen once. The bubble itself only shows automatically
                   once granted, whenever conversation mode is on. */}
@@ -2625,10 +4914,54 @@ export default function BensonApp() {
                 value={tavilyKey} onChangeText={setTavilyKey} secureTextEntry />
               <TextInput style={[s.input, { marginTop: 10 }]} placeholder="OpenAI key (sk-...) — for OpenAI chat model + voice" placeholderTextColor={MUTED}
                 value={openaiKey} onChangeText={setOpenaiKey} secureTextEntry />
+              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="Gemini key (AIza...) — free, best speech transcription" placeholderTextColor={MUTED}
+                value={geminiKey} onChangeText={setGeminiKey} secureTextEntry />
+              {/* Groq key (Round 2) — powers the STT section below. Stored via expo-secure-store
+                  (settingsStore.saveEngineConfig), the same hardware-backed store as the Picovoice
+                  key — never AsyncStorage. Saved by the same SAVE KEYS button as the others. Field
+                  blanks after save; the masked hint shows what is currently stored. */}
+              <TextInput style={[s.input, { marginTop: 10 }]} placeholder={`Groq API key (gsk_...) — transcriere${savedGroqMasked !== '(none)' ? `  · salvat: ${savedGroqMasked}` : ''}`} placeholderTextColor={MUTED}
+                value={groqKey} onChangeText={setGroqKey} secureTextEntry autoCapitalize="none" autoCorrect={false} />
               <TouchableOpacity style={[s.btn, { marginTop: 10 }]} onPress={() => { tap(); saveApiKeys(); }}
                 accessibilityLabel="Save API keys" accessibilityRole="button">
                 <Text style={s.btnText}>SAVE KEYS</Text>
               </TouchableOpacity>
+
+              {/* ROUND_WAKE_NATIVE_GENERIC_1 — the ONE authoritative wake-name config. Applied
+                  live (no separate save button, not a secret): every change is persisted and
+                  pushed to native immediately. Default "Benson". Needs the Groq key above — the
+                  native background wake loop transcribes through the same Groq endpoint. */}
+              <Text style={s.label}>NUME DE TREZIRE (background)</Text>
+              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="Benson" placeholderTextColor={MUTED}
+                value={wakeName} onChangeText={changeWakeName} autoCapitalize="words" autoCorrect={false}
+                accessibilityLabel="Wake name" />
+
+              {/* STT — which engine transcribes voice. Groq (whisper-large-v3-turbo, cloud, needs
+                  the Groq key above) is the default; "Benson local" is the offline on-device
+                  Whisper reserve. Writes the same store voiceAgent.ts's transcribeAudio() reads. */}
+              <Text style={s.label}>STT</Text>
+              <View style={s.row}>
+                <TouchableOpacity onPress={() => { tap(); changeSttNucleus('groq'); }}
+                  style={[s.chip, sttNucleusId === 'groq' && s.chipActive]}
+                  accessibilityLabel="Groq transcription" accessibilityRole="button"
+                  accessibilityState={{ selected: sttNucleusId === 'groq' }}>
+                  <Text style={[s.chipTxt, sttNucleusId === 'groq' && s.chipTxtActive]}>Groq (implicit)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => { tap(); changeSttNucleus('local'); }}
+                  style={[s.chip, sttNucleusId === 'local' && s.chipActive]}
+                  accessibilityLabel="Benson local transcription" accessibilityRole="button"
+                  accessibilityState={{ selected: sttNucleusId === 'local' }}>
+                  <Text style={[s.chipTxt, sttNucleusId === 'local' && s.chipTxtActive]}>Benson local</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, paddingVertical: 6, paddingHorizontal: 12 }]}
+                  onPress={() => { tap(); runGroqTest(); }} disabled={groqTesting}
+                  accessibilityLabel="Test Groq connection" accessibilityRole="button">
+                  <Text style={[s.dangerTxt, { color: GOLD }]}>{groqTesting ? 'TEST…' : 'TEST'}</Text>
+                </TouchableOpacity>
+              </View>
+              {groqTestStatus !== '' && (
+                <Text style={[s.factLine, { color: groqTestStatus === 'OK' ? '#4dff88' : '#ff5c5c' }]}>{groqTestStatus}</Text>
+              )}
 
               {/* Chat model */}
               <Text style={s.label}>CHAT MODEL</Text>
@@ -2644,6 +4977,12 @@ export default function BensonApp() {
                   accessibilityLabel="ChatGPT chat model" accessibilityRole="button"
                   accessibilityState={{ selected: modelProvider === 'openai' }}>
                   <Text style={[s.chipTxt, modelProvider === 'openai' && s.chipTxtActive]}>ChatGPT (gpt-4o)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => toggleModelProvider('gemini')}
+                  style={[s.chip, modelProvider === 'gemini' && s.chipActive]}
+                  accessibilityLabel="Gemini chat model" accessibilityRole="button"
+                  accessibilityState={{ selected: modelProvider === 'gemini' }}>
+                  <Text style={[s.chipTxt, modelProvider === 'gemini' && s.chipTxtActive]}>Gemini</Text>
                 </TouchableOpacity>
               </View>
 
@@ -2666,9 +5005,19 @@ export default function BensonApp() {
                   accessibilityLabel="Preview OpenAI voice" accessibilityRole="button">
                   <Text style={s.previewTxt}>▶</Text>
                 </TouchableOpacity>
+                <TouchableOpacity onPress={() => toggleTtsProvider('gemini')}
+                  style={[s.chip, ttsProvider === 'gemini' && s.chipActive]}
+                  accessibilityLabel="Gemini voice engine, Kore" accessibilityRole="button"
+                  accessibilityState={{ selected: ttsProvider === 'gemini' }}>
+                  <Text style={[s.chipTxt, ttsProvider === 'gemini' && s.chipTxtActive]}>Gemini (Kore)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.previewBtn} onPress={previewGeminiVoice}
+                  accessibilityLabel="Preview Gemini voice" accessibilityRole="button">
+                  <Text style={s.previewTxt}>▶</Text>
+                </TouchableOpacity>
               </View>
               <Text style={s.factLine}>
-                OpenAI voice costs per use and needs internet; Benson falls back to the device voice automatically if it's unavailable.
+                OpenAI/Gemini voices cost per use and need internet; Benson falls back to the device voice automatically if unavailable.
               </Text>
 
               {/* Wake-confirmation chime — the short "ding" Benson plays when it hears "Benson".

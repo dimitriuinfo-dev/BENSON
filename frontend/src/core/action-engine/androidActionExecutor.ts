@@ -8,11 +8,27 @@
 
 import { Linking } from 'react-native';
 import { launchApp as nativeLaunchApp, isPackageInstalled as nativeIsPackageInstalled, openUriWithPackage as nativeOpenUriWithPackage } from 'benson-app-registry';
-import { bringToForeground as nativeBringToForeground } from 'benson-foreground-service';
+import { bringToForeground as nativeBringToForeground, logAudioDiag } from 'benson-foreground-service';
 import {
   getForegroundPackage as nativeGetForegroundPackage,
   addForegroundChangeListener,
 } from 'benson-accessibility';
+
+// ROUND_UNEXPECTED_WHATSAPP_FOREGROUND_DIAG_1 — every BENSON-originated app-launch call funnels
+// through this one file (launchPackage / openUriWithPackage / openUrl are the ONLY places any
+// executor or governed tool actually asks Android to bring another app to the foreground).
+// Logging here, once, catches every caller — including the protected whatsappTool.ts, without
+// needing to touch it — and gives a real, greppable "did BENSON ask for this" trail for next
+// time. `source` is optional/best-effort (old call sites this round didn't update just log
+// "unknown", honestly, rather than a guessed value).
+function logForegroundRequest(targetPackage: string, source: string, reason: string, success: boolean): void {
+  try {
+    logAudioDiag('APP_FOREGROUND_REQUEST', `source=${source} targetPackage=${targetPackage} reason=${reason} success=${success}`);
+    if (targetPackage === 'com.whatsapp' || targetPackage.includes('whatsapp')) {
+      logAudioDiag('WHATSAPP_FOREGROUND_REQUEST', `source=${source} missionId=none reason=${reason} success=${success}`);
+    }
+  } catch {}
+}
 
 export type AndroidActionOutcome = {
   attempted: boolean;
@@ -37,14 +53,16 @@ export function isPackageInstalled(packageName: string): boolean {
   }
 }
 
-export function launchPackage(packageName: string): AndroidActionOutcome {
+export function launchPackage(packageName: string, source: string = 'unknown'): AndroidActionOutcome {
   try {
     const success = nativeLaunchApp(packageName);
     devLog('launchPackage', packageName, '-> success=', success);
+    logForegroundRequest(packageName, source, 'launch_package', success);
     return { attempted: true, success };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     devLog('launchPackage threw', packageName, error);
+    logForegroundRequest(packageName, source, 'launch_package_threw', false);
     return { attempted: true, success: false, error };
   }
 }
@@ -53,40 +71,46 @@ export function launchPackage(packageName: string): AndroidActionOutcome {
 // ACTION_VIEW (Linking.openURL) — the latter lets Android silently pick whichever installed app
 // is the current default handler for that link, which on a phone with both WhatsApp and WhatsApp
 // Business installed turned out to be Business. Use this whenever the target app matters.
-export function openUriWithPackage(uri: string, packageName: string): AndroidActionOutcome {
+export function openUriWithPackage(uri: string, packageName: string, source: string = 'unknown'): AndroidActionOutcome {
   try {
-    const success = nativeOpenUriWithPackage(uri, packageName);
+    const success = nativeOpenUriWithPackage(uri, packageName)
     devLog('openUriWithPackage', packageName, '-> success=', success);
+    logForegroundRequest(packageName, source, 'open_uri_with_package', success);
     return { attempted: true, success };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     devLog('openUriWithPackage threw', packageName, error);
+    logForegroundRequest(packageName, source, 'open_uri_with_package_threw', false);
     return { attempted: true, success: false, error };
   }
 }
 
-async function openUrl(kind: string, url: string): Promise<AndroidActionOutcome> {
+async function openUrl(kind: string, url: string, source: string = 'unknown'): Promise<AndroidActionOutcome> {
   try {
     await Linking.openURL(url);
     devLog(kind, url, '-> success');
+    // A bare implicit ACTION_VIEW has no explicit target package — best-effort match on the URL
+    // itself (whatsapp://, wa.me/...) so this class of launch is still traceable.
+    logForegroundRequest(url, source, kind, true);
     return { attempted: true, success: true };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     devLog(kind, url, '-> failed', error);
+    logForegroundRequest(url, source, kind, false);
     return { attempted: true, success: false, error };
   }
 }
 
-export function openDeepLink(url: string): Promise<AndroidActionOutcome> {
-  return openUrl('openDeepLink', url);
+export function openDeepLink(url: string, source: string = 'unknown'): Promise<AndroidActionOutcome> {
+  return openUrl('openDeepLink', url, source);
 }
 
-export function openFallbackUrl(url: string): Promise<AndroidActionOutcome> {
-  return openUrl('openFallbackUrl', url);
+export function openFallbackUrl(url: string, source: string = 'unknown'): Promise<AndroidActionOutcome> {
+  return openUrl('openFallbackUrl', url, source);
 }
 
-export function dial(number: string): Promise<AndroidActionOutcome> {
-  return openUrl('dial', `tel:${number}`);
+export function dial(number: string, source: string = 'unknown'): Promise<AndroidActionOutcome> {
+  return openUrl('dial', `tel:${number}`, source);
 }
 
 export function sendTo(number: string, body?: string): Promise<AndroidActionOutcome> {

@@ -3,6 +3,14 @@ import type { AnthropicMsg, Character, FamilyMember } from './types';
 import { buildLearnedContext } from './learningAgent';
 import { AGENT_TOOLS, executeTool, type ToolContext } from './tools';
 import { ANTHROPIC_URL, anthropicHeaders } from '../llmConfig';
+import { fetchWithTimeout } from './fetchWithTimeout';
+import { conversationFallbackLine } from './fallbackLine';
+
+// See fetchWithTimeout.ts's doc comment — a plain fetch() with no timeout can hang forever,
+// silently freezing the conversation loop with no error and no fallback ever triggering. Claude
+// is also the final fallback target for both OpenAI and Gemini failures (orchestrator.ts) — if
+// this hung too, there would be no safety net left at all.
+const REQUEST_TIMEOUT_MS = 20000;
 
 export const SONNET_MODEL = 'claude-sonnet-5';
 
@@ -73,7 +81,18 @@ export function buildSystemPrompt(
       `you MUST NOT claim you have no microphone access, can only communicate by text, or state any other ` +
       `made-up technical explanation — you do not know why, so do not invent a reason. Instead say only that ` +
       `you're not sure why that happened and to try again, or just answer whatever text you did receive. ` +
-      `Inventing a false claim about missing microphone access is a serious error — never do it.`
+      `Inventing a false claim about missing microphone access is a serious error — never do it.` +
+      `\n\nCRITICAL RULE, follow this exactly: never describe an action as done unless a tool result ` +
+      `actually confirms it. openApp only opens an app — it does NOT search or type inside it, even ` +
+      `when you pass a query (query only pre-fills for a handful of apps with a supported deep-link ` +
+      `search; for everything else it silently does nothing). If the user's request has more than one ` +
+      `part (e.g. "open YouTube and search for X"), after openApp you MUST continue: call readScreen ` +
+      `to see what's on screen, tapOnScreen the search control, then enterText the search term, then ` +
+      `readScreen again to confirm it actually landed — do not stop after just opening the app and ` +
+      `assume the rest happened. If a step's tool result doesn't clearly confirm success, say plainly ` +
+      `which part worked and which part didn't ("I opened YouTube but couldn't search for X") — never ` +
+      `claim the whole request succeeded when only part of it did. Confirming something that didn't ` +
+      `actually happen is a serious error — never do it.`
     : '';
   return base[character] + factsLine + familyLine + learnedLine + drivingLine + toolsLine;
 }
@@ -108,13 +127,13 @@ export async function askClaude(params: {
   const thinking = model === SONNET_MODEL ? { thinking: { type: 'disabled' } } : {};
 
   if (!params.onSentence) {
-    const res = await fetch(ANTHROPIC_URL, {
+    const res = await fetchWithTimeout(ANTHROPIC_URL, {
       method: 'POST',
       headers,
       body: JSON.stringify({ model, max_tokens: 600, system, messages: params.messages, ...thinking }),
-    });
+    }, REQUEST_TIMEOUT_MS);
     const data = await res.json();
-    return data.content?.[0]?.text || `I did not quite catch that, ${params.address}.`;
+    return data.content?.[0]?.text || conversationFallbackLine(params.lang, params.address);
   }
 
   // Streaming path — expo/fetch exposes a real ReadableStream body, unlike RN's default fetch.
@@ -163,7 +182,7 @@ export async function askClaude(params: {
 
   const tail = pending.trim();
   if (tail) params.onSentence(tail);
-  return fullText || `I did not quite catch that, ${params.address}.`;
+  return fullText || conversationFallbackLine(params.lang, params.address);
 }
 
 // Raised from 4 → 10 so the agent can operate a real app end-to-end as a phone operator:
@@ -204,16 +223,16 @@ export async function askClaudeWithTools(params: {
   let messages: { role: 'user' | 'assistant'; content: any }[] = [...params.messages];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    const res = await fetch(ANTHROPIC_URL, {
+    const res = await fetchWithTimeout(ANTHROPIC_URL, {
       method: 'POST',
       headers,
       body: JSON.stringify({ model, max_tokens: 600, system, messages, tools: AGENT_TOOLS, ...thinking }),
-    });
+    }, REQUEST_TIMEOUT_MS);
     const data = await res.json();
     const content: any[] = data.content ?? [];
 
     if (data.stop_reason !== 'tool_use') {
-      const text = content.find(b => b.type === 'text')?.text || `I did not quite catch that, ${params.address}.`;
+      const text = content.find(b => b.type === 'text')?.text || conversationFallbackLine(params.lang, params.address);
       if (params.onSentence) {
         for (const sentence of text.split(SENTENCE_SPLIT)) {
           if (sentence.trim()) params.onSentence(sentence.trim());
@@ -248,5 +267,5 @@ export async function askClaudeWithTools(params: {
     messages = [...messages, { role: 'user', content: toolResults }];
   }
 
-  return `I'm having trouble completing that, ${params.address}.`;
+  return conversationFallbackLine(params.lang, params.address);
 }

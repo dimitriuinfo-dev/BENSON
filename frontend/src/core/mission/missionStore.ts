@@ -18,7 +18,13 @@ let hydrated = false;
 // restart via this same hydrate call and got re-announced on every foreground transition,
 // indefinitely, with no natural expiry. Auto-clearing here targets only this one stale record —
 // every other AsyncStorage key (name, API key, preferences, facts, history) is untouched.
-const STALE_WAITING_MISSION_MS = 5 * 60 * 1000; // 5 minutes
+const STALE_WAITING_MISSION_MS = 5 * 60 * 1000; // 5 minutes (WaitingUser — a call/nav in progress)
+// MISSION-FIX-1 — a confirmation dialogue is much shorter-lived than a running mission. In-session,
+// an unanswered WaitingConfirmation older than this is abandoned (getActiveMission). On cold start
+// it is dropped outright regardless of age (hydrateActiveMission) — a persisted, re-confirmable
+// privileged action (WhatsApp call, message send) after a process restart is the exact bug this
+// round fixes (ROUND_MISSION_DIAG_REPORT.md).
+const STALE_WAITING_CONFIRMATION_MS = 90 * 1000; // 90 seconds
 
 export async function hydrateActiveMission(): Promise<Mission | null> {
   if (hydrated) return activeMission;
@@ -26,12 +32,19 @@ export async function hydrateActiveMission(): Promise<Mission | null> {
   try {
     const raw = await AsyncStorage.getItem(ACTIVE_MISSION_KEY);
     activeMission = raw ? (JSON.parse(raw) as Mission) : null;
-    const waitingStates: MissionState[] = ['WaitingUser', 'WaitingConfirmation'];
-    if (activeMission && waitingStates.includes(activeMission.state)) {
-      const age = Date.now() - (activeMission.updatedAt ?? 0);
-      if (!activeMission.updatedAt || age > STALE_WAITING_MISSION_MS) {
+    if (activeMission) {
+      if (activeMission.state === 'WaitingConfirmation') {
+        // Never restore a confirmation dialogue across a process cold start: its context is gone
+        // and a stale privileged action must not become re-confirmable. The user must re-issue.
+        console.log('[missionStore]', 'MISSION_HYDRATE_DROP', `missionId=${activeMission.id}`, 'reason=persisted_waiting_confirmation');
         activeMission = null;
         await AsyncStorage.removeItem(ACTIVE_MISSION_KEY);
+      } else if (activeMission.state === 'WaitingUser') {
+        const age = Date.now() - (activeMission.updatedAt ?? 0);
+        if (!activeMission.updatedAt || age > STALE_WAITING_MISSION_MS) {
+          activeMission = null;
+          await AsyncStorage.removeItem(ACTIVE_MISSION_KEY);
+        }
       }
     }
   } catch {
@@ -44,12 +57,11 @@ export async function hydrateActiveMission(): Promise<Mission | null> {
 // AppState-triggered re-announce (app/index.tsx) calls this on every foreground transition, not
 // just at boot, so a mission going stale WHILE the app stays running needs to self-clear here as
 // well, not only once at the next cold start.
-const WAITING_STATES_FOR_STALENESS: MissionState[] = ['WaitingUser', 'WaitingConfirmation'];
-
 export function getActiveMission(): Mission | null {
-  if (activeMission && WAITING_STATES_FOR_STALENESS.includes(activeMission.state)) {
+  if (activeMission && (activeMission.state === 'WaitingUser' || activeMission.state === 'WaitingConfirmation')) {
     const age = Date.now() - (activeMission.updatedAt ?? 0);
-    if (!activeMission.updatedAt || age > STALE_WAITING_MISSION_MS) {
+    const limit = activeMission.state === 'WaitingConfirmation' ? STALE_WAITING_CONFIRMATION_MS : STALE_WAITING_MISSION_MS;
+    if (!activeMission.updatedAt || age > limit) {
       activeMission = null;
       persist().catch(() => {});
     }
@@ -84,7 +96,7 @@ export async function transitionMission(state: MissionState, patch: Partial<Miss
 // the mission object itself is still returned to the caller for a final user-facing message.
 export async function clearIfTerminal(): Promise<void> {
   if (!activeMission) return;
-  const terminal: MissionState[] = ['Completed', 'Failed', 'Cancelled'];
+  const terminal: MissionState[] = ['Completed', 'Failed', 'Cancelled', 'Superseded'];
   if (terminal.includes(activeMission.state)) {
     activeMission = null;
     await persist();

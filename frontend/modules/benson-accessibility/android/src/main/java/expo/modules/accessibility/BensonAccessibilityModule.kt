@@ -86,6 +86,21 @@ class BensonAccessibilityModule : Module() {
       BensonAccessibilityService.instance?.performClickById(nodeId) ?: false
     }
 
+    // On-demand FRESH screen snapshot as a JSON string: { packageName, timestamp, capturedAt,
+    // nodeCount, nodes[] }. Reads rootInActiveWindow now (retries 3×@150ms if empty) instead of
+    // returning the last pushed onScreenUpdate — the pushed cache is stale for content that
+    // changes without a window-state change (WhatsApp search results). See captureSnapshot().
+    AsyncFunction("getScreenSnapshot") { promise: Promise ->
+      val svc = BensonAccessibilityService.instance
+      if (svc == null) {
+        promise.resolve("{\"packageName\":\"\",\"timestamp\":0,\"capturedAt\":0,\"nodeCount\":0,\"nodes\":[]}")
+        return@AsyncFunction
+      }
+      svc.runOnServiceScope {
+        promise.resolve(svc.captureSnapshot())
+      }
+    }
+
     AsyncFunction("performSetText") { nodeId: String, value: String ->
       BensonAccessibilityService.instance?.performSetTextById(nodeId, value) ?: false
     }
@@ -136,6 +151,95 @@ class BensonAccessibilityModule : Module() {
         val result = svc.placeWhatsAppCall(contactName, autoPressCall)
         promise.resolve(mapOf("success" to result.success, "step" to result.step, "error" to result.error))
       }
+    }
+
+    // WA-NATIVE-FINAL — THE active WhatsApp voice-call executor. One call from JS; Kotlin runs the
+    // whole sequence on its own coroutine (Dispatchers.Default), independent of the RN Activity
+    // being foregrounded. Resolves { success, step, error, contact, elapsedMs }.
+    AsyncFunction("runWhatsAppCallNative") { contact: String, promise: Promise ->
+      // WA-CONTACT-TRACE — the exact string that crossed the JS→native bridge. This is what the
+      // executor will type into WhatsApp's own search; there is no rename/fallback past this point.
+      android.util.Log.i("BENSON_AUDIO", "WA_CONTACT_INPUT stage=native_bridge native=\"$contact\"")
+      val svc = BensonAccessibilityService.instance
+      if (svc == null) {
+        promise.resolve(mapOf(
+          "success" to false, "step" to "SERVICE",
+          "error" to "Accessibility Service is not running.",
+          "contact" to contact, "elapsedMs" to 0,
+        ))
+        return@AsyncFunction
+      }
+      svc.runOnServiceScope {
+        val r = svc.runWhatsAppCallNative(contact)
+        promise.resolve(mapOf(
+          "success" to r.success, "step" to r.step, "error" to r.error,
+          "contact" to r.contact, "elapsedMs" to r.elapsedMs,
+          "verifiedHeaderText" to r.verifiedHeaderText, "nameMatch" to r.nameMatch,
+        ))
+      }
+    }
+
+    // WA-FIX-4 — DIRECT-CONTACT-DEEPLINK call route. JS resolved the spoken name to a phone number
+    // from the local address book; native opens the exact conversation via whatsapp://send?phone=,
+    // verifies it, and reuses the proven call-button + verify sequence. No Chats list, no search.
+    AsyncFunction("runWhatsAppOpenConversationCall") { phone: String, expectedName: String, promise: Promise ->
+      val svc = BensonAccessibilityService.instance
+      if (svc == null) {
+        promise.resolve(mapOf(
+          "success" to false, "step" to "SERVICE",
+          "error" to "Accessibility Service is not running.",
+          "contact" to expectedName, "elapsedMs" to 0,
+        ))
+        return@AsyncFunction
+      }
+      svc.runOnServiceScope {
+        val r = svc.runWhatsAppOpenConversationCall(phone, expectedName)
+        promise.resolve(mapOf(
+          "success" to r.success, "step" to r.step, "error" to r.error,
+          "contact" to r.contact, "elapsedMs" to r.elapsedMs,
+          "verifiedHeaderText" to r.verifiedHeaderText, "nameMatch" to r.nameMatch,
+        ))
+      }
+    }
+
+    // ── ROUND_WA_GOVERNANCE_WRITE_1 ─────────────────────────────────────────────────────────────
+    // PHASE A: open the exact conversation (whatsapp://send?phone=, explicit com.whatsapp), verify
+    // identity, find the compose field, type the exact message, verify the typed text. STOPS before
+    // send. `missionId` keys the persisted idempotency state. Resolves { success, step, error,
+    // contact, elapsedMs } — step "TYPED_VERIFIED" on success; step names the failed stage.
+    AsyncFunction("runWhatsAppOpenConversationType") { phone: String, expectedName: String, message: String, missionId: String, promise: Promise ->
+      val svc = BensonAccessibilityService.instance
+      if (svc == null) {
+        promise.resolve(mapOf("success" to false, "step" to "SERVICE", "error" to "Accessibility Service is not running.", "contact" to expectedName, "elapsedMs" to 0))
+        return@AsyncFunction
+      }
+      svc.runOnServiceScope {
+        val r = svc.runWhatsAppOpenConversationType(phone, expectedName, message, missionId)
+        promise.resolve(mapOf(
+          "success" to r.success, "step" to r.step, "error" to r.error, "contact" to r.contact, "elapsedMs" to r.elapsedMs,
+          "verifiedHeaderText" to r.verifiedHeaderText, "nameMatch" to r.nameMatch,
+        ))
+      }
+    }
+
+    // PHASE B: called ONLY after an explicit YES. Presses Send at most once for `missionId`, then
+    // verifies the exact outgoing message appears in the conversation. Idempotent: a mission already
+    // at SEND_ATTEMPTED/SENT_VERIFIED re-verifies, never re-presses.
+    AsyncFunction("pressWhatsAppSendVerified") { missionId: String, message: String, promise: Promise ->
+      val svc = BensonAccessibilityService.instance
+      if (svc == null) {
+        promise.resolve(mapOf("success" to false, "step" to "SERVICE", "error" to "Accessibility Service is not running.", "contact" to "", "elapsedMs" to 0))
+        return@AsyncFunction
+      }
+      svc.runOnServiceScope {
+        val r = svc.pressWhatsAppSendVerified(missionId, message)
+        promise.resolve(mapOf("success" to r.success, "step" to r.step, "error" to r.error, "contact" to r.contact, "elapsedMs" to r.elapsedMs))
+      }
+    }
+
+    // "<missionId>|<state>" of the current pending WhatsApp write, or "|NOT_TYPED".
+    Function("getWhatsAppWriteState") {
+      BensonAccessibilityService.getWhatsAppWriteState()
     }
 
     AsyncFunction("endWhatsAppCall") { promise: Promise ->
@@ -219,13 +323,13 @@ class BensonAccessibilityModule : Module() {
     AsyncFunction("executeCommand") { commandJson: String, promise: Promise ->
       val svc = BensonAccessibilityService.instance
       if (svc == null) {
-        promise.resolve(mapOf("success" to false, "stepIndex" to -1, "action" to "none", "status" to "invalid", "detail" to "Accessibility Service is not running."))
+        promise.resolve(mapOf("success" to false, "stepIndex" to -1, "action" to "none", "status" to "invalid", "detail" to "Accessibility Service is not running.", "itemsJson" to "[]"))
         return@AsyncFunction
       }
       val command = try {
         JSONObject(commandJson)
       } catch (_: Exception) {
-        promise.resolve(mapOf("success" to false, "stepIndex" to -1, "action" to "none", "status" to "invalid", "detail" to "Command JSON is invalid."))
+        promise.resolve(mapOf("success" to false, "stepIndex" to -1, "action" to "none", "status" to "invalid", "detail" to "Command JSON is invalid.", "itemsJson" to "[]"))
         return@AsyncFunction
       }
       svc.runOnServiceScope {
@@ -236,6 +340,8 @@ class BensonAccessibilityModule : Module() {
           "action" to result.action,
           "status" to result.status,
           "detail" to result.detail,
+          // ROUND_YOUTUBE_GOVERNANCE_1 — generic extract_list payload; "[]" for every other action.
+          "itemsJson" to result.itemsJson,
         ))
       }
     }
@@ -247,6 +353,34 @@ class BensonAccessibilityModule : Module() {
     // same flag internally) even starts. Always clear this from a finally block on the JS side.
     Function("setWhatsAppAutomationActive") { active: Boolean ->
       BensonAccessibilityService.whatsappAutomationActive = active
+    }
+
+    // WA-CALL-STAYS-LIVE — true while a WhatsApp call placed by runWhatsAppCallNative is still
+    // fresh (verified < 180s ago and not yet cleared). While true, BENSON's JS mic/wake entry
+    // points must not open the mic — the concurrent capture was ending the call. Synchronous,
+    // cheap (one volatile compare), safe to poll from every listen chokepoint.
+    Function("whatsAppCallMicHoldActive") {
+      BensonAccessibilityService.whatsAppCallMicHoldActive()
+    }
+
+    // Lift the hold early — called when BENSON's own Activity is foregrounded again, i.e. the user
+    // is back with BENSON and done with (or has put on speaker) the call.
+    Function("clearWhatsAppCallMicHold") {
+      BensonAccessibilityService.whatsappCallMicHoldUntilMs = 0L
+    }
+
+    // AUTO-RETURN-AFTER-CALL — true (once) when the call-lifecycle watcher has verified a call
+    // ended and fired the return Intent. The JS AppState 'active' handler reads it on the next
+    // foreground transition and re-arms WAKE mode only (no conversation mode / general STT).
+    Function("consumeCallEndedReturnPending") {
+      BensonAccessibilityService.consumeCallEndedReturnPending()
+    }
+
+    // WA-LIFECYCLE-FIX-1 — the persisted "a verified WhatsApp call just ended" timestamp (0 = none).
+    // Survives a process kill. The JS self-heal loop keeps its own last-handled value and, when this
+    // is newer, clears the JS mic hold + re-arms wake — independent of any AppState 'active' event.
+    Function("getWhatsAppCallEndedSignalAt") {
+      BensonAccessibilityService.getWhatsAppCallEndedSignalAt().toDouble()
     }
   }
 }

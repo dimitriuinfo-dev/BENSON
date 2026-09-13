@@ -24,6 +24,53 @@ export function hasCallPhonePermission(): boolean;
  * app resolution. Returns false if that package can't handle the URI or isn't installed. */
 export function openUriWithPackage(uri: string, packageName: string): boolean;
 
+export type EmergencyIntentKind = 'NONE' | 'EXPLICIT_112' | 'GENERIC_HELP';
+/** ROUND_EMERGENCY_CORE_1 — classify a spoken utterance against the closed emergency set.
+ * Synchronous, no side effects. */
+export function classifyEmergencyIntent(text: string): EmergencyIntentKind;
+
+export interface EmergencyContextSnapshot {
+  timestamp: number;
+  /** 0–100, or -1 if unavailable. */
+  batteryPct: number;
+  /** 'wifi' | 'cellular' | 'other' | 'none' | 'unknown' */
+  network: string;
+  /** whether a last-known location fix already exists (no coordinates are exposed). */
+  locationAvailable: boolean;
+}
+/** One-shot emergency context. Logged natively; never blocks the 112 route; no coordinates
+ * cross the bridge. Null if the native context is unavailable. */
+export function getEmergencyContext(): EmergencyContextSnapshot | null;
+
+export interface EmergencyRouteResult {
+  success: boolean;
+  mode: 'DIRECT_CALL' | 'SYSTEM_DIALER' | 'FAILED';
+  reason: string | null;
+}
+/** Routes 112 to the native Android telecom stack — a real placed call (ACTION_CALL) when
+ * CALL_PHONE is granted, otherwise the system dialer pre-filled with 112 (ACTION_DIAL). Never
+ * WhatsApp, never a third-party calling app, never Accessibility typing. */
+export function routeEmergencyCall(): Promise<EmergencyRouteResult>;
+
+export interface WhatsAppNativeCallProbeResult {
+  contactFound: boolean;
+  displayName: string | null;
+  mimeFound: boolean;
+  /** Data._ID of the voip.call row — for the report only; never persisted. */
+  dataId: number | null;
+  intentResolved: boolean;
+  intentLaunched: boolean;
+  /** "package/activity" that resolved the typed intent, or null. */
+  resolverActivity: string | null;
+  fail: string | null;
+}
+/** ROUND_WA_NATIVE_CALL_PROBE_1 — feasibility probe ONLY. `doLaunch === true` fires the typed
+ * ContactsContract intent against com.whatsapp, which places a REAL call. Default false. */
+export function probeWhatsAppNativeCall(
+  contactName: string,
+  doLaunch?: boolean,
+): Promise<WhatsAppNativeCallProbeResult>;
+
 /** Shrinks BENSON's own Activity into a real Android Picture-in-Picture window — only ever
  * affects BENSON itself, never another app. Returns false (no-op) below Android 8.0 (API 26). */
 export function enterPipMode(): boolean;

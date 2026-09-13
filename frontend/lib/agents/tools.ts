@@ -289,12 +289,13 @@ export async function executeTool(toolName: string, input: any, ctx: ToolContext
     case 'sendWhatsApp': {
       // Never calls sendMessageToPerson/Linking directly (governance clarification 3) — produces
       // an ActionRequest only; MissionExecutor validates, hard-gates confirmation, and executes.
+      // ROUND_WA_GOVERNANCE_ROUTING — a message intent stays a message intent: an empty body asks
+      // "ce mesaj?" rather than silently downgrading to openContact.
       const message = typeof input?.message === 'string' ? input.message.trim() : '';
-      const request = buildActionRequest(
-        'whatsapp',
-        message ? 'prepareMessage' : 'openContact',
-        { contactName: input?.person ?? '', message },
-      );
+      const person = typeof input?.person === 'string' ? input.person.trim() : '';
+      if (!person) return finalResult('Pentru cine e mesajul?');
+      if (!message) return finalResult(`Ce să-i scriu lui ${person}?`);
+      const request = buildActionRequest('whatsapp', 'prepareMessage', { contactName: person, message });
       const outcome = await executeGoverned(request, { confirmed: false });
       return finalResult(outcome.message);
     }

@@ -15,6 +15,7 @@ import android.net.Uri
 import android.os.Build
 import android.util.Base64
 import androidx.core.content.ContextCompat
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.ByteArrayOutputStream
@@ -156,6 +157,70 @@ class BensonAppRegistryModule : Module() {
       } catch (e: Exception) {
         false
       }
+    }
+
+    // ── ROUND_EMERGENCY_CORE_1 — explicit emergency route, deliberately separate from the
+    // app-governance / WhatsApp path. VOICE → classify → (JS) confirmation policy → route. ──────
+
+    // Single source of truth for "is this utterance an explicit emergency intent". Closed set,
+    // synchronous, no side effects — the JS confirmation policy calls this before every other gate.
+    // Returns "NONE" | "EXPLICIT_112" | "GENERIC_HELP".
+    Function("classifyEmergencyIntent") { text: String ->
+      EmergencyIntentRouter.classify(text).name
+    }
+
+    // One-shot emergency context snapshot (timestamp / battery / network / whether a last-known
+    // location fix already exists). Logged natively; raw coordinates NEVER cross the bridge and are
+    // never uploaded; this read never blocks the 112 route.
+    Function("getEmergencyContext") {
+      val context = appContext.reactContext ?: return@Function null
+      val s = EmergencyIntentRouter.snapshotContext(context)
+      mapOf(
+        "timestamp" to s.timestamp,
+        "batteryPct" to s.batteryPct,
+        "network" to s.network,
+        "locationAvailable" to s.locationAvailable,
+      )
+    }
+
+    // Route 112 to the native Android telecom stack: a real placed call (ACTION_CALL) when
+    // CALL_PHONE is granted, otherwise the system dialer pre-filled with 112 (ACTION_DIAL) — one
+    // tap, no chooser. Never WhatsApp, never a third-party calling app, never Accessibility typing.
+    // Resolves { success, mode: DIRECT_CALL|SYSTEM_DIALER|FAILED, reason }.
+    AsyncFunction("routeEmergencyCall") { promise: Promise ->
+      val context = appContext.currentActivity ?: appContext.reactContext
+      if (context == null) {
+        promise.resolve(mapOf("success" to false, "mode" to "FAILED", "reason" to "no context"))
+        return@AsyncFunction
+      }
+      val r = EmergencyIntentRouter.route(context)
+      promise.resolve(mapOf("success" to r.success, "mode" to r.mode, "reason" to r.reason))
+    }
+
+    // ── ROUND_WA_NATIVE_CALL_PROBE_1 — feasibility probe ONLY. Does NOT touch the existing
+    // WhatsApp call route; no Accessibility, no chat-header verify, no wa.me. `doLaunch=true`
+    // fires the typed contacts intent, which places a REAL call — default false. Resolves
+    // { contactFound, displayName, mimeFound, dataId, intentResolved, intentLaunched,
+    //   resolverActivity, fail }. dataId is returned for the report only, never persisted. ──────
+    AsyncFunction("probeWhatsAppNativeCall") { contactName: String, doLaunch: Boolean, promise: Promise ->
+      val context = appContext.currentActivity ?: appContext.reactContext
+      if (context == null) {
+        promise.resolve(mapOf("fail" to "no_context"))
+        return@AsyncFunction
+      }
+      val r = WhatsAppNativeCallProbe.run(context, contactName, doLaunch)
+      promise.resolve(
+        mapOf(
+          "contactFound" to r.contactFound,
+          "displayName" to r.displayName,
+          "mimeFound" to r.mimeFound,
+          "dataId" to r.dataId,
+          "intentResolved" to r.intentResolved,
+          "intentLaunched" to r.intentLaunched,
+          "resolverActivity" to r.resolverActivity,
+          "fail" to r.fail,
+        ),
+      )
     }
 
     // Real Android Picture-in-Picture (product-owner-directed 2026-07-17, "screen in screen"):

@@ -118,7 +118,11 @@ internal class DeclarativeAutomationEngine(
       val node = findMatchingInTree(root, locator) ?: return false
       try {
         if (!node.isClickable || !node.isEnabled || isPaymentSensitive(node)) return false
-        return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        // E1-6 (2026-09-07): un performAction() care returnează false rămâne un eșec (deja așa era —
+        // vezi run()'s "Target could not be safely clicked."), dar acum lasă și o urmă în log.
+        val accepted = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        if (!accepted) android.util.Log.i("BENSON_AUDIO", "ACTION_REJECTED action=click engine=declarative")
+        return accepted
       } finally {
         node.recycle()
       }

@@ -4,6 +4,7 @@
 // TrustedContact[] from wherever it actually lives.
 
 import type { ContactResolveRequest, ContactResolveResult, TrustedContact } from './contactTypes';
+import { logAudioDiag } from 'benson-foreground-service';
 
 // Lowercase + trim + strip Romanian/German diacritics where practical, so "Ștefan"/"stefan",
 // "Mamă"/"mama", "Müller"/"muller" all normalize to the same comparable string. NFD decomposition
@@ -61,6 +62,33 @@ function matchesFuzzy(candidate: string, normalizedQuery: string): boolean {
   const nc = normalizeName(candidate);
   if (fuzzyClose(nc, normalizedQuery)) return true;
   return nc.split(/\s+/).some((tok) => fuzzyClose(tok, normalizedQuery));
+}
+
+// ROUND_CONTACT_AMBIGUITY_DIAG_1 — read-only, for the CONTACT_AMBIGUOUS_CANDIDATES log below only.
+// Recomputes, per candidate, which tier of findMatches() it satisfies and (for the fuzzy tier) the
+// edit distance that qualified it. Does not change findMatches()/resolveContact()'s behavior or
+// return values in any way — purely descriptive of an already-decided match.
+function describeMatchReason(candidate: TrustedContact, normalizedQuery: string): string {
+  const nameNorm = normalizeName(candidate.displayName);
+  if (matchesExact(candidate.displayName, normalizedQuery)) return `exact_display(${nameNorm})`;
+  const exactAlias = (candidate.aliases ?? []).find((a) => matchesExact(a, normalizedQuery));
+  if (exactAlias) return `exact_alias(${normalizeName(exactAlias)})`;
+  if (matchesPartial(candidate.displayName, normalizedQuery)) return `partial_display(${nameNorm})`;
+  const partialAlias = (candidate.aliases ?? []).find((a) => matchesPartial(a, normalizedQuery));
+  if (partialAlias) return `partial_alias(${normalizeName(partialAlias)})`;
+  if (matchesFuzzy(candidate.displayName, normalizedQuery)) {
+    const dist = Math.min(
+      levenshtein(nameNorm, normalizedQuery),
+      ...nameNorm.split(/\s+/).map((tok) => levenshtein(tok, normalizedQuery)),
+    );
+    return `fuzzy_display(${nameNorm},dist=${dist})`;
+  }
+  const fuzzyAlias = (candidate.aliases ?? []).find((a) => matchesFuzzy(a, normalizedQuery));
+  if (fuzzyAlias) {
+    const an = normalizeName(fuzzyAlias);
+    return `fuzzy_alias(${an},dist=${levenshtein(an, normalizedQuery)})`;
+  }
+  return 'unknown_tier';
 }
 
 // Confirmed live (2026-07-17): the same physical contact can be enumerated more than once by
@@ -135,11 +163,17 @@ export function resolveContact(request: ContactResolveRequest): ContactResolveRe
   }
 
   if (matches.length > 1) {
+    // ROUND_CONTACT_AMBIGUITY_DIAG_1 — diagnostic only, logcat-side; does not change the spoken
+    // response (still the one bounded prompt below, never an enumerated list to the user).
+    logAudioDiag('CONTACT_AMBIGUOUS_CANDIDATES', `rawName=${JSON.stringify(request.rawName)} normalizedQuery=${JSON.stringify(normalizedQuery)} count=${matches.length} candidates=${JSON.stringify(matches.map((c) => ({ name: c.displayName, reason: describeMatchReason(c, normalizedQuery) })))}`);
+    // BENSON_STABILIZATION_1 — NEVER enumerate candidate names. A long spoken list of contact
+    // names is BENSON output that gets re-heard as user input / typed into WhatsApp. One short
+    // bounded prompt only; callers phrase it for the user.
     return {
       status: 'ambiguous',
-      candidates: matches,
+      candidates: matches.slice(0, 1),
       normalizedQuery,
-      message: `Multiple contacts match "${request.rawName}": ${matches.map((m) => m.displayName).join(', ')}. Which one?`,
+      message: 'Nu sunt sigur de nume. Spune numele din nou.',
     };
   }
 

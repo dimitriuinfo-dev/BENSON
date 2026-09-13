@@ -31,7 +31,7 @@ function buildWaMeUrl(digits: string, message?: string): string {
 
 async function openUrl(requestId: string, appLabel: string, url: string): Promise<ActionResult> {
   devLog('opening', appLabel, url);
-  const outcome = await openDeepLink(url);
+  const outcome = await openDeepLink(url, 'WhatsAppExecutor');
   if (outcome.success) return successResult(requestId, `Opened ${appLabel}.`, { appOpened: appLabel, data: { url } });
   devLog('openURL error', url, outcome.error);
   return failedResult(requestId, `Could not open ${appLabel}.`, {
@@ -81,7 +81,7 @@ export const WhatsAppExecutor: Executor = {
       // so honestly instead of silently placing a plain phone call or claiming a call was made.
       if (request.parameters.mode === 'voice_call') {
         devLog('voice_call requested, falling back to opening the chat', url);
-        const outcome = await openDeepLink(url);
+        const outcome = await openDeepLink(url, 'WhatsAppExecutor');
         if (!outcome.success) {
           return failedResult(request.id, `Nu am putut deschide WhatsApp pentru ${contactName ?? 'contact'}.`, {
             errorCode: 'LINKING_OPEN_URL_ERROR',

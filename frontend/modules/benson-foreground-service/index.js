@@ -13,6 +13,14 @@ export function stopListeningService() {
   return NativeModule.stopService();
 }
 
+// WAKE HEALTH — re-issue the ongoing notification with an honest body ("BENSON is listening." only
+// when the wake recognizer is actually active + receiving audio; otherwise "BENSON wake inactive"
+// / "BENSON microphone blocked" / …). No-op if the service isn't running. Does NOT restart the
+// service or the hotword loop.
+export function updateNotification(title, body) {
+  try { return NativeModule.updateNotification(title, body); } catch { return undefined; }
+}
+
 // Fires when the user taps the "STOP" action on the notification.
 export function addStopRequestedListener(listener) {
   return emitter.addListener('onStopRequested', listener);
@@ -30,6 +38,89 @@ export function addListenRequestedListener(listener) {
 // was said alone). Process a non-empty tail immediately; otherwise start real command capture.
 export function addWakeWordDetectedListener(listener) {
   return emitter.addListener('onWakeWordDetected', (ev) => listener(ev?.commandTail ?? ''));
+}
+
+// ROUND_WAKE_NATIVE_TO_JS_ACK_1 — atomic read+clear of a durable pending wake command (native
+// Handler-timed, survives JS suspension). Returns null if nothing is pending; "" is a valid bare
+// "Benson" result. Call on every live wake event AND on a reliable heartbeat (onWakePoke) so a
+// wake that fires while JS is suspended is still picked up the moment JS runs again.
+export function takePendingWakeCommand() {
+  try { return NativeModule.takePendingWakeCommand() ?? null; } catch { return null; }
+}
+
+// ROUND_WAKE_STATE_BUG_1 — native heartbeat (every ~3 s from the foreground service, on a native
+// Handler that runs regardless of RN host state). Delivered as an EVENT, so the JS callback
+// executes even while the app is backgrounded — unlike setTimeout/setInterval, which RN suspends.
+// The handler re-arms the JS wake loop if it should be running but isn't (the setTimeout-based
+// re-arm inside startLocalWakeLoop is frozen while backgrounded).
+export function addWakePokeListener(listener) {
+  return emitter.addListener('onWakePoke', () => listener());
+}
+
+// ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — native (TFLite/AudioRecord) wake engine, runs in the
+// foreground service outside React Native. owner: 'COMMAND_STT'|'TTS'|'CALL' suspends it (releases
+// the mic); 'WAKE'|'NONE' re-arms it. Idempotent.
+export function nativeWakeSetOwner(owner) {
+  try { return NativeModule.nativeWakeSetOwner(owner); } catch { return undefined; }
+}
+
+// ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — native Handler-backed timer (survives JS suspension while
+// backgrounded, unlike the setTimeout it replaces). armSttSessionWatchdog re-arms/replaces any
+// previously armed session for this process; cancelSttSessionWatchdog is a no-op if sessionId is
+// not the one currently armed (stale-safe). onSttWatchdogTimeout fires only for the still-current
+// session id at expiry — a superseded session's own timer is silently ignored natively
+// (STT_WATCHDOG_STALE_IGNORED), never reaching JS.
+export function armSttSessionWatchdog(sessionId, timeoutMs) {
+  try { return NativeModule.armSttSessionWatchdog(sessionId, timeoutMs); } catch { return undefined; }
+}
+export function cancelSttSessionWatchdog(sessionId) {
+  try { return NativeModule.cancelSttSessionWatchdog(sessionId); } catch { return undefined; }
+}
+export function addSttWatchdogTimeoutListener(listener) {
+  return emitter.addListener('onSttWatchdogTimeout', (ev) => listener(ev?.sessionId ?? ''));
+}
+
+// URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN reply capture (AudioRecord+VAD+
+// cloud STT inside the foreground service), survives BENSON backgrounded + JS timers suspended.
+// verdict from native is diagnostic only; callers should re-classify the transcript themselves.
+export function startConfirmationListening(confirmationId, timeoutMs) {
+  try { return NativeModule.startConfirmationListening(String(confirmationId), Number(timeoutMs)); } catch { return undefined; }
+}
+export function cancelConfirmationListening(confirmationId) {
+  try { return NativeModule.cancelConfirmationListening(String(confirmationId)); } catch { return undefined; }
+}
+export function addConfirmationResultListener(listener) {
+  return emitter.addListener('onConfirmationResult', (ev) =>
+    listener(ev?.confirmationId ?? '', ev?.verdict ?? 'UNKNOWN', ev?.transcript ?? ''));
+}
+// { model: bool, cloud: bool, running: bool } — model=false ⇒ benson.tflite is not bundled;
+// cloud=false ⇒ no STT credentials pushed yet (setNativeWakeCredentials). JS treats
+// "model || cloud" as "a native engine can own passive wake" (ROUND_WAKE_NATIVE_GENERIC_1).
+// Never pretends a native engine is running when neither is true.
+export function isNativeWakeAvailable() {
+  try { return NativeModule.isNativeWakeAvailable() || { model: false, cloud: false, running: false }; }
+  catch { return { model: false, cloud: false, running: false }; }
+}
+
+// ROUND_WAKE_NATIVE_GENERIC_1 — ONE authoritative wake-name config, native-persisted (survives JS
+// suspension / service recreation) so the native cloud wake loop reads the same name Settings
+// writes. Default "Benson". Same push idiom as setSttLanguage.
+export function setWakeName(name) {
+  try { return NativeModule.setWakeName(name); } catch { return undefined; }
+}
+export function getWakeName() {
+  try { return NativeModule.getWakeName(); } catch { return 'Benson'; }
+}
+
+// Pushes the active STT provider's credentials down so the native cloud wake loop can transcribe
+// an utterance without JS being alive. JS (settingsStore.ts + expo-secure-store) remains the sole
+// place the real secret is authored — this is a runtime push, not a second source of truth.
+export function setNativeWakeCredentials(apiKey, baseUrl, model) {
+  try { return NativeModule.setNativeWakeCredentials(apiKey, baseUrl, model); } catch { return undefined; }
+}
+
+export function isNativeCloudWakeConfigured() {
+  try { return NativeModule.isNativeCloudWakeConfigured(); } catch { return false; }
 }
 
 // Pause the native hotword loop right before JS starts its own STT session (manual conversation

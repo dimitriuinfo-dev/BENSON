@@ -16,6 +16,7 @@ import { getActiveMission, persistMission, transitionMission, clearIfTerminal, s
 import * as wazeTool from './tools/wazeTool';
 import * as whatsappTool from './tools/whatsappTool';
 import type { ActionRequest, LaunchOutcome, Mission, MissionAction, ToolName } from './missionTypes';
+import { logAudioDiag } from 'benson-foreground-service';
 
 const LOG_TAG = '[MissionExecutor]';
 function devLog(...args: unknown[]): void {
@@ -130,16 +131,66 @@ export async function execute(request: ActionRequest, options: { confirmed?: boo
       return { mission, message: userMessage };
     }
 
-    const confirmMessage = buildConfirmationPrompt(enrichedRequest);
-    mission = (await transitionMission('WaitingConfirmation', { userMessage: confirmMessage }))!;
-    devLog('needs confirmation', enrichedRequest.tool, enrichedRequest.action);
+    // ROUND_WA_GOVERNANCE_WRITE_1B — for a WhatsApp message WITH a body, type the requested text
+    // into the VERIFIED compose field now (Doctrine-6 approved: typing is not externally
+    // consequential), then gate SEND behind this confirmation. Phase A does resolve → open →
+    // verify identity → find input → type → verify-typed, and STOPS. `enrichedRequest.id` is the
+    // stable idempotency key (preserved verbatim into the persisted request and reused by
+    // confirmActiveMission → Phase B). If the direct write is unavailable (flag off / no contacts
+    // permission / not locally resolvable) Phase A returns 'skipped' and the existing
+    // confirm-then-sendMessageByName flow is kept unchanged.
+    const phaseA = await maybeRunWhatsAppWritePhaseA(enrichedRequest);
+    if (phaseA.kind === 'failed') {
+      mission = (await transitionMission('Failed', {
+        reason: phaseA.reason,
+        userMessage: phaseA.userMessage,
+        request: { ...enrichedRequest, validationStatus: 'valid' },
+      }))!;
+      await clearIfTerminal();
+      devLog('wa-write phase A failed', phaseA.reason);
+      return { mission, message: phaseA.userMessage };
+    }
+
+    let gateRequest: ActionRequest = enrichedRequest;
+    let confirmMessage: string;
+    if (phaseA.kind === 'typed') {
+      // Carry the send parameters through the confirmation round-trip on the persisted request.
+      gateRequest = {
+        ...enrichedRequest,
+        params: {
+          ...enrichedRequest.params,
+          waWriteTyped: true,
+          waWriteMissionId: enrichedRequest.id,
+          waWriteMessage: phaseA.message,
+          waWriteContact: phaseA.contact,
+        },
+      };
+      confirmMessage = `Am scris în conversația cu ${phaseA.contact} pe WhatsApp: "${phaseA.message}". Îl trimit?`;
+    } else {
+      confirmMessage = buildConfirmationPrompt(enrichedRequest);
+    }
+    mission = (await transitionMission('WaitingConfirmation', { userMessage: confirmMessage, request: gateRequest }))!;
+    devLog('needs confirmation', enrichedRequest.tool, enrichedRequest.action, phaseA.kind);
     return { mission, message: confirmMessage };
   }
 
   // Mission persistence (2nd of 2 mandated points) — immediately before the Android side effect.
   mission = (await transitionMission('Running'))!;
 
-  const result = await runTool(enrichedRequest);
+  // ROUND_WA_GOVERNANCE_WRITE_1B — PHASE B. YES on a prepareMessage whose text was already typed
+  // & verified at mission-create: this is the SEND. confirmSendMessageDirect is idempotent in
+  // native (SEND_ATTEMPTED persisted before the tap → a re-entry re-VERIFIES, never re-presses),
+  // and refuses to send unless identity + typed text were verified earlier.
+  let result: { outcome: LaunchOutcome; via?: string; error?: string };
+  if (enrichedRequest.params.waWriteTyped === true) {
+    const missionId = String(enrichedRequest.params.waWriteMissionId ?? enrichedRequest.id);
+    const message = String(enrichedRequest.params.waWriteMessage ?? enrichedRequest.params.message ?? '');
+    const contact = String(enrichedRequest.params.waWriteContact ?? enrichedRequest.params.contactName ?? 'contact');
+    result = await whatsappTool.confirmSendMessageDirect(missionId, message, contact);
+    devLog('wa-write phase B', result);
+  } else {
+    result = await runTool(enrichedRequest);
+  }
   devLog('tool result', enrichedRequest.tool, enrichedRequest.action, result);
 
   if (result.outcome === 'launch_failed') {
@@ -175,24 +226,17 @@ async function runTool(request: ActionRequest): Promise<{ outcome: LaunchOutcome
   }
   if (request.action === 'endCall') return whatsappTool.endCall();
   if (request.action === 'muteCall') return whatsappTool.muteCall();
-  const message = typeof request.params.message === 'string' ? request.params.message : undefined;
-  // Doctrine (product-owner-directed 2026-08-01): openContact/prepareMessage now search by name
-  // string, same governance-recipe pattern as placeCall — no phoneNumber, no device contacts.
-  // WHATSAPP_MESSAGE_VIA_ACCESSIBILITY is the single revert constant (whatsappTool.ts) back to
-  // the old wa.me/phoneNumber path.
-  if (whatsappTool.WHATSAPP_MESSAGE_VIA_ACCESSIBILITY) {
-    const uiLang = typeof request.params.uiLang === 'string' ? request.params.uiLang : undefined;
-    const searchString = String(request.params.contactName ?? '');
-    return message
-      ? whatsappTool.sendMessageByName(searchString, message, uiLang)
-      : whatsappTool.openContactByName(searchString, uiLang);
+
+  // ROUND_WA_GOVERNANCE_ROUTING — `prepareMessage` never reaches runTool: Phase A (mission
+  // create) + Phase B (confirmSendMessageDirect on YES) own the whole message lifecycle. If it
+  // gets here, the direct-write path was disabled (WA_WRITE_DIRECT=false) — fail loud, never
+  // silently open a chat instead.
+  if (request.action === 'prepareMessage') {
+    return { outcome: 'launch_failed', error: 'Scrierea de mesaje pe WhatsApp e dezactivată momentan.' };
   }
-  const phoneNumber = String(request.params.phoneNumber ?? '');
-  // A real message means this is "send X to Y" — confirmed once already (buildConfirmationPrompt,
-  // above), so sendMessage taps WhatsApp's own send button too rather than leaving it pre-filled
-  // for a second, redundant manual tap. No message (bare "open WhatsApp with Hannah") has nothing
-  // to send, so it stays a plain open.
-  return message ? whatsappTool.sendMessage(phoneNumber, message) : whatsappTool.openConversation(phoneNumber);
+  // `openContact` — an explicit open-the-chat intent only (never a messaging fallback).
+  const uiLang = typeof request.params.uiLang === 'string' ? request.params.uiLang : undefined;
+  return whatsappTool.openContactByName(String(request.params.contactName ?? ''), uiLang);
 }
 
 // A real payload never starts with punctuation/quotes and is never a bare literal quote
@@ -220,32 +264,88 @@ function findBadConfirmationPayload(request: ActionRequest): string | null {
   }
   if (request.action === 'prepareMessage') {
     const message = typeof request.params.message === 'string' ? request.params.message : undefined;
-    if (isBadPayload(message)) return `Message payload is empty or looks like a torn STT fragment: "${message ?? ''}".`;
+    // ROUND_WA_GOVERNANCE_ROUTING — an EMPTY body is handled downstream as MESSAGE_BODY_MISSING
+    // (a specific "ce să-i scriu?" prompt), NOT a bad payload. Only a non-empty but torn-STT body
+    // is rejected here.
+    if (message !== undefined && message.trim() !== '' && isBadPayload(message)) {
+      return `Message payload looks like a torn STT fragment: "${message}".`;
+    }
   }
   return null;
 }
 
-function buildConfirmationPrompt(request: ActionRequest): string {
-  if (request.tool === 'whatsapp' && request.action === 'prepareMessage') {
-    const message = String(request.params.message ?? '');
-    if (whatsappTool.WHATSAPP_MESSAGE_VIA_ACCESSIBILITY) {
-      // States the governance plan (target app + search string), never a bare/raw name — same
-      // principle as placeCall's confirmation below.
-      const searchString = String(request.params.contactName ?? '');
-      return `Deschid WhatsApp, caut "${searchString}", aleg primul rezultat și trimit mesajul: "${message}". Confirmi?`;
-    }
-    const contact = String(request.params.contactName ?? 'this contact');
-    const phone = whatsappTool.maskPhone(String(request.params.phoneNumber ?? ''));
-    return `Trimit lui ${contact} (${phone}) pe WhatsApp mesajul: "${message}". Confirmi?`;
+// ROUND_WA_GOVERNANCE_ROUTING — PHASE A gate.
+//   'skipped' → not a `prepareMessage` (openContact / placeCall) → normal confirmation flow.
+//   'typed'   → message staged & verified in the compose field; ask for the SEND confirmation.
+//   'failed'  → HARD failure (MESSAGE_BODY_MISSING / CONTACT_UNRESOLVED / CONTACTS_PERMISSION /
+//               LAUNCH_FAILED / PHASE_A_STOPPED). The message was NEVER staged, NOTHING was sent,
+//               and there is NO fallback to the old open/search flow — BENSON says exactly what
+//               failed.
+type PhaseAOutcome =
+  | { kind: 'skipped' }
+  | { kind: 'typed'; message: string; contact: string }
+  | { kind: 'failed'; reason: string; userMessage: string };
+
+async function maybeRunWhatsAppWritePhaseA(request: ActionRequest): Promise<PhaseAOutcome> {
+  if (request.tool !== 'whatsapp' || request.action !== 'prepareMessage') return { kind: 'skipped' };
+
+  const contact = String(request.params.contactName ?? '').trim();
+  const message = typeof request.params.message === 'string' ? request.params.message.trim() : '';
+  logAudioDiag('WA_PAYLOAD_MISSION', `contact=${JSON.stringify(contact)} message=${JSON.stringify(message)}`);
+  logAudioDiag('WA_MSG_PHASE_A_ENTER', `mission=${request.id} contact=${JSON.stringify(contact)} msgLen=${message.length}`);
+
+  // Hard invariant — an empty body is a MESSAGE intent missing its body, NEVER an open-chat.
+  if (!message) {
+    logAudioDiag('WA_MSG_ROUTE_FAIL', 'reason=MESSAGE_BODY_MISSING');
+    logAudioDiag('WA_MSG_OLD_FALLBACK_BLOCKED', 'reason=message_body_missing');
+    return { kind: 'failed', reason: 'MESSAGE_BODY_MISSING', userMessage: `Ce să-i scriu lui ${contact || 'acel contact'}?` };
   }
+
+  if (!whatsappTool.WA_WRITE_DIRECT) {
+    logAudioDiag('WA_MSG_ROUTE_FAIL', 'reason=WA_WRITE_DISABLED');
+    return { kind: 'failed', reason: 'WA_WRITE_DISABLED', userMessage: 'Scrierea de mesaje pe WhatsApp e dezactivată momentan.' };
+  }
+
+  const attempt = await whatsappTool.prepareMessageDirect(contact, message, request.id);
+
+  // Local contact resolution failed → CONTACT_UNRESOLVED / CONTACTS_PERMISSION. NO fallback to
+  // the old open/search flow. ContactResolver's own ambiguity question (if any) is surfaced as-is.
+  if (!attempt.handled) {
+    const reason = attempt.reason === 'contacts_permission' ? 'CONTACTS_PERMISSION' : 'CONTACT_UNRESOLVED';
+    logAudioDiag('WA_MSG_ROUTE_FAIL', `reason=${reason} detail=${attempt.reason}`);
+    logAudioDiag('WA_MSG_OLD_FALLBACK_BLOCKED', `reason=${attempt.reason}`);
+    const userMessage = reason === 'CONTACTS_PERMISSION'
+      ? 'Am nevoie de acces la contacte ca să trimit mesaje pe WhatsApp.'
+      : `Nu am găsit contactul „${contact}" în agendă. N-am trimis nimic.`;
+    return { kind: 'failed', reason, userMessage };
+  }
+
+  const displayName = attempt.displayName ?? (contact || 'contact');
+  const r = attempt.result;
+  if (r.outcome === 'app_switch_observed' && r.via === 'wa_write_typed_verified') {
+    logAudioDiag('WA_MSG_ROUTE_SELECTED', `route=DIRECT_WRITE contact=${JSON.stringify(displayName)}`);
+    return { kind: 'typed', message, contact: displayName };
+  }
+  if (r.outcome === 'launch_failed') {
+    const userMessage = r.error === ACCESSIBILITY_DISCONNECTED_ERROR
+      ? ACCESSIBILITY_DOWN_SPOKEN_MESSAGE_RO
+      : (r.error ?? 'Nu am putut deschide WhatsApp.');
+    logAudioDiag('WA_MSG_ROUTE_FAIL', 'reason=LAUNCH_FAILED');
+    return { kind: 'failed', reason: r.error ?? 'launch_failed', userMessage };
+  }
+  // opened_manual_action_required — Phase A stopped after opening (verify / find-input / type /
+  // verify-typed), or the resolver's "which one?" question. Nothing was staged.
+  logAudioDiag('WA_MSG_ROUTE_FAIL', 'reason=PHASE_A_STOPPED');
+  return { kind: 'failed', reason: r.error ?? 'wa_write_phase_a_stopped', userMessage: r.error ?? 'Nu am reușit să pregătesc mesajul în WhatsApp.' };
+}
+
+function buildConfirmationPrompt(request: ActionRequest): string {
+  // ROUND_WA_GOVERNANCE_ROUTING — `prepareMessage` no longer reaches here: Phase A stages the
+  // message and builds its own "Am scris … Îl trimit?" prompt, or fails hard. The legacy
+  // "Deschid WhatsApp, caut …, trimit mesajul: … Confirmi?" prompt is removed.
   if (request.tool === 'whatsapp' && request.action === 'openContact') {
-    if (whatsappTool.WHATSAPP_MESSAGE_VIA_ACCESSIBILITY) {
-      const searchString = String(request.params.contactName ?? '');
-      return `Deschid WhatsApp, caut "${searchString}" și deschid conversația. Confirmi?`;
-    }
-    const contact = String(request.params.contactName ?? 'this contact');
-    const phone = whatsappTool.maskPhone(String(request.params.phoneNumber ?? ''));
-    return `Deschid conversația WhatsApp cu ${contact} (${phone}). Confirmi?`;
+    const searchString = String(request.params.contactName ?? 'this contact');
+    return `Deschid WhatsApp și deschid conversația cu "${searchString}". Confirmi?`;
   }
   if (request.tool === 'whatsapp' && request.action === 'placeCall') {
     // States the governance plan (target app + search string), never a bare/raw name — the
@@ -264,15 +364,27 @@ function buildFailureMessage(request: ActionRequest, error?: string): string {
   // the generic "could not open X (error)" template — the required wording is a standalone
   // instruction (go re-enable it in Settings), not a diagnostic detail about a WhatsApp failure.
   if (error === ACCESSIBILITY_DISCONNECTED_ERROR) return ACCESSIBILITY_DOWN_SPOKEN_MESSAGE_RO;
-  if (request.tool === 'waze') return `Nu am putut deschide Waze${error ? ` (${error})` : ''}.`;
-  return `Nu am putut deschide WhatsApp${error ? ` (${error})` : ''}.`;
+  // The user hears exactly two things — what failed and in which app. Any technical detail
+  // (selectors, native status strings) goes to logcat only, under EXEC_ERROR.
+  if (error) logAudioDiag('EXEC_ERROR', `phase=launch tool=${request.tool} detail=${String(error).replace(/\s+/g, ' ').slice(0, 300)}`);
+  if (request.tool === 'waze') return 'Nu am putut deschide Waze.';
+  return 'Nu am putut deschide WhatsApp.';
 }
+
+// E1-5 (2026-09-07, product-owner-directed) — punctul de confirmare finală. ACK-ul scurt
+// ("Pornesc traseul.") e deja rostit de app/index.tsx în paralel cu lansarea (prin onAck din
+// Mission Orchestrator), așa că mesajul lung de aici devine terse: nu se mai rostesc două
+// propoziții pentru aceeași acțiune. Ramurile de EȘEC și cele "opened_manual_action_required"
+// rămân verbatim mai jos (onestitate — utilizatorul trebuie să audă exact ce n-a mers).
+// Revert: E1_SHORT_FINAL_CONFIRM = false → propozițiile lungi revin.
+const E1_SHORT_FINAL_CONFIRM = true;
 
 function buildWaitingUserMessage(
   request: ActionRequest,
   result: { outcome: LaunchOutcome; via?: string; error?: string },
 ): string {
   if (request.tool === 'waze') {
+    if (E1_SHORT_FINAL_CONFIRM) return 'Gata.';
     return request.action === 'openApp'
       ? 'Am solicitat deschiderea Waze.'
       : 'Am solicitat deschiderea traseului în Waze.';
@@ -285,7 +397,10 @@ function buildWaitingUserMessage(
       return `Am deschis conversația cu ${contact} în WhatsApp, dar nu am găsit sigur butonul de apel — apasă-l tu.`;
     }
     if (result.outcome === 'opened_manual_action_required') {
-      return `Nu am reușit să-l sun pe ${contact} pe WhatsApp (${result.error ?? 'motiv necunoscut'}).`;
+      // whatsappTool already returns a clean, user-safe Romanian reason ("Nu am găsit contactul
+      // «X» în WhatsApp.") and has logged EXEC_ERROR with the technical detail. Surface that
+      // reason as-is; only fall back to a generic line if it somehow didn't set one.
+      return result.error ?? `Nu am reușit să sun pe ${contact} pe WhatsApp.`;
     }
     return `L-am sunat pe ${contact} pe WhatsApp.`;
   }
@@ -304,11 +419,19 @@ function buildWaitingUserMessage(
   if (request.action === 'prepareMessage') {
     const contact = String(request.params.contactName ?? 'contact');
     if (result.outcome === 'opened_manual_action_required') {
-      return `Am pregătit mesajul pentru ${contact}, dar nu am reușit să apăs trimite — apasă-l tu.`;
+      // whatsappTool sets a clean, user-safe `error` for a real failure (contact not found, or a
+      // "which one?" question). Surface it; only fall back to the generic "tap send yourself" line
+      // when the flow got far enough that the chat is actually open and only send didn't verify.
+      return result.error ?? `Am pregătit mesajul pentru ${contact}, dar nu am reușit să apăs trimite — apasă-l tu.`;
     }
     return `I-am trimis mesajul lui ${contact} pe WhatsApp.`;
   }
-  if (request.action === 'openContact') return 'Am deschis conversația WhatsApp.';
+  if (request.action === 'openContact') {
+    if (result.outcome === 'opened_manual_action_required') {
+      return result.error ?? 'Nu am reușit să deschid conversația în WhatsApp.';
+    }
+    return 'Am deschis conversația WhatsApp.';
+  }
   return 'Am deschis WhatsApp.';
 }
 
@@ -324,6 +447,21 @@ export async function cancelActiveMission(): Promise<Mission | null> {
   const cancelled = await transitionMission('Cancelled', { userMessage: 'Am anulat.' });
   await clearIfTerminal();
   return cancelled;
+}
+
+// MISSION-FIX-1 — a still-unconfirmed mission was outranked by a concrete new user command
+// (ROUND_MISSION_DIAG_REPORT.md). Terminal + cleared, exactly like cancel, but recorded as
+// 'Superseded' with a reason so the trace is unambiguous. A superseded mission can never be
+// confirmed later (confirmActiveMission requires state === 'WaitingConfirmation').
+export async function supersedeActiveMission(reason: string): Promise<Mission | null> {
+  const mission = getActiveMission();
+  if (!mission) return null;
+  const superseded = await transitionMission('Superseded', {
+    reason: `superseded: ${reason}`,
+    userMessage: 'Am lăsat comanda anterioară și trec la ce mi-ai cerut acum.',
+  });
+  await clearIfTerminal();
+  return superseded;
 }
 
 // Waze: keep active / complete / cancel. WhatsApp: sent / not sent / cancel. BENSON never infers
