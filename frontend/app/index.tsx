@@ -4122,7 +4122,41 @@ export default function BensonApp() {
       // misread a body like "nu mai vin" as a cancellation.
       const pendingTaskForBody = pendingMissionTaskRef.current.plan.tasks[pendingMissionTaskRef.current.taskIndex];
       const isAwaitingMessageBody = !!pendingTaskForBody?.input?.waAwaitingMessageBody;
-      logAudioDiag('WA_REPLY_RAW_STT', `missionId=${pendingMissionTaskRef.current.plan.id} expectedReplyType=${isAwaitingMessageBody ? 'MESSAGE_BODY' : 'CONFIRMATION'} rawText=${JSON.stringify(msg)}`);
+      // RECOVERY_L9 (2026-09-13, IMPLEMENTED_ONLY — not device-tested) — a reply to "Îl trimit?"
+      // that names a DIFFERENT contact ("nu Baby, Hannah" / "am spus Hannah") is a correction of the
+      // recipient slot, not a yes/no. Only recognized when this task already typed a message and is
+      // waiting on the send confirmation (waWriteMissionId set) — never during the message-body
+      // question itself, never for a plain CALL confirmation, never a new mission.
+      const isTypedAwaitingSend = pendingTaskForBody?.type === 'PREPARE_MESSAGE' && !isAwaitingMessageBody
+        && typeof pendingTaskForBody?.input?.waWriteMissionId === 'string' && !!pendingTaskForBody.input.waWriteMissionId;
+      const correctionMatch = isTypedAwaitingSend
+        ? msg.match(/\bnu\b[^,]*,\s*(.+)$/i) ?? msg.match(/\bam spus\b\s+(.+)$/i) ?? msg.match(/\bm[ăa] refer la\b\s+(.+)$/i)
+        : null;
+      const correctedContact = correctionMatch?.[1]?.trim().replace(/[.!?]+$/, '') || null;
+      logAudioDiag('WA_REPLY_RAW_STT', `missionId=${pendingMissionTaskRef.current.plan.id} expectedReplyType=${isAwaitingMessageBody ? 'MESSAGE_BODY' : (correctedContact ? 'CONTACT_CORRECTION' : 'CONFIRMATION')} rawText=${JSON.stringify(msg)}`);
+      if (correctedContact) {
+        const pending = pendingMissionTaskRef.current;
+        pendingMissionTaskRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('WA_CONTACT_CORRECTION_DETECTED', `missionId=${pending.plan.id} newContact=${JSON.stringify(correctedContact)}`);
+        setBensonState('EXECUTING', 'resume_task');
+        let resumeResult: Awaited<ReturnType<typeof resumePendingTask>>;
+        try {
+          resumeResult = await resumePendingTask(pending, await getLiveContacts(), onMissionAck, undefined, correctedContact);
+        } catch (e) {
+          logAudioDiag('RESUME_FAILED', `reason=exception detail=${JSON.stringify(String(e)).slice(0, 120)} recovered=idle`);
+          setLoading(false); loadingRef.current = false;
+          setBensonState('IDLE', 'resume_recover');
+          resumeListeningAfterUnblock();
+          return;
+        }
+        setLoading(false); loadingRef.current = false;
+        if (resumeResult.pendingTask) { pendingMissionTaskRef.current = resumeResult.pendingTask; gateArmedAtRef.current = Date.now(); }
+        setBensonState(resumeResult.pendingTask ? 'CONFIRMING' : (isFailureReply(resumeResult.message) ? 'ERROR' : 'DONE'), 'resume_result');
+        addMessage('benson', resumeResult.message);
+        speakText(resumeResult.message, () => { if (resumeResult.pendingTask) doStartListening(); });
+        return;
+      }
       if (isAwaitingMessageBody) {
         // No separate normalization stage for this text — `msg` is already the single canonical
         // form by this point (BENSON_STABILIZATION_1's USER_MIC gate already ran upstream).

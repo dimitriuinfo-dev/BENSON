@@ -1055,6 +1055,11 @@ export async function resumePendingTask(
   // missing, not a yes/no answer to classify. toGovernedCall() already re-reads task.input.message
   // fresh on every call — writing it here before resuming is the whole fix, no new plumbing.
   injectedMessageBody?: string,
+  // RECOVERY_L9 (2026-09-13, IMPLEMENTED_ONLY — not device-tested) — set when the reply to
+  // "Îl trimit?" is a contact correction ("nu Baby, Hannah") rather than a yes/no. Same mission,
+  // same message_body; only the recipient slot changes, and Phase A must re-run for the new
+  // contact (the old contact's typed/verified text is now void — never send to the wrong person).
+  injectedContactCorrection?: string,
 ): Promise<MissionRunResult> {
   const { plan, taskIndex } = pending;
   const task = plan.tasks[taskIndex];
@@ -1063,6 +1068,19 @@ export async function resumePendingTask(
     task.input.message = injectedMessageBody;
     task.input.waAwaitingMessageBody = false;
     logAudioDiag('WA_REPLY_CONTEXT_AFTER', `missionId=${plan.id} contact=${JSON.stringify(task.input.waWriteContact ?? '')} message_body=${JSON.stringify(injectedMessageBody)} state=RESUMING`);
+  }
+  const isContactCorrection = injectedContactCorrection !== undefined && !!task;
+  if (isContactCorrection) {
+    // Void the old contact's Phase A result — never resume straight to Phase B (SEND) for a typed
+    // message that belonged to a different recipient. Clearing waWriteMissionId makes
+    // toGovernedCall's PREPARE_MESSAGE branch fall through to its normal "message present, not yet
+    // typed" route for the NEW contact, exactly as if this were the first attempt.
+    task.input.contactName = injectedContactCorrection;
+    task.input.waWriteContact = injectedContactCorrection;
+    delete task.input.waWriteMissionId;
+    delete task.input.waWriteTyped;
+    delete task.input.waWriteMessage;
+    logAudioDiag('WA_CONTACT_CORRECTION', `missionId=${plan.id} newContact=${JSON.stringify(injectedContactCorrection)} message=${JSON.stringify(task.input.message ?? '')} state=RESUMING`);
   }
   const rawText = plan.goals[0]?.rawText ?? '';
   // E1-5 — the user just said "da"; the ACK ("O sun.") now fires before the WhatsApp/Waze side
@@ -1074,6 +1092,7 @@ export async function resumePendingTask(
   // exactly to catch a prepareMessage that reached runTool without going through Phase A first).
   // confirmed=false routes back through execute()'s normal gate, which runs Phase A for real
   // (open chat, verify header, type, verify-typed) now that the message text is known, then asks
-  // "Îl trimit?" itself — the existing, proven Phase A/B flow, unchanged.
-  return runPlanFrom(plan, taskIndex, rawText, contacts, !isMessageBodyInjection, onAck);
+  // "Îl trimit?" itself — the existing, proven Phase A/B flow, unchanged. A contact correction
+  // needs the exact same treatment: Phase A must run fresh for the new contact.
+  return runPlanFrom(plan, taskIndex, rawText, contacts, !isMessageBodyInjection && !isContactCorrection, onAck);
 }
