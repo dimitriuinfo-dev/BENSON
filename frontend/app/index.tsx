@@ -638,6 +638,14 @@ export default function BensonApp() {
   // into WhatsApp left the JS-owned retry timers inert, so "da" was never heard at all.
   const pendingConfirmationIdRef = useRef<string | null>(null);
   const CONFIRMATION_LISTEN_TIMEOUT_MS = 8000;
+  // ROUND_GENERIC_CONFIRMATION_FIX_1 — one-shot signal that the message finishHandledMission()
+  // just queued for TTS is a disambiguation question ("Am găsit Rechner. O deschid?"), so
+  // endTtsBlock() arms the SAME native confirmation listener as the WhatsApp mission-gate case
+  // instead of leaving the reply to the generic doStartListening() path (device-proven unreliable:
+  // local-Whisper self-echo contamination, or the reply lost to the wake engine). Set fresh on
+  // every finishHandledMission() call (true or false) and consumed/cleared by endTtsBlock() the
+  // instant it's read, so it can never leak into an unrelated later TTS-end event.
+  const pendingDisambigReplyRef = useRef<boolean>(false);
   function logMicCaptureDiag(reason: string, transcript: string) {
     const d = micCaptureDiagRef.current;
     if (!d.active) return;
@@ -2353,10 +2361,14 @@ export default function BensonApp() {
     // Arm the native one-shot listener instead of relying on the JS mic loop to re-arm itself:
     // proven live that BENSON backgrounded in WhatsApp leaves those JS retry timers inert, so a
     // spoken "da" was never even heard. The listening window itself is now native-timed.
-    if (wasBlocking && pendingMissionTaskRef.current) {
+    // ROUND_GENERIC_CONFIRMATION_FIX_1 — read-and-clear immediately so it can never leak into an
+    // unrelated later TTS-end event; the WhatsApp mission-gate condition is untouched/unaffected.
+    const wasDisambigReply = pendingDisambigReplyRef.current;
+    pendingDisambigReplyRef.current = false;
+    if (wasBlocking && (pendingMissionTaskRef.current || wasDisambigReply)) {
       const confirmationId = `confirm-${Date.now()}`;
       pendingConfirmationIdRef.current = confirmationId;
-      logAudioDiag('CONFIRM_LISTEN_ARM', `confirmationId=${confirmationId} timeoutMs=${CONFIRMATION_LISTEN_TIMEOUT_MS}`);
+      logAudioDiag('CONFIRM_LISTEN_ARM', `confirmationId=${confirmationId} timeoutMs=${CONFIRMATION_LISTEN_TIMEOUT_MS} source=${wasDisambigReply ? 'disambiguation' : 'mission_gate'}`);
       try { setMicLevel(0.3, true); } catch {}
       try { startConfirmationListening(confirmationId, CONFIRMATION_LISTEN_TIMEOUT_MS); } catch {}
     }
@@ -4367,6 +4379,10 @@ export default function BensonApp() {
       // candidate list and routes the next utterance to it). Render it as CONFIRMING so it is not
       // auto-cleared off screen while the user decides.
       const isDisambig = !!mr.disambiguation;
+      // ROUND_GENERIC_CONFIRMATION_FIX_1 — arm the native confirmation listener (via endTtsBlock,
+      // below, once this TTS finishes) for a disambiguation question, same mechanism already
+      // proven for WhatsApp's "Îl trimit?" gate. Set unconditionally (true or false) every call.
+      pendingDisambigReplyRef.current = isDisambig;
       const isConfirming = isDisambig || !!mr.pendingTask || getActiveMission()?.state === 'WaitingConfirmation';
       setBensonState(
         isConfirming ? 'CONFIRMING' : (isFailureReply(mr.message) ? 'ERROR' : 'DONE'),

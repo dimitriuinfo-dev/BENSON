@@ -856,7 +856,15 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
     const pd = pendingDisambiguation;
     pendingDisambiguation = null;
     if (!/\b(nu|nimic|las[ăa]|renun[țt]|stop|anuleaz[ăa])\b/i.test(normalizedText)) {
-      const pick = matchDisambiguationPick(normalizedText, pd.candidates);
+      // ROUND_GENERIC_CONFIRMATION_FIX_1 (device-log-proven) — a single-candidate proposal is
+      // phrased as a yes/no question ("Am găsit Rechner. O deschid?"), not a "which one?" choice.
+      // matchDisambiguationPick() only recognizes an ordinal or a name-token match, so a plain "da"
+      // never picked the one candidate on offer — the only way it worked before was BENSON's own
+      // TTS prompt (which contains the candidate's name) bleeding into the mic via self-echo and
+      // accidentally satisfying the name match. A real affirmative reply, captured cleanly, must
+      // resolve the same single candidate directly.
+      const isPlainYes = pd.candidates.length === 1 && /\b(da|dap|yes|yeah|yep|sigur|ok|okay|bine)\b/i.test(normalizedText);
+      const pick = isPlainYes ? pd.candidates[0] : matchDisambiguationPick(normalizedText, pd.candidates);
       if (pick) {
         devLog('disambiguation resolved ->', pick.name);
         const request = createActionRequest({
