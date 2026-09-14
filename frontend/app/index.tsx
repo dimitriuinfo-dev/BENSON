@@ -791,16 +791,12 @@ export default function BensonApp() {
   // NATIV (BensonBubbleService.TERMINAL_DISMISS_MS, ~2.5s), nu de un setTimeout aici — un timer JS
   // nu supraviețuiește suspendării RN pe fundal (dovedit live în alte runde ale acestei sesiuni).
   // E3_BAND_LINGER_MS rămâne doar ca document istoric al valorii vechi (6000ms) — nu mai e folosit.
-  // E3-3 — sunetul SF de „microfon deschis". Se redă la fiecare start de ascultare INIȚIAT DE
-  // UTILIZATOR (atingere / deschidere app / wake word) — NU la self-heal / re-armare conv mode.
-  // Nativul (WakeSound.kt) tace singur pe silențios și scalează după volumul media. „Doar Mut" al
-  // lui BENSON îl oprește aici. Revert: WAKE_SOUND_ENABLED = false → fără sunet nou; wake word-ul
-  // revine la vechea `playWakeChime()`.
-  const WAKE_SOUND_ENABLED = true;
+  // SHADOW_MODE_1 (2026-09-14) — removed per explicit instruction: no decorative activation sound
+  // on any listen-start (touch / manual open / wake word), and no fallback to the older chime
+  // either. Was E3-3's procedurally-synthesised "microphone is open" SF tone (WakeSound.kt) with a
+  // playWakeChime() fallback when disabled — both removed, not swapped for a third sound.
   function playListenStartSound() {
-    if (!WAKE_SOUND_ENABLED) return;
-    if (mutedRef.current || silencedRef.current) return;
-    try { playWakeSound(); } catch {}
+    // intentionally silent
   }
   // E3-2 — starea agentului → mișcarea punctelor din bulă. Doar LISTENING rotește; EXECUTING
   // pulsează; restul stă. Gated pe serviciul activ ca să nu pornim serviciul bulei degeaba.
@@ -3057,15 +3053,9 @@ export default function BensonApp() {
     // shows the bubble + wake ring (WindowManager overlays) as the visible "heard you" cue; the
     // user surfaces the full UI by tapping the bubble. Revert: E1_NO_SELF_FOREGROUND = false.
     if (!E1_NO_SELF_FOREGROUND) { try { bringToForeground(); } catch {} }
-    // Immediate non-verbal "I heard you" — plays the instant "Benson" is recognized, before the
-    // mic is handed off. Suppressed in mute-only mode (still listens, just makes no sound).
-    // E3-3: wake word is a LISTEN_STARTED source too → the new SF tone. WAKE_SOUND_ENABLED=false
-    // falls back to the old chime.
+    // SHADOW_MODE_1 — no activation sound on wake detection; transitions straight into active
+    // listening silently.
     logAudioDiag('LISTEN_STARTED', 'source=wake_word');
-    if (!mutedRef.current) {
-      if (WAKE_SOUND_ENABLED) playListenStartSound();
-      else playWakeChime();
-    }
     stopWakeScan();
     wakeScanningRef.current = false;
     wakeTriggeredRef.current = true;
