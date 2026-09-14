@@ -11,6 +11,7 @@
 // failure (no key, no network, request error) so this is additive, never a new single point of
 // failure.
 import { fetchWithTimeout } from './fetchWithTimeout';
+import { logAudioDiag } from 'benson-foreground-service';
 
 // See fetchWithTimeout.ts and geminiSTT.ts's identical constant — a plain fetch() with no timeout
 // can hang forever on a stalled connection, silently freezing the whole conversation loop with no
@@ -39,7 +40,13 @@ export async function transcribeWithOpenAI(wavFilePath: string, apiKey: string, 
     headers: { Authorization: `Bearer ${apiKey}` },
     body: form,
   }, REQUEST_TIMEOUT_MS);
-  if (!res.ok) throw new Error(`OpenAI transcription failed: ${res.status}`);
+  if (!res.ok) {
+    // RECOVERY_STT_FAILOVER_1 — same diagnostic capture as geminiSTT.ts/groqStt.ts.
+    const bodyText = await res.text().catch(() => '');
+    const retryAfter = res.headers.get('retry-after');
+    logAudioDiag('STT_HTTP_ERROR_BODY', `engine=openai status=${res.status} retryAfter=${retryAfter ?? 'none'} body=${bodyText.slice(0, 400)}`);
+    throw new Error(`OpenAI transcription failed: ${res.status}${retryAfter ? ` retryAfterSec=${retryAfter}` : ''}`);
+  }
   const data = await res.json();
   return (typeof data.text === 'string' ? data.text : '').trim();
 }

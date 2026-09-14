@@ -219,14 +219,15 @@ function classifyTranscription(raw: string): { rejected: boolean; reason?: 'shor
   return { rejected: false };
 }
 
-// Reused verbatim from src/core/mission/missionExecutor.ts's own low-confidence-parse fallback —
-// the same Romanian wording the user already hears when a command fails to parse downstream, so a
-// rejected transcription and a rejected parse read identically instead of adding a second, subtly
-// different "I didn't understand" phrasing. Returning this text (rather than the raw hallucinated
-// text, or a silent empty string indistinguishable from true no-speech) means a rejected take is
-// guaranteed to fail intent parsing and fall through to that exact same existing message — no
-// forbidden-scope file needs to change for the user to hear the right thing.
-const NOT_UNDERSTOOD_TEXT = 'Nu am înțeles clar comanda — poți s-o spui din nou?';
+// RECOVERY_STT_FAILOVER_1 (2026-09-14, device-log-proven) — previously returned a fixed Romanian
+// sentence here instead of the raw hallucinated text, reasoning that it would "fail intent parsing
+// safely" downstream. It does not: this return value is treated exactly like a real user
+// transcript everywhere upstream (MISSION_INPUT, the brain, and — critically — classifyConfirmation
+// during an ACTIVE pending confirmation, where this sentence's own leading "Nu" would silently
+// read as NO and cancel a real mission the user never touched). A rejected/garbage transcription
+// must be indistinguishable from true no-speech, which the caller already has a safe, proven path
+// for (app/index.tsx's STT result handler only dispatches `if (transcript)` — an empty string is
+// silently ignored and the hands-free loop just re-arms, identical to a genuine no-speech capture).
 
 // Exported (STT convergence round, 2026-08-27) so lib/engines/stt/groqStt.ts's cloud transcription
 // can run through the exact same hallucination/empty-result checks as this local engine instead of
@@ -250,7 +251,7 @@ export function applyHallucinationFilter(
   const verdict = classifyTranscription(rawText);
   if (verdict.rejected) {
     logAudioDiag('WHISPER_REJECTED', `${prefix}engine=${engine} reason=${verdict.reason} raw="${rawText}"`);
-    return NOT_UNDERSTOOD_TEXT;
+    return '';
   }
   return rawText;
 }

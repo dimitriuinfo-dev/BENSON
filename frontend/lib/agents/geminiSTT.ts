@@ -62,8 +62,9 @@ export async function transcribeWithGemini(wavFilePath: string, apiKey: string, 
     // else entirely — and guessing at model names one rebuild at a time wastes cycles. Logging
     // Google's own error body (truncated) gives the real reason on the next attempt instead.
     const bodyText = await res.text().catch(() => '');
-    logAudioDiag('GEMINI_STT_ERROR_BODY', `status=${res.status} model=${GEMINI_MODEL} body=${bodyText.slice(0, 400)}`);
-    throw new Error(`Gemini transcription failed: ${res.status}`);
+    const retryAfter = res.headers.get('retry-after');
+    logAudioDiag('GEMINI_STT_ERROR_BODY', `status=${res.status} model=${GEMINI_MODEL} retryAfter=${retryAfter ?? 'none'} body=${bodyText.slice(0, 400)}`);
+    throw new Error(`Gemini transcription failed: ${res.status}${retryAfter ? ` retryAfterSec=${retryAfter}` : ''}`);
   }
   const data = await res.json();
   const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;

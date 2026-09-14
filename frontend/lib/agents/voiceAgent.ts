@@ -69,11 +69,30 @@ export function setOpenAIKeyForStt(key: string | null) {
 // local fallback. 5 minutes: long enough to stop hammering a still-exhausted quota, short enough
 // to pick the cloud engine back up automatically once it recovers, with no user action needed.
 const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+// RECOVERY_STT_FAILOVER_1 (2026-09-14) — a 503 ("temporarily unavailable"/"high demand") is not a
+// quota rejection like 429; the previous breaker only recognized "429" in the error string, so a
+// 503 (confirmed live: Gemini) was retried on every single subsequent command with no cooldown at
+// all, adding a guaranteed-to-fail network round trip each time. Shorter cooldown than 429's,
+// per the difference in what the two actually mean: 429 says "you are over a real quota/rate limit
+// for a while," 503 says "the service is briefly overloaded — probe again soon."
+const SERVER_UNAVAILABLE_COOLDOWN_MS = 60 * 1000;
 let geminiRateLimitedUntil = 0;
 let openaiRateLimitedUntil = 0;
 let groqRateLimitedUntil = 0;
 function isRateLimitError(e: unknown): boolean {
   return String(e).includes('429');
+}
+function isServerUnavailableError(e: unknown): boolean {
+  return /\b5\d\d\b/.test(String(e));
+}
+// If groqStt.ts/geminiSTT.ts/openaiSTT.ts embedded a Retry-After header value in the thrown
+// message (`retryAfterSec=<n>`), honor it instead of the fixed cooldown — capped so a
+// misconfigured/huge Retry-After can't wedge a provider off for hours.
+const MAX_RETRY_AFTER_MS = 15 * 60 * 1000;
+function cooldownMsFor(e: unknown, fallbackMs: number): number {
+  const m = /retryAfterSec=(\d+)/.exec(String(e));
+  if (m) return Math.min(Number(m[1]) * 1000, MAX_RETRY_AFTER_MS);
+  return fallbackMs;
 }
 
 // GO round (2026-08-27), Task 2: Groq's whisper-large-v3-turbo becomes the default/first-tried
@@ -90,7 +109,8 @@ async function transcribeAudio(filePath: string, lang: string, captureEndAt?: nu
       try {
         return await transcribeWithGroq(filePath, lang, groqConfig, captureEndAt);
       } catch (e) {
-        if (isRateLimitError(e)) groqRateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+        if (isRateLimitError(e)) groqRateLimitedUntil = Date.now() + cooldownMsFor(e, RATE_LIMIT_COOLDOWN_MS);
+        else if (isServerUnavailableError(e)) groqRateLimitedUntil = Date.now() + SERVER_UNAVAILABLE_COOLDOWN_MS;
         logAudioDiag('STT_FALLBACK', `reason="${String(e)}"`);
       }
     }
@@ -99,7 +119,8 @@ async function transcribeAudio(filePath: string, lang: string, captureEndAt?: nu
     try {
       return await transcribeWithGemini(filePath, geminiSttKey, lang);
     } catch (e) {
-      if (isRateLimitError(e)) geminiRateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+      if (isRateLimitError(e)) geminiRateLimitedUntil = Date.now() + cooldownMsFor(e, RATE_LIMIT_COOLDOWN_MS);
+      else if (isServerUnavailableError(e)) geminiRateLimitedUntil = Date.now() + SERVER_UNAVAILABLE_COOLDOWN_MS;
       logAudioDiag('STT_SESSION', `engine=local event=gemini_transcribe_fallback error="${String(e)}"`);
     }
   }
@@ -107,7 +128,8 @@ async function transcribeAudio(filePath: string, lang: string, captureEndAt?: nu
     try {
       return await transcribeWithOpenAI(filePath, openaiSttKey, lang);
     } catch (e) {
-      if (isRateLimitError(e)) openaiRateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+      if (isRateLimitError(e)) openaiRateLimitedUntil = Date.now() + cooldownMsFor(e, RATE_LIMIT_COOLDOWN_MS);
+      else if (isServerUnavailableError(e)) openaiRateLimitedUntil = Date.now() + SERVER_UNAVAILABLE_COOLDOWN_MS;
       logAudioDiag('STT_SESSION', `engine=local event=openai_transcribe_fallback error="${String(e)}"`);
     }
   }

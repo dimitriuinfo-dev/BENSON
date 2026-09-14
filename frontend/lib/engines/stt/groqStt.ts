@@ -134,7 +134,13 @@ export async function transcribeWithGroq(
   }
 
   if (!res.ok) {
-    throw new Error(`Groq transcription failed: ${res.status}`);
+    // RECOVERY_STT_FAILOVER_1 — same diagnostic capture as geminiSTT.ts's GEMINI_STT_ERROR_BODY:
+    // a bare status code alone can't distinguish a per-minute rate limit from a daily quota from a
+    // billing/plan issue. Groq's error body and Retry-After header (when present) carry that.
+    const bodyText = await res.text().catch(() => '');
+    const retryAfter = res.headers.get('retry-after');
+    logAudioDiag('STT_HTTP_ERROR_BODY', `engine=groq status=${res.status} retryAfter=${retryAfter ?? 'none'} body=${bodyText.slice(0, 400)}`);
+    throw new Error(`Groq transcription failed: ${res.status}${retryAfter ? ` retryAfterSec=${retryAfter}` : ''}`);
   }
   const data = await res.json();
   const elapsedMs = Date.now() - startedAt;
