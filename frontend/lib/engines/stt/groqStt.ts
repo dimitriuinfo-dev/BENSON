@@ -78,6 +78,11 @@ function resolvedModel(config: EngineConfig): string {
   return config.model || GROQ_STT_DEFAULT_MODEL;
 }
 
+// DECISION_GROQ_PRIMARY_1 (2026-09-14) — Groq whisper-large-v3-turbo is BENSON's primary STT
+// provider (product-owner decision, $0.04/audio-hour paid tier). temperature=0 for deterministic
+// output; verbose_json (real per-segment no_speech_prob/avg_logprob from the model itself) instead
+// of plain json, so transcript-quality rejection is based on the provider's own confidence signal,
+// not a text-content guess.
 function buildForm(uri: string, model: string, langCode: string): FormData {
   const form = new FormData();
   // React Native's fetch recognizes this {uri,name,type} shape and streams the file directly — it
@@ -86,8 +91,29 @@ function buildForm(uri: string, model: string, langCode: string): FormData {
   form.append('file', { uri, name: 'audio.wav', type: 'audio/wav' } as unknown as Blob);
   form.append('model', model);
   form.append('language', langCode);
-  form.append('response_format', 'json');
+  form.append('temperature', '0');
+  form.append('response_format', 'verbose_json');
   return form;
+}
+
+interface GroqSegment {
+  no_speech_prob?: number;
+  avg_logprob?: number;
+}
+
+// A no_speech_prob this high means the model itself flagged the audio as (near-)silence/noise —
+// real evidence, not a text-content heuristic. Rejecting on it stops exactly the class of
+// hallucination already seen live (a confident-sounding sentence generated from noise).
+const NO_SPEECH_PROB_REJECT_THRESHOLD = 0.6;
+
+function assessConfidence(segments: unknown): { reject: boolean; avgNoSpeechProb: number | null } {
+  if (!Array.isArray(segments) || segments.length === 0) return { reject: false, avgNoSpeechProb: null };
+  const probs = (segments as GroqSegment[])
+    .map((s) => s.no_speech_prob)
+    .filter((p): p is number => typeof p === 'number');
+  if (probs.length === 0) return { reject: false, avgNoSpeechProb: null };
+  const avg = probs.reduce((a, b) => a + b, 0) / probs.length;
+  return { reject: avg >= NO_SPEECH_PROB_REJECT_THRESHOLD, avgNoSpeechProb: avg };
 }
 
 async function postTranscription(
@@ -133,6 +159,16 @@ export async function transcribeWithGroq(
     res = await postTranscription(baseUrl, config.apiKey, uri, model, langCode);
   }
 
+  // DECISION_GROQ_PRIMARY_1 — item 5: visibility into remaining quota on every response (success
+  // or failure), so a provider health decision can be made from real data instead of only
+  // discovering exhaustion after a 429. Logged, not yet used to preemptively skip a call — that
+  // would be guessing ahead of the provider's own authoritative answer.
+  const rlRemaining = res.headers.get('x-ratelimit-remaining-requests');
+  const rlReset = res.headers.get('x-ratelimit-reset-requests');
+  if (rlRemaining !== null || rlReset !== null) {
+    logAudioDiag('STT_RATE_LIMIT_HEADERS', `engine=groq remaining=${rlRemaining ?? 'n/a'} resetRequests=${rlReset ?? 'n/a'}`);
+  }
+
   if (!res.ok) {
     // RECOVERY_STT_FAILOVER_1 — same diagnostic capture as geminiSTT.ts's GEMINI_STT_ERROR_BODY:
     // a bare status code alone can't distinguish a per-minute rate limit from a daily quota from a
@@ -145,7 +181,18 @@ export async function transcribeWithGroq(
   const data = await res.json();
   const elapsedMs = Date.now() - startedAt;
   const rawText = (typeof data.text === 'string' ? data.text : '').trim();
-  logAudioDiag('STT_RESULT', `engine=groq elapsedMs=${elapsedMs} chars=${rawText.length} text="${rawText}"`);
+  const confidence = assessConfidence(data.segments);
+  logAudioDiag(
+    'STT_RESULT',
+    `engine=groq elapsedMs=${elapsedMs} chars=${rawText.length} avgNoSpeechProb=${confidence.avgNoSpeechProb ?? 'n/a'} text="${rawText}"`,
+  );
+  if (rawText && confidence.reject) {
+    // DECISION_GROQ_PRIMARY_1 — item 3/10: a confident-sounding transcript from audio the model
+    // itself flags as (near-)silence/noise must not reach MISSION_INPUT. Real provider evidence,
+    // not a text-content guess.
+    logAudioDiag('STT_LOW_CONFIDENCE', `engine=groq avgNoSpeechProb=${confidence.avgNoSpeechProb} rejectedText="${rawText}"`);
+    return '';
+  }
 
   // Task 2: the existing hallucination/empty-result filter applies to the cloud result too.
   return applyHallucinationFilter(rawText, langCode, 'groq');

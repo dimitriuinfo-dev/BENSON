@@ -95,12 +95,16 @@ function cooldownMsFor(e: unknown, fallbackMs: number): number {
   return fallbackMs;
 }
 
-// GO round (2026-08-27), Task 2: Groq's whisper-large-v3-turbo becomes the default/first-tried
-// STT tier for command capture — reads its config fresh from settingsStore.ts on every call
-// (rather than a push-from-Settings in-memory setter like geminiSttKey/openaiSttKey below) so this
-// works without app/index.tsx needing to know Groq exists at all; app/settings.tsx just writes to
-// the same store this reads. Any failure logs STT_FALLBACK and falls through to the existing
-// gemini -> openai -> local chain, which always reaches `local` in the end.
+// DECISION_GROQ_PRIMARY_1 (2026-09-14, product-owner decision) — Groq whisper-large-v3-turbo is
+// now the sole PRIMARY and, by default, ONLY STT provider for command capture (paid tier,
+// $0.04/audio-hour, fits BENSON's cost target). When Groq is unavailable, BENSON must report
+// STT_PROVIDER_UNAVAILABLE and create no mission — it must NOT silently fall through to Gemini,
+// OpenAI, or local Whisper and treat whichever one answers as authoritative (that chain is what
+// let hallucinated garbage like "BMW thấy kurz vorllärm." reach MISSION_INPUT, device-log-proven
+// 2026-09-14). Gemini/OpenAI/local remain fully implemented (not deleted) for the explicit
+// experimental path below — off by default. Revert: EXPERIMENTAL_STT_FALLBACK_CHAIN = true
+// restores the previous gemini -> openai -> local fallback behavior.
+const EXPERIMENTAL_STT_FALLBACK_CHAIN = false;
 async function transcribeAudio(filePath: string, lang: string, captureEndAt?: number): Promise<string> {
   const now = Date.now();
   if (now >= groqRateLimitedUntil) {
@@ -112,10 +116,20 @@ async function transcribeAudio(filePath: string, lang: string, captureEndAt?: nu
         if (isRateLimitError(e)) groqRateLimitedUntil = Date.now() + cooldownMsFor(e, RATE_LIMIT_COOLDOWN_MS);
         else if (isServerUnavailableError(e)) groqRateLimitedUntil = Date.now() + SERVER_UNAVAILABLE_COOLDOWN_MS;
         logAudioDiag('STT_FALLBACK', `reason="${String(e)}"`);
+        if (!EXPERIMENTAL_STT_FALLBACK_CHAIN) {
+          logAudioDiag('STT_PROVIDER_UNAVAILABLE', `primary=groq reason="${String(e)}"`);
+          return '';
+        }
       }
+    } else if (!EXPERIMENTAL_STT_FALLBACK_CHAIN) {
+      logAudioDiag('STT_PROVIDER_UNAVAILABLE', 'primary=groq reason="not configured"');
+      return '';
     }
+  } else if (!EXPERIMENTAL_STT_FALLBACK_CHAIN) {
+    logAudioDiag('STT_PROVIDER_UNAVAILABLE', 'primary=groq reason="rate_limited_cooldown"');
+    return '';
   }
-  if (geminiSttKey && now >= geminiRateLimitedUntil) {
+  if (EXPERIMENTAL_STT_FALLBACK_CHAIN && geminiSttKey && now >= geminiRateLimitedUntil) {
     try {
       return await transcribeWithGemini(filePath, geminiSttKey, lang);
     } catch (e) {
@@ -124,7 +138,7 @@ async function transcribeAudio(filePath: string, lang: string, captureEndAt?: nu
       logAudioDiag('STT_SESSION', `engine=local event=gemini_transcribe_fallback error="${String(e)}"`);
     }
   }
-  if (openaiSttKey && now >= openaiRateLimitedUntil) {
+  if (EXPERIMENTAL_STT_FALLBACK_CHAIN && openaiSttKey && now >= openaiRateLimitedUntil) {
     try {
       return await transcribeWithOpenAI(filePath, openaiSttKey, lang);
     } catch (e) {
