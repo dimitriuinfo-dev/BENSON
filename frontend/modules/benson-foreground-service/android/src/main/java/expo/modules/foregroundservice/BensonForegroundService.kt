@@ -139,6 +139,45 @@ class BensonForegroundService : Service() {
     }
   }
 
+  // ROUND_TTS_WATCHDOG_NATIVE_1 — mirrors armSttSessionWatchdog above exactly, for TTS instead of
+  // STT. Confirmed live 2026-09-15: a TTS bind failure (Android TextToSpeech's ServiceConnection
+  // never completed — every call logging "not bound to TTS engine") left micOwner=TTS stranded for
+  // the full 45s OwnerWatchdog window instead of app/index.tsx's own TTS_MAX_BLOCK_MS=15000, because
+  // BOTH of that file's JS-side watchdogs (the beginTtsBlock() hard timer AND speakOnDevice()'s own
+  // per-call timer) are plain setTimeout and go inert while BENSON is backgrounded (same root cause
+  // class as ROUND_STT_SESSION_WATCHDOG_NATIVE_1) — the target app (Spotify) was foreground the
+  // whole time. This is a native, epoch-guarded backstop using the SAME already-chosen
+  // TTS_MAX_BLOCK_MS bound (passed in from JS, not duplicated here) instead of the much longer
+  // generic OwnerWatchdog, which stays untouched as the final, JS-independent fallback.
+  private var ttsWatchdogEpoch = 0
+  private var ttsWatchdogArmed = false
+
+  fun armTtsWatchdog(timeoutMs: Long) {
+    ttsWatchdogEpoch += 1
+    val epoch = ttsWatchdogEpoch
+    ttsWatchdogArmed = true
+    AudioDiag.log(this, "TTS_WATCHDOG_ARM", "timeoutMs=$timeoutMs")
+    mainHandler.postDelayed({
+      if (ttsWatchdogArmed && ttsWatchdogEpoch == epoch) {
+        AudioDiag.logError("TTS_WATCHDOG_FIRE", "timeoutMs=$timeoutMs")
+        ttsWatchdogArmed = false
+        // Release ownership immediately, natively — do not wait for the JS event round-trip (which
+        // still fires right after, so JS can resume the correct follow-up listener per its own
+        // pendingDisambigReplyRef-aware endTtsBlock() logic instead of a generic wake re-arm here).
+        if (micOwner == "TTS") setMicOwner("NONE", "tts_watchdog")
+        onTtsWatchdogTimeout?.invoke()
+      }
+    }, timeoutMs)
+  }
+
+  fun cancelTtsWatchdog() {
+    if (ttsWatchdogArmed) {
+      AudioDiag.log(this, "TTS_WATCHDOG_CANCEL", "")
+      ttsWatchdogArmed = false
+      ttsWatchdogEpoch += 1
+    }
+  }
+
   // URGENT_CONFIRMATION_NATIVE_1 — one-shot YES/NO/UNKNOWN confirmation capture, entirely native
   // (AudioRecord+VAD+cloud-STT, same recipe as NativeCloudWake — see NativeConfirmationListener).
   // Proven live that a JS-owned mic loop cannot reliably re-arm while BENSON is backgrounded
@@ -1423,6 +1462,10 @@ class BensonForegroundService : Service() {
     // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — fired when armSttSessionWatchdog's native timer
     // expires for the still-current session id. Argument is that session's id.
     var onSttWatchdogTimeout: ((String) -> Unit)? = null
+
+    // ROUND_TTS_WATCHDOG_NATIVE_1 — fired when armTtsWatchdog's native timer expires while still
+    // armed. No argument — TTS has no session id, only one block can be active at a time.
+    var onTtsWatchdogTimeout: (() -> Unit)? = null
 
     // URGENT_CONFIRMATION_NATIVE_1 — (confirmationId, verdict, transcript). Durable: if no JS
     // listener is registered when the native capture finishes (JS suspended), the result is held

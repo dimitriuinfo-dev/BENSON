@@ -29,6 +29,12 @@ export declare function cancelSttSessionWatchdog(sessionId: string): void;
 export declare function addSttWatchdogTimeoutListener(
   listener: (sessionId: string) => void
 ): { remove: () => void };
+/** ROUND_TTS_WATCHDOG_NATIVE_1 — native Handler timer for the TTS mic-ownership hard bound; survives JS suspension while backgrounded. */
+export declare function armTtsWatchdog(timeoutMs: number): void;
+export declare function cancelTtsWatchdog(): void;
+export declare function addTtsWatchdogTimeoutListener(
+  listener: () => void
+): { remove: () => void };
 /** URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN capture; survives backgrounding. */
 export declare function startConfirmationListening(confirmationId: string, timeoutMs: number): void;
 export declare function cancelConfirmationListening(confirmationId: string): void;
@@ -40,6 +46,8 @@ export declare function setWakeName(name: string): void;
 export declare function getWakeName(): string | Promise<string>;
 /** Pushes the active STT provider's credentials to the native cloud wake loop. Never logged. */
 export declare function setNativeWakeCredentials(apiKey: string, baseUrl: string, model: string): void;
+/** DEV_STT_DEEPGRAM_1 — separate Deepgram key push for the native confirmation listener only; never touches the wake loop's Groq credentials above. Never logged. */
+export declare function setConfirmationSttCredentials(apiKey: string): void;
 export declare function isNativeCloudWakeConfigured(): boolean | Promise<boolean>;
 export declare function bringToForeground(): void;
 export declare function isIgnoringBatteryOptimizations(): boolean;

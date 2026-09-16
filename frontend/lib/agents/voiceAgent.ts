@@ -7,6 +7,7 @@ import { transcribeLocally } from './localWhisperEngine';
 import { transcribeWithOpenAI } from './openaiSTT';
 import { transcribeWithGemini } from './geminiSTT';
 import { transcribeWithGroq } from '../engines/stt/groqStt';
+import { transcribeWithDeepgram } from '../engines/stt/deepgramStt';
 import { getEngineConfig } from '../engines/settingsStore';
 
 // Set by app/index.tsx whenever the user's OpenAI/Gemini keys change (same ref-sync pattern
@@ -105,7 +106,28 @@ function cooldownMsFor(e: unknown, fallbackMs: number): number {
 // experimental path below — off by default. Revert: EXPERIMENTAL_STT_FALLBACK_CHAIN = true
 // restores the previous gemini -> openai -> local fallback behavior.
 const EXPERIMENTAL_STT_FALLBACK_CHAIN = false;
+
+// DEV_STT_DEEPGRAM_1 (2026-09-16) — Groq's request quota is exhausted (see memory
+// project_groq_quota_blocker); Deepgram Nova-3 is the DEVELOPMENT-only main-command STT provider
+// while that's true, routed BEFORE Groq's own logic below, which stays fully in place untouched
+// for the production revert. Set this back to false to restore Groq as sole primary. No
+// local-Whisper fallback on a Deepgram failure — STT_PROVIDER_UNAVAILABLE only, per product-owner
+// instruction, matching DECISION_GROQ_PRIMARY_1's no-silent-fallback discipline above.
+const USE_DEEPGRAM_DEV_STT = true;
 async function transcribeAudio(filePath: string, lang: string, captureEndAt?: number): Promise<string> {
+  if (USE_DEEPGRAM_DEV_STT) {
+    const deepgramConfig = await getEngineConfig('stt', 'deepgram').catch(() => null);
+    if (!deepgramConfig) {
+      logAudioDiag('STT_PROVIDER_UNAVAILABLE', 'primary=deepgram reason="not configured"');
+      return '';
+    }
+    try {
+      return await transcribeWithDeepgram(filePath, lang, deepgramConfig, captureEndAt);
+    } catch (e) {
+      logAudioDiag('STT_PROVIDER_UNAVAILABLE', `primary=deepgram reason="${String(e)}"`);
+      return '';
+    }
+  }
   const now = Date.now();
   if (now >= groqRateLimitedUntil) {
     const groqConfig = await getEngineConfig('stt', 'groq').catch(() => null);

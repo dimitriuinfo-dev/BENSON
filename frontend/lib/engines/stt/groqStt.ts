@@ -29,7 +29,9 @@ const FILE_READY_POLL_MS = 100;
 const WAV_HEADER_BYTES = 44;
 
 // Single source of truth: the `file://` URI used for size checks AND for the multipart upload.
-function toFileUri(pathOrUri: string): string {
+// Exported — reused as-is by deepgramStt.ts (same capture file, same 0-byte-bare-path bug class)
+// instead of duplicating it.
+export function toFileUri(pathOrUri: string): string {
   return pathOrUri.startsWith('file://') ? pathOrUri : `file://${pathOrUri}`;
 }
 
@@ -39,7 +41,7 @@ async function statSize(uri: string): Promise<{ exists: boolean; size: number }>
   return { exists, size: exists && typeof info?.size === 'number' ? info.size : 0 };
 }
 
-async function waitForWavReady(fileUri: string, captureEndAt?: number): Promise<number> {
+export async function waitForWavReady(fileUri: string, captureEndAt?: number): Promise<number> {
   const since = () => (captureEndAt ? String(Date.now() - captureEndAt) : 'n/a');
   const deadline = Date.now() + FILE_READY_TIMEOUT_MS;
 
@@ -99,6 +101,7 @@ function buildForm(uri: string, model: string, langCode: string): FormData {
 interface GroqSegment {
   no_speech_prob?: number;
   avg_logprob?: number;
+  compression_ratio?: number;
 }
 
 // A no_speech_prob this high means the model itself flagged the audio as (near-)silence/noise —
@@ -106,14 +109,29 @@ interface GroqSegment {
 // hallucination already seen live (a confident-sounding sentence generated from noise).
 const NO_SPEECH_PROB_REJECT_THRESHOLD = 0.6;
 
-function assessConfidence(segments: unknown): { reject: boolean; avgNoSpeechProb: number | null } {
-  if (!Array.isArray(segments) || segments.length === 0) return { reject: false, avgNoSpeechProb: null };
-  const probs = (segments as GroqSegment[])
-    .map((s) => s.no_speech_prob)
-    .filter((p): p is number => typeof p === 'number');
-  if (probs.length === 0) return { reject: false, avgNoSpeechProb: null };
-  const avg = probs.reduce((a, b) => a + b, 0) / probs.length;
-  return { reject: avg >= NO_SPEECH_PROB_REJECT_THRESHOLD, avgNoSpeechProb: avg };
+interface ConfidenceAssessment {
+  reject: boolean;
+  avgNoSpeechProb: number | null;
+  avgLogprob: number | null;
+  avgCompressionRatio: number | null;
+}
+
+function avgOf(segments: GroqSegment[], field: keyof GroqSegment): number | null {
+  const vals = segments.map((s) => s[field]).filter((v): v is number => typeof v === 'number');
+  if (vals.length === 0) return null;
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
+}
+
+function assessConfidence(segments: unknown): ConfidenceAssessment {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return { reject: false, avgNoSpeechProb: null, avgLogprob: null, avgCompressionRatio: null };
+  }
+  const segs = segments as GroqSegment[];
+  const avgNoSpeechProb = avgOf(segs, 'no_speech_prob');
+  const avgLogprob = avgOf(segs, 'avg_logprob');
+  const avgCompressionRatio = avgOf(segs, 'compression_ratio');
+  const reject = avgNoSpeechProb !== null && avgNoSpeechProb >= NO_SPEECH_PROB_REJECT_THRESHOLD;
+  return { reject, avgNoSpeechProb, avgLogprob, avgCompressionRatio };
 }
 
 async function postTranscription(
@@ -147,6 +165,7 @@ export async function transcribeWithGroq(
   const durationSec = bytes > WAV_HEADER_BYTES ? (bytes - WAV_HEADER_BYTES) / (16000 * 2) : 0;
   logAudioDiag('STT_REQUEST', `engine=groq bytes=${bytes} durationSec=${durationSec.toFixed(2)}`);
 
+  logAudioDiag('STT_PROVIDER_ATTEMPT', 'provider=groq');
   const startedAt = Date.now();
   let res: Response;
   try {
@@ -156,7 +175,20 @@ export async function transcribeWithGroq(
     // connection) — exactly one retry, per Task 2. A real HTTP response (including a 4xx) lands in
     // the res.ok check below instead of this catch, and is never retried.
     logAudioDiag('STT_RETRY', 'engine=groq reason=network');
-    res = await postTranscription(baseUrl, config.apiKey, uri, model, langCode);
+    try {
+      res = await postTranscription(baseUrl, config.apiKey, uri, model, langCode);
+    } catch (e2) {
+      logAudioDiag('STT_PROVIDER_RESULT', 'provider=groq status=network_error http_status=n/a retry_after=n/a');
+      throw e2;
+    }
+  }
+
+  {
+    const retryAfterHeader = res.headers.get('retry-after');
+    logAudioDiag(
+      'STT_PROVIDER_RESULT',
+      `provider=groq status=${res.ok ? 'ok' : 'error'} http_status=${res.status} retry_after=${retryAfterHeader ?? 'none'}`,
+    );
   }
 
   // DECISION_GROQ_PRIMARY_1 — item 5: visibility into remaining quota on every response (success
@@ -186,16 +218,31 @@ export async function transcribeWithGroq(
     'STT_RESULT',
     `engine=groq elapsedMs=${elapsedMs} chars=${rawText.length} avgNoSpeechProb=${confidence.avgNoSpeechProb ?? 'n/a'} text="${rawText}"`,
   );
+  logAudioDiag('STT_RAW_TRANSCRIPT', `text="${rawText}"`);
+
+  const validationFields = (acceptReason: string, rejectReason: string) =>
+    `avg_logprob=${confidence.avgLogprob ?? 'n/a'} no_speech_prob=${confidence.avgNoSpeechProb ?? 'n/a'} ` +
+    `compression_ratio=${confidence.avgCompressionRatio ?? 'n/a'} accept_reason=${acceptReason} reject_reason=${rejectReason}`;
+
   if (rawText && confidence.reject) {
     // DECISION_GROQ_PRIMARY_1 — item 3/10: a confident-sounding transcript from audio the model
     // itself flags as (near-)silence/noise must not reach MISSION_INPUT. Real provider evidence,
     // not a text-content guess.
     logAudioDiag('STT_LOW_CONFIDENCE', `engine=groq avgNoSpeechProb=${confidence.avgNoSpeechProb} rejectedText="${rawText}"`);
+    logAudioDiag('STT_VALIDATION', `status=rejected ${validationFields('n/a', 'low_confidence_no_speech')}`);
+    logAudioDiag('MISSION_INPUT_ALLOWED', 'value=false');
     return '';
   }
 
   // Task 2: the existing hallucination/empty-result filter applies to the cloud result too.
-  return applyHallucinationFilter(rawText, langCode, 'groq');
+  const finalText = applyHallucinationFilter(rawText, langCode, 'groq');
+  const accepted = finalText.length > 0;
+  logAudioDiag(
+    'STT_VALIDATION',
+    `status=${accepted ? 'accepted' : 'rejected'} ${validationFields(accepted ? 'passed_confidence_and_hallucination_filter' : 'n/a', accepted ? 'n/a' : 'empty_or_hallucination_filtered')}`,
+  );
+  logAudioDiag('MISSION_INPUT_ALLOWED', `value=${accepted}`);
+  return finalText;
 }
 
 export function createGroqSttEngine(config: EngineConfig): SttEngine {

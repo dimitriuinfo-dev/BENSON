@@ -14,13 +14,17 @@ class BensonForegroundServiceModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("BensonForegroundService")
 
-    Events("onStopRequested", "onListenRequested", "onWakeWordDetected", "onWakePoke", "onSttWatchdogTimeout", "onConfirmationResult")
+    Events("onStopRequested", "onListenRequested", "onWakeWordDetected", "onWakePoke", "onSttWatchdogTimeout", "onTtsWatchdogTimeout", "onConfirmationResult")
 
     OnCreate {
       // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — delivered as an event (survives backgrounding),
       // unlike the JS setTimeout it replaces as the JS-side STT session gate's release mechanism.
       BensonForegroundService.onSttWatchdogTimeout = { sessionId ->
         sendEvent("onSttWatchdogTimeout", mapOf("sessionId" to sessionId))
+      }
+      // ROUND_TTS_WATCHDOG_NATIVE_1 — same idea, for the TTS mic-ownership hard timer.
+      BensonForegroundService.onTtsWatchdogTimeout = {
+        sendEvent("onTtsWatchdogTimeout", mapOf())
       }
       // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN confirmation capture result.
       BensonForegroundService.onConfirmationResult = { confirmationId, verdict, transcript ->
@@ -61,6 +65,7 @@ class BensonForegroundServiceModule : Module() {
       BensonForegroundService.onWakeWordDetected = null
       BensonForegroundService.onWakePoke = null
       BensonForegroundService.onSttWatchdogTimeout = null
+      BensonForegroundService.onTtsWatchdogTimeout = null
       BensonForegroundService.onConfirmationResult = null
     }
 
@@ -154,6 +159,16 @@ class BensonForegroundServiceModule : Module() {
       BensonForegroundService.instance?.cancelSttSessionWatchdog(sessionId)
     }
 
+    // ROUND_TTS_WATCHDOG_NATIVE_1 — background-safe replacement for the JS setTimeout hard timer
+    // that used to be the only bound on app/index.tsx's TTS mic-ownership block. timeoutMs mirrors
+    // TTS_MAX_BLOCK_MS there (passed in from JS, not duplicated here).
+    Function("armTtsWatchdog") { timeoutMs: Double ->
+      BensonForegroundService.instance?.armTtsWatchdog(timeoutMs.toLong())
+    }
+    Function("cancelTtsWatchdog") {
+      BensonForegroundService.instance?.cancelTtsWatchdog()
+    }
+
     // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN capture (AudioRecord+VAD+cloud
     // STT), survives BENSON being backgrounded (e.g. WhatsApp foreground) and JS timers suspended.
     Function("startConfirmationListening") { confirmationId: String, timeoutMs: Double ->
@@ -221,6 +236,18 @@ class BensonForegroundServiceModule : Module() {
     Function("isNativeCloudWakeConfigured") {
       val context = appContext.reactContext ?: return@Function false
       NativeCloudWake.available(context)
+    }
+
+    // DEV_STT_DEEPGRAM_1 (2026-09-16) — SEPARATE credential push for the native confirmation
+    // listener (NativeConfirmationListener.kt), own SharedPreferences key
+    // (KEY_CONFIRM_DEEPGRAM_API_KEY), never NativeCloudWake's KEY_API_KEY above — a Deepgram key
+    // here must never redirect the passive wake loop, which stays on Groq. Same
+    // runtime-push-only idiom as setNativeWakeCredentials. Never logged.
+    Function("setConfirmationSttCredentials") { apiKey: String ->
+      val context = appContext.reactContext ?: return@Function
+      context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
+        .putString(NativeConfirmationListener.KEY_CONFIRM_DEEPGRAM_API_KEY, apiKey)
+        .apply()
     }
 
     AsyncFunction("pauseHotword") { promise: Promise ->

@@ -80,6 +80,19 @@ export function addSttWatchdogTimeoutListener(listener) {
   return emitter.addListener('onSttWatchdogTimeout', (ev) => listener(ev?.sessionId ?? ''));
 }
 
+// ROUND_TTS_WATCHDOG_NATIVE_1 — same shape as the STT watchdog above, for the TTS mic-ownership
+// hard timer (app/index.tsx's beginTtsBlock()/endTtsBlock()), which otherwise only has plain
+// JS setTimeout bounds that go inert while BENSON is backgrounded.
+export function armTtsWatchdog(timeoutMs) {
+  try { return NativeModule.armTtsWatchdog(timeoutMs); } catch { return undefined; }
+}
+export function cancelTtsWatchdog() {
+  try { return NativeModule.cancelTtsWatchdog(); } catch { return undefined; }
+}
+export function addTtsWatchdogTimeoutListener(listener) {
+  return emitter.addListener('onTtsWatchdogTimeout', () => listener());
+}
+
 // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN reply capture (AudioRecord+VAD+
 // cloud STT inside the foreground service), survives BENSON backgrounded + JS timers suspended.
 // verdict from native is diagnostic only; callers should re-classify the transcript themselves.
@@ -117,6 +130,12 @@ export function getWakeName() {
 // place the real secret is authored — this is a runtime push, not a second source of truth.
 export function setNativeWakeCredentials(apiKey, baseUrl, model) {
   try { return NativeModule.setNativeWakeCredentials(apiKey, baseUrl, model); } catch { return undefined; }
+}
+
+// DEV_STT_DEEPGRAM_1 — separate push, own SharedPreferences key, for the native confirmation
+// listener only (see NativeConfirmationListener.kt / BensonForegroundServiceModule.kt).
+export function setConfirmationSttCredentials(apiKey) {
+  try { return NativeModule.setConfirmationSttCredentials(apiKey); } catch { return undefined; }
 }
 
 export function isNativeCloudWakeConfigured() {

@@ -21,7 +21,9 @@ import {
   setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
   setPorcupineAccessKey, getPorcupineStatus, getActiveWakeEngine,
   nativeWakeSetOwner, isNativeWakeAvailable, setWakeName, setNativeWakeCredentials,
+  setConfirmationSttCredentials,
   armSttSessionWatchdog, cancelSttSessionWatchdog, addSttWatchdogTimeoutListener,
+  armTtsWatchdog, cancelTtsWatchdog, addTtsWatchdogTimeoutListener,
   startConfirmationListening, cancelConfirmationListening, addConfirmationResultListener,
   takePendingWakeCommand,
 } from 'benson-foreground-service';
@@ -322,6 +324,11 @@ export default function BensonApp() {
   // Round 2 — Groq key + STT nucleus selector, both surfaced in the one Settings modal.
   const [groqKey, setGroqKey]         = useState('');
   const [savedGroqMasked, setSavedGroqMasked] = useState('(none)');
+  // DEV_STT_DEEPGRAM_1 (2026-09-16) — development-only main/confirmation STT key while Groq's
+  // quota is exhausted (see memory project_groq_quota_blocker). Same secure-store/masked-field
+  // pattern as the Groq key above.
+  const [deepgramKey, setDeepgramKey] = useState('');
+  const [savedDeepgramMasked, setSavedDeepgramMasked] = useState('(none)');
   const [sttNucleusId, setSttNucleusId] = useState<'groq' | 'local'>('groq');
   const [groqTestStatus, setGroqTestStatus] = useState('');
   const [groqTesting, setGroqTesting] = useState(false);
@@ -441,8 +448,10 @@ export default function BensonApp() {
           setSavedGroqMasked(cfg?.apiKey ? maskApiKey(cfg.apiKey) : '(none)');
           const sel = await getSelectedEngineId('stt', 'groq');
           setSttNucleusId(sel === 'local' ? 'local' : 'groq');
+          const dgCfg = await getEngineConfig('stt', 'deepgram');
+          setSavedDeepgramMasked(dgCfg?.apiKey ? maskApiKey(dgCfg.apiKey) : '(none)');
         } catch {}
-        setGroqKey(''); setGroqTestStatus('');
+        setGroqKey(''); setGroqTestStatus(''); setDeepgramKey('');
       })();
     }
   }, [settingsOpen]);
@@ -1175,6 +1184,12 @@ export default function BensonApp() {
       setListening(false); listeningRef.current = false;
       setTimeout(() => { try { resumeListeningAfterUnblock(); } catch {} }, 600);
     });
+    // ROUND_TTS_WATCHDOG_NATIVE_1 — same idea as sttWatchdogSub above, for the TTS mic-ownership
+    // hard timer. Reuses the exact same recovery handleTtsHardTimeout() already runs for the JS
+    // timer — this is just a second, background-safe way to reach it.
+    const ttsWatchdogSub = addTtsWatchdogTimeoutListener(() => {
+      handleTtsHardTimeout('native_watchdog');
+    });
     // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO reply capture result. Entirely
     // survives BENSON being backgrounded (WhatsApp/etc. foreground) since the listening WINDOW
     // itself is timed natively, not by a JS timer. A stale result (confirmationId no longer the
@@ -1192,6 +1207,23 @@ export default function BensonApp() {
         // No reply heard (TIMEOUT/UNKNOWN with empty audio) — fall back to the existing generic
         // reprompt policy by resuming the ordinary hands-free loop, same as before this round.
         try { resumeListeningAfterUnblock(); } catch {}
+        return;
+      }
+      // ROUND_CONFIRM_SELF_ECHO_1 — last-resort content-based guard (AEC + the native settle
+      // window are the primary defense, see NativeConfirmationListener.kt): reuses the EXACT SAME,
+      // already-tuned looksLikeSelfEcho() the JS recognizer path already relies on, instead of a
+      // new weak overlap check. A rejected result must not reach handleIncomingText at all — that
+      // naturally preserves whatever is pending (pendingMediaSelection/pendingDisambiguation/
+      // pendingMissionTaskRef, none of which this file reaches into directly) since none of them
+      // get consumed unless handleIncomingText runs. Re-arms the same confirmation listener once,
+      // same shape as the original arm in endTtsBlock().
+      if (looksLikeSelfEcho(transcript)) {
+        logAudioDiag('CONFIRM_SELF_ECHO_REJECTED', `confirmationId=${confirmationId} text="${transcript.slice(0, 60)}"`);
+        const nextId = `confirm-${Date.now()}`;
+        pendingConfirmationIdRef.current = nextId;
+        try { setMicLevel(0.3, true); } catch {}
+        logAudioDiag('CONFIRM_LISTEN_ARM', `confirmationId=${nextId} timeoutMs=${CONFIRMATION_LISTEN_TIMEOUT_MS} source=self_echo_retry`);
+        try { startConfirmationListening(nextId, CONFIRMATION_LISTEN_TIMEOUT_MS); } catch {}
         return;
       }
       // Reuses the EXACT SAME path a normal STT result takes (classifyConfirmation, pendingMissionTaskRef
@@ -1734,8 +1766,9 @@ export default function BensonApp() {
       if (execWatchdogRef.current) { clearTimeout(execWatchdogRef.current); execWatchdogRef.current = null; }
       if (bandHideTimerRef.current) { clearTimeout(bandHideTimerRef.current); bandHideTimerRef.current = null; }
       if (sttSessionActiveRef.current) { try { cancelSttSessionWatchdog(sttSessionActiveRef.current); } catch {} }
+      try { cancelTtsWatchdog(); } catch {}
       resultSub.remove(); errorSub.remove(); endSub.remove(); volumeSub.remove();
-      speechStartSub.remove(); speechEndSub.remove(); sttWatchdogSub.remove(); confirmResultSub.remove();
+      speechStartSub.remove(); speechEndSub.remove(); sttWatchdogSub.remove(); ttsWatchdogSub.remove(); confirmResultSub.remove();
       if (pendingConfirmationIdRef.current) { try { cancelConfirmationListening(pendingConfirmationIdRef.current); } catch {} }
       stopReqSub.remove(); listenReqSub.remove(); bubbleTapSub.remove();
       wakeWordSub.remove(); wakePokeSub.remove(); appStateSub.remove();
@@ -2056,6 +2089,12 @@ export default function BensonApp() {
         } catch {}
       }
     }).catch(() => {});
+    // DEV_STT_DEEPGRAM_1 — same runtime-push idiom, own SharedPreferences key (see saveApiKeys),
+    // so the native confirmation listener has its Deepgram key on app launch too, not only after
+    // a Settings save.
+    getEngineConfig('stt', 'deepgram').then((cfg) => {
+      if (cfg?.apiKey) { try { setConfirmationSttCredentials(cfg.apiKey); } catch {} }
+    }).catch(() => {});
     if (cm) { const c = cm === 'true'; setCarMode(c); carModeRef.current = c; }
     if (cda) { setCarDeviceAddress(cda); carDeviceAddressRef.current = cda; }
     if (cdn) { setCarDeviceName(cdn); }
@@ -2321,14 +2360,34 @@ export default function BensonApp() {
     ttsBlockStartedAtRef.current = Date.now();
     if (ttsHardTimerRef.current) clearTimeout(ttsHardTimerRef.current);
     if (C1_TTS_WATCHDOG && Number.isFinite(TTS_MAX_BLOCK_MS)) {
-      ttsHardTimerRef.current = setTimeout(() => {
-        ttsHardTimerRef.current = null;
-        const elapsedMs = ttsBlockStartedAtRef.current ? Date.now() - ttsBlockStartedAtRef.current : TTS_MAX_BLOCK_MS;
-        logAudioDiag('TTS_WATCHDOG_FIRED', `forcedRelease=true elapsedMs=${elapsedMs}`);
-        endTtsBlock('watchdog');
-        resumeListeningAfterUnblock();
-      }, TTS_MAX_BLOCK_MS);
+      ttsHardTimerRef.current = setTimeout(() => handleTtsHardTimeout('js_timer'), TTS_MAX_BLOCK_MS);
+      // ROUND_TTS_WATCHDOG_NATIVE_1 — confirmed live 2026-09-15: this JS setTimeout (and
+      // speakOnDevice()'s own per-call one) goes inert while BENSON is backgrounded — a TTS bind
+      // failure left micOwner=TTS stranded for the full 45s generic OwnerWatchdog instead of
+      // TTS_MAX_BLOCK_MS. This native, Handler-based watchdog mirrors armSttSessionWatchdog and
+      // survives backgrounding; same timeout, not a duplicate/new value. handleTtsHardTimeout()
+      // is idempotent, so whichever of the JS timer or this native one fires first wins.
+      try { armTtsWatchdog(TTS_MAX_BLOCK_MS); } catch {}
     }
+  }
+
+  // ROUND_TTS_WATCHDOG_NATIVE_1 — shared by both the JS hard timer above and the native watchdog
+  // event listener (set up alongside sttWatchdogSub): exact same recovery this codebase already
+  // trusts for a stuck TTS block, just reachable now even while backgrounded. `source` is log-only.
+  function handleTtsHardTimeout(source: 'js_timer' | 'native_watchdog') {
+    // Idempotency guard: whichever of the JS timer / native watchdog fires first does the
+    // recovery; the other is a no-op (same TTS block can only be legitimately ended once).
+    // Prevents a second resumeListeningAfterUnblock() from re-arming generic WAKE and stealing
+    // the mic back from a confirmation listener the first call may have just armed.
+    if (!speakingRef.current && !ttsHardTimerRef.current) {
+      logAudioDiag('TTS_WATCHDOG_FIRED', `forcedRelease=false alreadyHandled=true source=${source}`);
+      return;
+    }
+    if (ttsHardTimerRef.current) { clearTimeout(ttsHardTimerRef.current); ttsHardTimerRef.current = null; }
+    const elapsedMs = ttsBlockStartedAtRef.current ? Date.now() - ttsBlockStartedAtRef.current : TTS_MAX_BLOCK_MS;
+    logAudioDiag('TTS_WATCHDOG_FIRED', `forcedRelease=true elapsedMs=${elapsedMs} source=${source}`);
+    endTtsBlock('watchdog');
+    resumeListeningAfterUnblock();
   }
 
   // C1 TASK 1 — called on EVERY TTS exit path. `reason` ∈ success|error|interrupt|background|stop
@@ -2338,6 +2397,9 @@ export default function BensonApp() {
   function endTtsBlock(reason: TtsEndReason = 'success') {
     const wasBlocking = speakingRef.current || !!ttsHardTimerRef.current || !!ttsBlockStartedAtRef.current;
     if (ttsHardTimerRef.current) { clearTimeout(ttsHardTimerRef.current); ttsHardTimerRef.current = null; }
+    // ROUND_TTS_WATCHDOG_NATIVE_1 — every exit path from a TTS block cancels the native watchdog
+    // too, not just the JS timer, so it never fires after a normal success/error/interrupt end.
+    try { cancelTtsWatchdog(); } catch {}
     speakingRef.current = false; setSpeaking(false);
     ttsEndedAtRef.current = Date.now();
     micResumeAtRef.current = ttsEndedAtRef.current + TTS_TAIL_MS;
@@ -2737,6 +2799,18 @@ export default function BensonApp() {
         // while the app is open takes effect on the native cloud wake loop's very next cycle,
         // without needing an app restart.
         try { setNativeWakeCredentials(grq, GROQ_STT_DEFAULT_BASE_URL, GROQ_STT_DEFAULT_MODEL); } catch {}
+      } catch {}
+    }
+    // DEV_STT_DEEPGRAM_1 — a SEPARATE credential push (own SharedPreferences key) from the Groq
+    // one above, so the native confirmation listener switching to Deepgram never touches the
+    // passive wake loop's (NativeCloudWake.kt) Groq credentials.
+    const dg = deepgramKey.trim();
+    if (dg) {
+      try {
+        await saveEngineConfig('stt', 'deepgram', { apiKey: dg });
+        setSavedDeepgramMasked(maskApiKey(dg));
+        setDeepgramKey('');
+        try { setConfirmationSttCredentials(dg); } catch {}
       } catch {}
     }
     addMessage('benson', `API keys updated, ${getAddress()}.`);
@@ -4962,6 +5036,11 @@ export default function BensonApp() {
                   blanks after save; the masked hint shows what is currently stored. */}
               <TextInput style={[s.input, { marginTop: 10 }]} placeholder={`Groq API key (gsk_...) — transcriere${savedGroqMasked !== '(none)' ? `  · salvat: ${savedGroqMasked}` : ''}`} placeholderTextColor={MUTED}
                 value={groqKey} onChangeText={setGroqKey} secureTextEntry autoCapitalize="none" autoCorrect={false} />
+              {/* DEV_STT_DEEPGRAM_1 (2026-09-16) — development-only STT while Groq's quota is
+                  exhausted; powers BOTH main-command and confirmation transcription. Groq key
+                  above stays the production credential, untouched. */}
+              <TextInput style={[s.input, { marginTop: 10 }]} placeholder={`Deepgram key (dev STT)${savedDeepgramMasked !== '(none)' ? `  · salvat: ${savedDeepgramMasked}` : ''}`} placeholderTextColor={MUTED}
+                value={deepgramKey} onChangeText={setDeepgramKey} secureTextEntry autoCapitalize="none" autoCorrect={false} />
               <TouchableOpacity style={[s.btn, { marginTop: 10 }]} onPress={() => { tap(); saveApiKeys(); }}
                 accessibilityLabel="Save API keys" accessibilityRole="button">
                 <Text style={s.btnText}>SAVE KEYS</Text>
