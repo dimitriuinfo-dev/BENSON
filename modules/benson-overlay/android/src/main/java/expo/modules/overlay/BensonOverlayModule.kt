@@ -10,16 +10,21 @@ class BensonOverlayModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("BensonOverlay")
 
-    Events("onBubbleTapped")
+    Events("onBubbleTapped", "onBubbleCameraTapped")
 
     OnCreate {
       BensonBubbleService.onBubbleTapped = {
         sendEvent("onBubbleTapped")
       }
+      // Photo/video capture button on the status card (2026-09-18).
+      BensonBubbleService.onBubbleCameraTapped = {
+        sendEvent("onBubbleCameraTapped")
+      }
     }
 
     OnDestroy {
       BensonBubbleService.onBubbleTapped = null
+      BensonBubbleService.onBubbleCameraTapped = null
     }
 
     Function("hasOverlayPermission") {

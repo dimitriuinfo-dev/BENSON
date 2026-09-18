@@ -73,7 +73,13 @@ function TopControls({ silenced, onToggleSilence }: {
 // status bar/notch on any phone, not a fixed guess. Keeps listening (wake word + commands still
 // work) but makes no sound; distinct from "fully off", which stops listening entirely and now
 // lives in Settings.
-function MuteButton({ muted, onToggleMute, silenced }: { muted: boolean; onToggleMute: () => void; silenced: boolean }) {
+function MuteButton({
+  muted, onToggleMute, silenced, captureMode, capturing, onOpenCamera, onOpenGallery, onToggleCaptureMode,
+}: {
+  muted: boolean; onToggleMute: () => void; silenced: boolean;
+  captureMode: 'photo' | 'video'; capturing: boolean;
+  onOpenCamera: () => void; onOpenGallery: () => void; onToggleCaptureMode: () => void;
+}) {
   const insets = useSafeAreaInsets();
   // Hidden while fully silenced — user-directed 2026-08-23: this button's top-left position
   // physically overlapped the "BENSON E OPRIT" banner (same corner, same zIndex, painted after it),
@@ -84,6 +90,35 @@ function MuteButton({ muted, onToggleMute, silenced }: { muted: boolean; onToggl
   if (silenced) return null;
   return (
     <View style={[s.muteButtonCorner, { top: insets.top + 8 }]}>
+      {/* Photo/video capture + AI vision (product-owner-directed 2026-09-18) — camera button
+          (mode set by the FOTO/VIDEO pill) + "+" to pick an existing photo/video, same row as
+          mute per the explicit layout request ("lîngă butonul de stumm"). */}
+      <TouchableOpacity
+        style={s.captureModePill}
+        hitSlop={10}
+        onPress={() => { tap(); onToggleCaptureMode(); }}
+        accessibilityLabel={captureMode === 'photo' ? 'Comută pe filmare video' : 'Comută pe fotografie'}
+        accessibilityRole="button">
+        <Text style={s.captureModePillText}>{captureMode === 'photo' ? 'FOTO' : 'VIDEO'}</Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={[s.muteButton, capturing && s.muteButtonActive]}
+        hitSlop={14}
+        disabled={capturing}
+        onPress={onOpenCamera}
+        accessibilityLabel={captureMode === 'photo' ? 'Fă o poză pentru Benson' : 'Filmează pentru Benson'}
+        accessibilityRole="button">
+        <Ionicons name={captureMode === 'photo' ? 'camera-outline' : 'videocam-outline'} size={22}
+          color={capturing ? '#2E3742' : GOLD} />
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={s.muteButton}
+        hitSlop={14}
+        disabled={capturing}
+        onPress={onOpenGallery}
+        accessibilityLabel="Încarcă o poză sau un videoclip pentru Benson" accessibilityRole="button">
+        <Ionicons name="add-circle-outline" size={24} color={GOLD} />
+      </TouchableOpacity>
       <TouchableOpacity
         style={[s.muteButton, muted && s.muteButtonActive]}
         hitSlop={14}
@@ -314,6 +349,7 @@ function Dashboard({ listening, micVolume }: { listening: boolean; micVolume: nu
 export function BensonMainScreen({
   listening, micVolume, loading, speaking, showQuickContacts,
   lastReply, quickContacts, isInPip, silenced, muted,
+  captureMode, capturing, onOpenCamera, onOpenGallery, onToggleCaptureMode,
   onToggleConvMode, onOpenSettings, onToggleQuickContacts,
   onQuickContactsChange, onSubmitText, onToggleSilence, onToggleMute,
 }: {
@@ -330,6 +366,11 @@ export function BensonMainScreen({
   isInPip?: boolean;
   silenced: boolean;
   muted: boolean;
+  captureMode: 'photo' | 'video';
+  capturing: boolean;
+  onOpenCamera: () => void;
+  onOpenGallery: () => void;
+  onToggleCaptureMode: () => void;
   onToggleConvMode: () => void;
   onOpenSettings: () => void;
   onToggleQuickContacts: () => void;
@@ -347,7 +388,9 @@ export function BensonMainScreen({
     <View style={s.root}>
       <TopControls silenced={silenced} onToggleSilence={onToggleSilence} />
 
-      <MuteButton muted={muted} onToggleMute={onToggleMute} silenced={silenced} />
+      <MuteButton muted={muted} onToggleMute={onToggleMute} silenced={silenced}
+        captureMode={captureMode} capturing={capturing}
+        onOpenCamera={onOpenCamera} onOpenGallery={onOpenGallery} onToggleCaptureMode={onToggleCaptureMode} />
 
       <SettingsGear onOpenSettings={onOpenSettings} />
 
@@ -386,12 +429,19 @@ const s = StyleSheet.create({
   // Mute-only icon button — alone, near the bottom, below the listening indicator. Icon-only by
   // design (a megaphone the user just taps), no pill/label.
   // Top-left, floating — `top` set inline from real safe-area insets (see MuteButton).
-  muteButtonCorner: { position: 'absolute', left: 16, zIndex: 20 },
+  // Now a row (mode pill · camera · gallery · mute), not a single button — the photo/video
+  // capture buttons sit "next to the mute button" per the explicit layout request.
+  muteButtonCorner: { position: 'absolute', left: 16, zIndex: 20, flexDirection: 'row', alignItems: 'center', gap: 8 },
   muteButton: {
     width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, borderColor: LINE, backgroundColor: BG_RAISED,
   },
   muteButtonActive: { backgroundColor: GOLD, borderColor: GOLD },
+  captureModePill: {
+    height: 28, paddingHorizontal: 10, borderRadius: 14, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: LINE, backgroundColor: BG_RAISED,
+  },
+  captureModePillText: { color: GOLD, fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
 
   // Gear sits above the medallion, centered — replaces the old bottom SYSTEM box.
   gearRow: { alignItems: 'center', paddingTop: 48, paddingHorizontal: 20 },

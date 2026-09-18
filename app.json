@@ -56,6 +56,14 @@
           ]
         }
       ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "BENSON needs access to your photos so you can show it a picture.",
+          "cameraPermission": "BENSON needs your camera to take a photo or video for you.",
+          "microphonePermission": "BENSON needs your microphone to record video with sound."
+        }
+      ],
       "expo-video",
       "./plugins/withReleaseSigning.js",
       "./plugins/withBundledAssets.js",

@@ -27,6 +27,12 @@ export function addBubbleTappedListener(listener) {
   return emitter.addListener('onBubbleTapped', listener);
 }
 
+// Fires when the user taps the camera icon on the status card (2026-09-18) — open the
+// camera/gallery flow the same way the main-screen buttons do.
+export function addBubbleCameraTappedListener(listener) {
+  return emitter.addListener('onBubbleCameraTapped', listener);
+}
+
 // Wake-word reveal — two counter-rotating rings, centered, semi-transparent, drawn natively
 // (no second React Native surface). Call while the foreground service is already running.
 export function showWakeRing() {

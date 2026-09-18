@@ -30,7 +30,7 @@ import {
 } from 'benson-foreground-service';
 import {
   hasOverlayPermission, requestOverlayPermission, showBubble, hideBubble,
-  addBubbleTappedListener, hideWakeRing, updateBubbleStatus, setBubbleMotion, playWakeSound,
+  addBubbleTappedListener, addBubbleCameraTappedListener, hideWakeRing, updateBubbleStatus, setBubbleMotion, playWakeSound,
   setMicLevel,
 } from 'benson-overlay';
 import { isServiceEnabled as isAccessibilityEnabled, getConnectionState as getA11yConnectionState, openAccessibilitySettings, openRecents, whatsAppCallMicHoldActive, clearWhatsAppCallMicHold, consumeCallEndedReturnPending, getWhatsAppCallEndedSignalAt } from 'benson-accessibility';
@@ -95,6 +95,7 @@ import {
   startContextWatch, BORDER_CROSSINGS, checkSevereWeather,
   type ContextWatchHandle, type RoadType, type BorderCrossing,
 } from '../lib/contextEngine';
+import { capture, pickFromLibrary, analyzeCapturedMedia, type CaptureMode, type CaptureResult } from '../lib/agents/visionCapture';
 import { BensonMainScreen } from '../components/BensonMainScreen';
 import { AppPermissionsModal } from '../components/onboarding/AppPermissionsModal';
 import { SetupWizard } from '../components/onboarding/SetupWizard';
@@ -430,6 +431,11 @@ export default function BensonApp() {
   // enforcement is entirely native (BensonForegroundService.kt), this only drives the Settings
   // Switch.
   const [hibernationEnabled, setHibernationEnabledState] = useState(true);
+
+  // Photo/video capture + AI vision (product-owner-directed 2026-09-18) — camera button (photo
+  // by default, toggled to video) + "+" gallery button, top bar next to the mute button.
+  const [captureMode, setCaptureMode] = useState<CaptureMode>('photo');
+  const [capturing, setCapturing] = useState(false);
 
   // Picovoice Porcupine — Settings UI (product-owner-directed 2026-08-02). The AccessKey field is
   // write-only (no native getter reads it back — same idiom as the API key fields above), so it
@@ -1457,6 +1463,13 @@ export default function BensonApp() {
       }
     });
 
+    // Camera icon on the overlay bubble's status card (2026-09-18) — same flow as the
+    // main-screen camera button: bring BENSON to front, then open the camera in the current mode.
+    const bubbleCameraTapSub = addBubbleCameraTappedListener(() => {
+      bringToForeground();
+      handleOpenCamera();
+    });
+
     // The native "Benson" hotword loop (inside BensonForegroundService) heard the word — it
     // already paused itself, woke the screen, brought the app to front, and shown the wake-ring
     // overlay. Pause is a no-op safety net (already paused). If the user said the command in the
@@ -1800,7 +1813,7 @@ export default function BensonApp() {
       resultSub.remove(); errorSub.remove(); endSub.remove(); volumeSub.remove();
       speechStartSub.remove(); speechEndSub.remove(); sttWatchdogSub.remove(); ttsWatchdogSub.remove(); confirmResultSub.remove();
       if (pendingConfirmationIdRef.current) { try { cancelConfirmationListening(pendingConfirmationIdRef.current); } catch {} }
-      stopReqSub.remove(); listenReqSub.remove(); bubbleTapSub.remove();
+      stopReqSub.remove(); listenReqSub.remove(); bubbleTapSub.remove(); bubbleCameraTapSub.remove();
       wakeWordSub.remove(); wakePokeSub.remove(); appStateSub.remove();
     };
   }, []);
@@ -3655,6 +3668,44 @@ export default function BensonApp() {
     }
   }
 
+  // ── Photo/video capture + AI vision (product-owner-directed 2026-09-18) ──────────────────
+  // A tap on the camera/gallery button is a direct user touch — noteUserAction() means the
+  // spoken result isn't suppressed by E1-0, same reasoning as the bubble-tap listener below.
+  async function handleCapturedMedia(result: CaptureResult | null) {
+    if (!result) { setCapturing(false); return; }
+    noteUserAction();
+    addMessage('user', result.isVideo ? '[video]' : '[poză]');
+    const reply = await analyzeCapturedMedia({
+      uri: result.uri, isVideo: result.isVideo, mimeType: result.mimeType,
+      apiKey: apiKeyRef.current, lang: langRef.current,
+    }).catch(() => null);
+    setCapturing(false);
+    const text = reply || `Nu am putut analiza ${result.isVideo ? 'videoclipul' : 'poza'} acum, ${getAddress()}. Verifică cheia Anthropic din Settings.`;
+    addMessage('benson', text);
+    speakText(text);
+  }
+
+  async function handleOpenCamera() {
+    if (capturing) return;
+    tap();
+    setCapturing(true);
+    const result = await capture(captureMode).catch(() => null);
+    await handleCapturedMedia(result);
+  }
+
+  async function handleOpenGallery() {
+    if (capturing) return;
+    tap();
+    setCapturing(true);
+    const result = await pickFromLibrary().catch(() => null);
+    await handleCapturedMedia(result);
+  }
+
+  function toggleCaptureMode() {
+    tap();
+    setCaptureMode(m => (m === 'photo' ? 'video' : 'photo'));
+  }
+
   // ── Background Mode: foreground service control ──────────────────────────
   async function startBackgroundService() {
     try {
@@ -4950,6 +5001,11 @@ export default function BensonApp() {
         isInPip={isInPip}
         silenced={silenced}
         muted={muted}
+        captureMode={captureMode}
+        capturing={capturing}
+        onOpenCamera={handleOpenCamera}
+        onOpenGallery={handleOpenGallery}
+        onToggleCaptureMode={toggleCaptureMode}
         onToggleConvMode={() => { tap(); handleMedallionTap(); }}
         onOpenSettings={() => { tap(); openSettings(); }}
         onToggleQuickContacts={() => { tap(); setShowQuickContacts(v => !v); }}

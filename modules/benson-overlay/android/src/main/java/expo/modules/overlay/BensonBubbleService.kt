@@ -429,6 +429,20 @@ class BensonBubbleService : Service() {
           }
           micLevelBar = this
         })
+        // Photo/video capture button — plain emoji glyph (no icon-drawable dependency needed in
+        // this native module), its own click listener, independent of the card's drag detection.
+        addView(TextView(this@BensonBubbleService).apply {
+          text = "📷"
+          setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+          isClickable = true
+          setPadding((6 * density).toInt(), (6 * density).toInt(), (6 * density).toInt(), 0)
+          contentDescription = "Fă o poză pentru Benson"
+          setOnClickListener { onBubbleCameraTapped?.invoke() }
+          layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = (6 * density).toInt()
+            gravity = Gravity.END
+          }
+        })
       }
 
       val overlayType =
@@ -696,6 +710,13 @@ class BensonBubbleService : Service() {
     // Intent for every real-RMS tick (~10/sec while listening).
     @Volatile var instance: BensonBubbleService? = null
     var onBubbleTapped: (() -> Unit)? = null
+    // Photo/video capture (product-owner-directed 2026-09-18) — a small camera icon on the
+    // status card (the "written band"/"bula de text"), a plain clickable child View with its own
+    // OnClickListener — deliberately NOT routed through the card's own setOnTouchListener below
+    // (that one is drag-only by design, see its "no onBubbleTapped-equivalent here" comment); a
+    // child view's click is dispatched before the parent ever sees the touch, so this doesn't
+    // touch that drag-detection code at all.
+    var onBubbleCameraTapped: (() -> Unit)? = null
     const val ACTION_SHOW_WAKE_RING = "expo.modules.overlay.ACTION_SHOW_WAKE_RING"
     const val ACTION_HIDE_WAKE_RING = "expo.modules.overlay.ACTION_HIDE_WAKE_RING"
     // E2-2

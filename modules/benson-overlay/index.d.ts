@@ -5,6 +5,10 @@ export declare function hideBubble(): void;
 export declare function addBubbleTappedListener(
   listener: () => void
 ): { remove: () => void };
+/** Camera icon on the status card (2026-09-18) — same effect as the main-screen camera button. */
+export declare function addBubbleCameraTappedListener(
+  listener: () => void
+): { remove: () => void };
 export declare function showWakeRing(): void;
 export declare function hideWakeRing(): void;
 export declare function updateBubbleStatus(

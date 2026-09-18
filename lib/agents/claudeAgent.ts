@@ -185,6 +185,45 @@ export async function askClaude(params: {
   return fullText || conversationFallbackLine(params.lang, params.address);
 }
 
+// Vision analysis — a photo/video frame captured or picked via the camera/gallery buttons
+// (product-owner-directed 2026-09-18: "photo button ... send it to Benson's AI to describe
+// it/answer questions about it"). Deliberately a separate, self-contained function rather than
+// widening AnthropicMsg (typed content:string, used everywhere in the normal conversational
+// path) or routing through askClaude/askClaudeWithTools — a single one-shot content-block
+// message, isolated from every other call site.
+export async function analyzeImageWithClaude(params: {
+  apiKey: string;
+  base64Data: string;
+  mediaType: string; // 'image/jpeg' | 'image/png' | 'image/webp' | ...
+  question: string;
+  lang: string;
+  model?: string;
+}): Promise<string> {
+  const model = params.model ?? SONNET_MODEL;
+  const headers = anthropicHeaders(params.apiKey);
+  const system = params.lang.toLowerCase().startsWith('ro')
+    ? 'Ești BENSON, un majordom vocal. Descrie sau răspunde despre imaginea primită, concis, în română, pentru cineva care ascultă răspunsul, nu îl citește.'
+    : 'You are BENSON, a voice butler. Describe or answer about the received image, concisely, for someone listening to the answer, not reading it.';
+  const res = await fetchWithTimeout(ANTHROPIC_URL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model,
+      max_tokens: 600,
+      system,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: params.mediaType, data: params.base64Data } },
+          { type: 'text', text: params.question },
+        ],
+      }],
+    }),
+  }, REQUEST_TIMEOUT_MS);
+  const data = await res.json();
+  return data.content?.[0]?.text || conversationFallbackLine(params.lang);
+}
+
 // Raised from 4 → 10 so the agent can operate a real app end-to-end as a phone operator:
 // a genuine task (open app → readScreen → tapOnScreen → readScreen → enterText → tapOnScreen …)
 // takes several readScreen/act cycles. 10 is a safe ceiling — the loop still stops the moment the
