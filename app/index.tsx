@@ -538,8 +538,6 @@ export default function BensonApp() {
   // Context Engine
   const [vignetteExpiry, setVignetteExpiry] = useState<Record<string, string>>({});
 
-  // Animation
-  const pulseAnim  = useRef(new Animated.Value(1)).current;
 
   // ── Refs for stale-closure safety ──────────────────────────────────────────
   const langRef         = useRef('ro-RO');
@@ -2003,17 +2001,6 @@ export default function BensonApp() {
     for (const v of voices) (groups[v.language] ??= []).push(v);
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   }, [voices]);
-
-  // ── Pulse animation while the B seal is actively listening ────────────────
-  useEffect(() => {
-    if (!listening) return;
-    const anim = Animated.loop(Animated.sequence([
-      Animated.timing(pulseAnim, { toValue: 1.13, duration: 500, useNativeDriver: true }),
-      Animated.timing(pulseAnim, { toValue: 1,    duration: 500, useNativeDriver: true }),
-    ]));
-    anim.start();
-    return () => { anim.stop(); pulseAnim.setValue(1); };
-  }, [listening]);
 
   // ── init ─────────────────────────────────────────────────────────────────
   async function init() {
@@ -4959,30 +4946,12 @@ export default function BensonApp() {
     </View>
   );
 
-  // ── Render: Car Mode — big-button, hands-free screen ──────────────────────
-  if (carMode) {
-    const carStatusText = listening ? 'LISTENING...' : loading ? 'THINKING...' : convMode ? 'CONVERSATION ON' : 'TAP TO START';
-    return (
-      <View style={s.carContainer}>
-        <TouchableOpacity style={s.carExit} hitSlop={12} onPress={() => { tap(); toggleCarMode(false); }}
-          accessibilityLabel="Exit car mode" accessibilityRole="button">
-          <Text style={s.carExitTxt}>✕ EXIT CAR MODE</Text>
-        </TouchableOpacity>
-        <View style={s.carCenter}>
-          <Animated.View style={{ transform: [{ scale: convMode ? pulseAnim : 1 }] }}>
-            <TouchableOpacity style={[s.carBigBtn, convMode && s.carBigBtnActive]}
-              onPress={() => { tap(); toggleConvMode(); }} activeOpacity={0.8}
-              accessibilityLabel="Conversation mode" accessibilityRole="button"
-              accessibilityState={{ selected: convMode }}>
-              <Text style={s.carBigIcon}>{listening ? '🎙' : loading ? '···' : convMode ? '◉' : '◎'}</Text>
-            </TouchableOpacity>
-          </Animated.View>
-          <Text style={s.carStatus}>{carStatusText}</Text>
-          {lastReply !== '' && <Text style={s.carLastReply} numberOfLines={4}>{lastReply}</Text>}
-        </View>
-      </View>
-    );
-  }
+  // Car Mode's big-button takeover screen was removed (product-owner-directed 2026-09-18) — the
+  // underlying feature (auto-enable Conversation Mode + Background Listening, start context
+  // tracking for road-type/border/break reminders — see toggleCarMode()) is unchanged and still
+  // works identically whether triggered by the Settings switch, Auto Car Mode detection, or the
+  // "startCarMode" voice tool; the phone now simply stays on the normal chat screen instead of
+  // switching to a separate full-screen UI while it's active.
 
   // ── Render: chat screen ────────────────────────────────────────────────────
   return (
@@ -5410,7 +5379,7 @@ export default function BensonApp() {
                 trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
                 accessibilityLabel="Car mode" accessibilityRole="switch" />
               <Text style={s.factLine}>
-                Big-button, hands-free screen for driving. Turns on Conversation Mode and Background Listening automatically.
+                Turns on Conversation Mode and Background Listening automatically for driving — no separate screen anymore.
               </Text>
 
               {/* Auto Car Mode detection */}
@@ -5733,13 +5702,4 @@ const s = StyleSheet.create({
   factLine:      { color: MUTED, fontSize: 12, marginBottom: 3, paddingLeft: 4 },
   versionTag:    { color: MUTED, fontSize: 10, textAlign: 'center', marginTop: 24, marginBottom: 8, opacity: 0.5 },
 
-  carContainer:  { flex: 1, backgroundColor: NAVY },
-  carExit:       { alignSelf: 'center', marginTop: 56, marginBottom: 12, borderWidth: 1, borderColor: MUTED, paddingVertical: 10, paddingHorizontal: 20 },
-  carExitTxt:    { color: MUTED, fontSize: 13, letterSpacing: 2 },
-  carCenter:     { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  carBigBtn:     { width: 220, height: 220, borderRadius: 110, borderWidth: 3, borderColor: MUTED, backgroundColor: PANEL, alignItems: 'center', justifyContent: 'center' },
-  carBigBtnActive: { borderColor: GOLD, backgroundColor: 'rgba(201,168,76,0.12)' },
-  carBigIcon:    { fontSize: 84 },
-  carStatus:     { color: GOLD, fontSize: 22, letterSpacing: 3, marginTop: 32, fontWeight: '700' },
-  carLastReply:  { color: '#E8E8E8', fontSize: 16, textAlign: 'center', marginTop: 24, lineHeight: 24, paddingHorizontal: 12 },
 });
