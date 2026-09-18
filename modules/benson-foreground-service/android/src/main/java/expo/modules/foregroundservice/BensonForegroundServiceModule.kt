@@ -358,9 +358,11 @@ class BensonForegroundServiceModule : Module() {
     }
 
     // Battery-fix hibernation kill switch (product-owner-directed 2026-09-18) — same
-    // SharedPreferences idiom as setWakeWordEnabled above; default OFF (see HIBERNATION_ENABLED_DEFAULT
-    // in BensonForegroundService.kt) until proven on device. Enforcement lives entirely in
-    // BensonForegroundService's wakePokeTick/armNativeWake/startHotwordLoop.
+    // SharedPreferences idiom as setWakeWordEnabled above; default ON (matches
+    // HIBERNATION_ENABLED_DEFAULT in BensonForegroundService.kt — duplicated as a literal since
+    // that constant lives on a private nested object, same cross-file idiom already used for
+    // wake_word_enabled's own default). Enforcement lives entirely in BensonForegroundService's
+    // wakePokeTick/armNativeWake/startHotwordLoop.
     Function("setHibernationEnabled") { enabled: Boolean ->
       val context = appContext.reactContext ?: return@Function
       context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
@@ -368,9 +370,9 @@ class BensonForegroundServiceModule : Module() {
     }
 
     Function("isHibernationEnabled") {
-      val context = appContext.reactContext ?: return@Function false
+      val context = appContext.reactContext ?: return@Function true
       context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE)
-        .getBoolean("hibernation_enabled", false)
+        .getBoolean("hibernation_enabled", true)
     }
 
     // Live state (not the toggle) — true only while actually hibernating right now, for the

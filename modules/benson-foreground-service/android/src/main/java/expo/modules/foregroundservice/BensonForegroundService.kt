@@ -228,10 +228,13 @@ class BensonForegroundService : Service() {
   // running the whole time regardless. After IDLE_TIMEOUT_MS with the screen off and the phone
   // physically still, stop the wake engine entirely (checked on the existing 3 s wakePokeTick
   // heartbeat — no new timer) until the screen turns on, the phone moves, or a native OS alarm
-  // (Clock app) is about to ring. REVERSIBLE: default OFF via HIBERNATION_ENABLED_DEFAULT below
-  // (Settings-controlled, same kill-switch idiom as wake_word_enabled) until proven on device.
+  // (Clock app) is about to ring. REVERSIBLE: HIBERNATION_ENABLED_DEFAULT below (Settings-
+  // controlled, same kill-switch idiom as wake_word_enabled) flips it off entirely if needed.
+  // Default ON (product-owner-directed 2026-09-18, after the overnight battery-drain report) —
+  // every gate below still requires 2h of real screen-off + no-motion idle before anything
+  // changes, so this does not touch any currently-listening session.
   private object HibernationGate {
-    const val HIBERNATION_ENABLED_DEFAULT = false
+    const val HIBERNATION_ENABLED_DEFAULT = true
     const val IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000L
     const val ALARM_LOOKAHEAD_MS = 15 * 60 * 1000L
   }

@@ -425,10 +425,11 @@ export default function BensonApp() {
   // visual state at boot — the actual enforcement is entirely native.
   const [wakeWordEnabled, setWakeWordEnabledState] = useState(true);
 
-  // Battery-fix hibernation kill switch (product-owner-directed 2026-09-18) — default OFF until
-  // proven on device. Same restore/push idiom as wakeWordEnabled above; enforcement is entirely
-  // native (BensonForegroundService.kt), this only drives the Settings Switch.
-  const [hibernationEnabled, setHibernationEnabledState] = useState(false);
+  // Battery-fix hibernation kill switch (product-owner-directed 2026-09-18) — default ON, after
+  // the overnight battery-drain report. Same restore/push idiom as wakeWordEnabled above;
+  // enforcement is entirely native (BensonForegroundService.kt), this only drives the Settings
+  // Switch.
+  const [hibernationEnabled, setHibernationEnabledState] = useState(true);
 
   // Picovoice Porcupine — Settings UI (product-owner-directed 2026-08-02). The AccessKey field is
   // write-only (no native getter reads it back — same idiom as the API key fields above), so it
@@ -2086,8 +2087,9 @@ export default function BensonApp() {
     wakeNameRef.current = resolvedWakeName;
     try { setWakeName(resolvedWakeName); } catch {}
     // Hibernation kill switch — restore the visual toggle state and push it to native explicitly,
-    // same discipline as the wake-word kill switch above. Default OFF (hib === 'true' required).
-    const hibernationOn = hib === 'true';
+    // same discipline as the wake-word kill switch above. Default ON, same idiom as wakeWordOn
+    // (hib !== 'false' — only an explicit prior "false" turns it off; nothing stored yet ⇒ on).
+    const hibernationOn = hib !== 'false';
     setHibernationEnabledState(hibernationOn);
     try { setHibernationEnabled(hibernationOn); } catch {}
     // Push the already-saved Groq STT credentials down to the native cloud wake loop so it can
