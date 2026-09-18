@@ -9,6 +9,7 @@
 import { openDeepLink } from '../core/action-engine/androidActionExecutor';
 import type { ActionIntent, ActionRequest, ActionResult, Executor } from '../core/action-engine';
 import { successResult, notFoundResult, failedResult, unsupportedResult } from '../core/action-engine';
+import { geocodePlace, checkSevereWeather } from '../../lib/contextEngine';
 
 const LOG_TAG = '[NavigationExecutor]';
 
@@ -82,11 +83,34 @@ function resolvePreferredApp(intent: ActionIntent, parameters: Record<string, un
   return parameters.preferredApp === 'google_maps' ? 'google_maps' : 'waze';
 }
 
-async function openNavigationUrl(requestId: string, appLabel: string, url: string): Promise<ActionResult> {
+// Best-effort destination coordinates for the weather check only — never blocks or fails
+// navigation itself, which already opened via the app's own place-name resolution (queryText)
+// regardless of whether this succeeds.
+async function resolveWeatherCoords(dest: Destination): Promise<{ latitude: number; longitude: number } | null> {
+  if (hasCoordinates(dest)) return dest;
+  const text = queryText(dest);
+  if (!text) return null;
+  try { return await geocodePlace(text); } catch { return null; }
+}
+
+// Severe-weather warning for the destination (product-owner-directed 2026-09-18) — shares
+// checkSevereWeather with the hibernation danger-wake condition (lib/contextEngine.ts). Silent
+// (no note appended) if the lookup fails or nothing is severe — never a false alarm, never a
+// reason to delay or block the navigation that already started.
+async function weatherWarningSuffix(dest: Destination): Promise<string> {
+  const coords = await resolveWeatherCoords(dest);
+  if (!coords) return '';
+  const alert = await checkSevereWeather(coords.latitude, coords.longitude).catch(() => null);
+  if (!alert?.severe) return '';
+  return ` Atenție: ${alert.description} anunțată la destinație.`;
+}
+
+async function openNavigationUrl(requestId: string, appLabel: string, url: string, dest: Destination): Promise<ActionResult> {
   devLog('opening navigation URL', appLabel, url);
   const outcome = await openDeepLink(url);
   if (outcome.success) {
-    return successResult(requestId, `Pornesc navigația spre destinație cu ${appLabel}.`, {
+    const weatherNote = await weatherWarningSuffix(dest);
+    return successResult(requestId, `Pornesc navigația spre destinație cu ${appLabel}.${weatherNote}`, {
       appOpened: appLabel,
       data: { url },
     });
@@ -136,6 +160,6 @@ export const NavigationExecutor: Executor = {
 
     if (!url) return notFoundResult(request.id, 'Destination missing or unknown.');
 
-    return openNavigationUrl(request.id, appLabel, url);
+    return openNavigationUrl(request.id, appLabel, url, dest);
   },
 };

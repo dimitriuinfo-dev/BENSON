@@ -78,6 +78,48 @@ export async function fetchWeather(lat: number, lon: number): Promise<string | n
   return `${d.tempC}°C ${d.description}`;
 }
 
+export type SevereWeatherAlert = { severe: boolean; description: string };
+
+// WMO weather codes (Open-Meteo's `weather_code`) severe enough to warn about — thunderstorm,
+// heavy/violent rain, freezing rain, heavy snow. Shared by two callers (product-owner-directed
+// 2026-09-18): the navigation-destination warning below, and the hibernation danger-wake
+// condition — one check, not two separate implementations.
+const SEVERE_WEATHER_CODES = new Set([65, 66, 67, 75, 82, 86, 95, 96, 99]);
+const SEVERE_WIND_KMH = 60;
+
+function describeSevereWeatherCode(code: number): string {
+  if (code === 95 || code === 96 || code === 99) return 'furtună cu descărcări electrice';
+  if (code === 65 || code === 82) return 'ploaie torențială';
+  if (code === 75 || code === 86) return 'ninsoare abundentă';
+  if (code === 66 || code === 67) return 'ploaie înghețată';
+  return 'vreme severă';
+}
+
+// Free, no-key severe-weather check for one point (lat/lon) — same Open-Meteo endpoint as
+// fetchWeatherData, extended with weather_code + wind_speed_10m. Returns severe:false (not null)
+// when the lookup succeeded but nothing is severe, so a caller can tell "checked, all clear"
+// apart from "the check itself failed" (null).
+export async function checkSevereWeather(lat: number, lon: number): Promise<SevereWeatherAlert | null> {
+  try {
+    const res = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=weather_code,wind_speed_10m`
+    );
+    const data = await res.json();
+    const code: number | undefined = data.current?.weather_code;
+    const windKmh: number | undefined = data.current?.wind_speed_10m;
+    if (code === undefined) return null;
+    const severeCode = SEVERE_WEATHER_CODES.has(code);
+    const severeWind = typeof windKmh === 'number' && windKmh >= SEVERE_WIND_KMH;
+    if (!severeCode && !severeWind) return { severe: false, description: '' };
+    return {
+      severe: true,
+      description: severeCode ? describeSevereWeatherCode(code) : `vânt puternic (${Math.round(windKmh as number)} km/h)`,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // Free, no-key place search via Nominatim (OpenStreetMap) — no device permission needed,
 // unlike Location.geocodeAsync which is gated behind Android's location permission.
 // Usage policy: identify with a User-Agent, keep to on-demand single lookups (not bulk queries).
