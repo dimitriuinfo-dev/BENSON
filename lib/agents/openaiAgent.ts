@@ -3,7 +3,13 @@ import type { AnthropicMsg, Character, FamilyMember } from './types';
 import { buildLearnedContext } from './learningAgent';
 import { buildSystemPrompt } from './claudeAgent';
 import { AGENT_TOOLS, executeTool, type ToolContext } from './tools';
-import { LLM_PROXY_URL, SUPABASE_ANON_KEY } from '../supabaseConfig';
+import { OPENAI_URL, openaiHeaders } from '../llmConfig';
+import { fetchWithTimeout } from './fetchWithTimeout';
+import { conversationFallbackLine } from './fallbackLine';
+
+// See fetchWithTimeout.ts's doc comment — a plain fetch() with no timeout can hang forever,
+// silently freezing the conversation loop with no error and no fallback ever triggering.
+const REQUEST_TIMEOUT_MS = 20000;
 
 // Mirrors lib/agents/claudeAgent.ts's two entry points (askClaude, askClaudeWithTools) with the
 // identical onSentence streaming contract, so lib/agents/orchestrator.ts can branch on the
@@ -13,12 +19,9 @@ import { LLM_PROXY_URL, SUPABASE_ANON_KEY } from '../supabaseConfig';
 export const GPT4O_MODEL = 'gpt-4o';
 
 const SENTENCE_SPLIT = /(?<=[.!?…])\s+/;
-const MAX_TOOL_ITERATIONS = 4;
-
-const headers = {
-  'Content-Type': 'application/json',
-  'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-};
+// Raised 4 → 10 to match askClaudeWithTools: a real phone-operator task needs several
+// readScreen/act cycles. The loop still exits as soon as the model stops requesting tools.
+const MAX_TOOL_ITERATIONS = 10;
 
 function toOpenAITools() {
   return AGENT_TOOLS.map(t => ({
@@ -28,6 +31,7 @@ function toOpenAITools() {
 }
 
 export async function askOpenAI(params: {
+  apiKey: string;
   character: Character;
   address: string;
   lang: string;
@@ -41,6 +45,7 @@ export async function askOpenAI(params: {
   const family = params.family ?? [];
   const learnedContext = buildLearnedContext(params.messages, family.map(f => f.name));
   const model = params.model ?? GPT4O_MODEL;
+  const headers = openaiHeaders(params.apiKey);
   const system = buildSystemPrompt(
     params.character, params.address, params.lang, params.facts,
     learnedContext, family, params.drivingContext ?? '',
@@ -51,20 +56,26 @@ export async function askOpenAI(params: {
   ];
 
   if (!params.onSentence) {
-    const res = await fetch(LLM_PROXY_URL, {
+    const res = await fetch(OPENAI_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ provider: 'openai', model, max_tokens: 600, messages }),
+      body: JSON.stringify({ model, max_tokens: 600, messages }),
     });
+    // Confirmed live 2026-08-24: a failed request (429 quota/billing, 401 bad key, etc.) was
+    // silently swallowed here — no res.ok check, so `data.choices` was just undefined and this
+    // fell straight to the generic "I did not quite catch that" text on EVERY failure, with no
+    // way for the caller to tell a real error from a genuinely unclear utterance, and no way to
+    // fall back to another provider. Throwing lets orchestrator.ts's caller do that instead.
+    if (!res.ok) throw new Error(`OpenAI request failed: ${res.status}`);
     const data = await res.json();
-    return data.choices?.[0]?.message?.content || `I did not quite catch that, ${params.address}.`;
+    return data.choices?.[0]?.message?.content || conversationFallbackLine(params.lang, params.address);
   }
 
   // Streaming path — expo/fetch exposes a real ReadableStream body, same as claudeAgent.ts.
-  const res = await expoFetch(LLM_PROXY_URL, {
+  const res = await expoFetch(OPENAI_URL, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ provider: 'openai', model, max_tokens: 600, messages, stream: true }),
+    body: JSON.stringify({ model, max_tokens: 600, messages, stream: true }),
   });
   if (!res.ok || !res.body) {
     return askOpenAI({ ...params, onSentence: undefined });
@@ -106,10 +117,11 @@ export async function askOpenAI(params: {
 
   const tail = pending.trim();
   if (tail) params.onSentence(tail);
-  return fullText || `I did not quite catch that, ${params.address}.`;
+  return fullText || conversationFallbackLine(params.lang, params.address);
 }
 
 export async function askOpenAIWithTools(params: {
+  apiKey: string;
   character: Character;
   address: string;
   lang: string;
@@ -124,6 +136,7 @@ export async function askOpenAIWithTools(params: {
   const family = params.family ?? [];
   const learnedContext = buildLearnedContext(params.messages, family.map(f => f.name));
   const model = params.model ?? GPT4O_MODEL;
+  const headers = openaiHeaders(params.apiKey);
   const system = buildSystemPrompt(
     params.character, params.address, params.lang, params.facts,
     learnedContext, family, params.drivingContext ?? '', true,
@@ -139,17 +152,22 @@ export async function askOpenAIWithTools(params: {
   ];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    const res = await fetch(LLM_PROXY_URL, {
+    const res = await fetch(OPENAI_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ provider: 'openai', model, max_tokens: 600, messages, tools, tool_choice: 'auto' }),
+      body: JSON.stringify({ model, max_tokens: 600, messages, tools, tool_choice: 'auto' }),
     });
+    // See askOpenAI's identical check above — confirmed live this was the actual cause of every
+    // OpenAI-selected dialogue turn silently returning "I did not quite catch that" instead of a
+    // real answer, with a 429 (quota/billing) hidden underneath. Throwing here lets
+    // orchestrator.ts fall back to Claude instead of repeating the same dead-end reply forever.
+    if (!res.ok) throw new Error(`OpenAI request failed: ${res.status}`);
     const data = await res.json();
     const message = data.choices?.[0]?.message;
     const toolCalls: any[] = message?.tool_calls ?? [];
 
     if (toolCalls.length === 0) {
-      const text = message?.content || `I did not quite catch that, ${params.address}.`;
+      const text = message?.content || conversationFallbackLine(params.lang, params.address);
       if (params.onSentence) {
         for (const sentence of text.split(SENTENCE_SPLIT)) {
           if (sentence.trim()) params.onSentence(sentence.trim());
@@ -180,5 +198,5 @@ export async function askOpenAIWithTools(params: {
     }
   }
 
-  return `I'm having trouble completing that, ${params.address}.`;
+  return conversationFallbackLine(params.lang, params.address);
 }

@@ -60,10 +60,19 @@ function buildTaskForGoal(goal: Goal): MissionTask {
         );
       }
       if (goal.entities.contact) {
+        // ROUND_WA_GOVERNANCE_ROUTING — carry sourceIntent + the utterance so toGovernedCall can
+        // tell an explicit open-chat intent apart from a message intent with an empty body
+        // (→ MESSAGE_BODY_MISSING), and never downgrade one to the other.
         return makeTask(
           'PREPARE_MESSAGE',
           'messaging',
-          { contactName: goal.entities.contact, message: goal.entities.message ?? '', mode: goal.entities.mode },
+          {
+            contactName: goal.entities.contact,
+            message: goal.entities.message ?? '',
+            mode: goal.entities.mode,
+            intent: goal.sourceIntent,
+            rawText: goal.normalizedText,
+          },
           true,
         );
       }

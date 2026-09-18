@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
   isAudioDiagnosticsEnabled, setAudioDiagnosticsEnabled, getRecoveryEventsLog,
@@ -226,6 +226,7 @@ function AudioDiagnosticsPanel() {
 }
 
 export default function DebugScreen() {
+  const router = useRouter();
   const [logs, setLogs] = useState<GovernanceLogEntry[]>([]);
   const [missionPlan, setMissionPlan] = useState<MissionPlan | undefined>(undefined);
   const [events, setEvents] = useState<OrchestratorEvent[]>([]);
@@ -251,6 +252,11 @@ export default function DebugScreen() {
       <TouchableOpacity onPress={refresh} style={{ paddingVertical: 8 }}
         accessibilityLabel="Refresh debug panel" accessibilityRole="button">
         <Text style={{ color: '#4da6ff', fontSize: 16 }}>Refresh</Text>
+      </TouchableOpacity>
+      <TouchableOpacity onPress={() => router.push('/voicediag')}
+        style={{ paddingVertical: 10, marginBottom: 4, backgroundColor: '#C9A24B', borderRadius: 8, alignItems: 'center' }}
+        testID="open-voice-diagnostic" accessibilityLabel="Open voice diagnostic" accessibilityRole="button">
+        <Text style={{ color: '#0D1B2A', fontSize: 15, fontWeight: '800' }}>🎤 OPEN VOICE DIAGNOSTIC</Text>
       </TouchableOpacity>
       <ScrollView>
         <AudioDiagnosticsPanel />

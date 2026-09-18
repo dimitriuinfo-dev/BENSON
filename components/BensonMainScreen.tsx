@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
 import Svg, { Circle } from 'react-native-svg';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { QuickContactsWidget } from './canvas/QuickContactsWidget';
 import { fetchWeatherData, type WeatherData } from '../lib/contextEngine';
 import type { QuickContact } from '../lib/quickContacts';
@@ -44,6 +45,55 @@ function useContinuousRotation(durationMs: number, clockwise: boolean) {
     return () => loop.stop();
   }, [value]);
   return value.interpolate({ inputRange: [0, 1], outputRange: clockwise ? ['0deg', '360deg'] : ['0deg', '-360deg'] });
+}
+
+// "Silent / Fully Off" — the only thing TopControls still renders is the way BACK on: a full-width
+// red banner shown only while silenced. Its own trigger button ("ÎNCHIDE COMPLET") moved into
+// Settings (user-directed 2026-08-23: invisible/easy to miss floating over the medallion) — this
+// component now only ever appears once already off, and always as this unmistakable banner.
+function TopControls({ silenced, onToggleSilence }: {
+  silenced: boolean; onToggleSilence: () => void;
+}) {
+  if (!silenced) return null;
+  return (
+    <TouchableOpacity
+      style={s.silencedBanner}
+      onPress={() => { tap(); onToggleSilence(); }}
+      accessibilityLabel="Benson este oprit complet. Atinge pentru a porni." accessibilityRole="button">
+      <Ionicons name="volume-mute" size={20} color="#fff" />
+      <Text style={s.silencedBannerText}>BENSON E OPRIT · atinge ca să pornești</Text>
+    </TouchableOpacity>
+  );
+}
+
+// Mute-only toggle — user-directed 2026-08-23: first tried anchored near the bottom, but on this
+// device that landed right on top of the system nav bar/gesture area (the app renders edge-to-edge
+// with no other safe-area handling). Moved to the top-left corner instead — floating, icon-only (a
+// megaphone the user just taps, no pill/label) — using the REAL top inset so it sits below the
+// status bar/notch on any phone, not a fixed guess. Keeps listening (wake word + commands still
+// work) but makes no sound; distinct from "fully off", which stops listening entirely and now
+// lives in Settings.
+function MuteButton({ muted, onToggleMute, silenced }: { muted: boolean; onToggleMute: () => void; silenced: boolean }) {
+  const insets = useSafeAreaInsets();
+  // Hidden while fully silenced — user-directed 2026-08-23: this button's top-left position
+  // physically overlapped the "BENSON E OPRIT" banner (same corner, same zIndex, painted after it),
+  // so tapping the banner was actually hitting this button instead — toggleMute() has no visible
+  // effect while already silenced (sound is already off), which read as "the banner does nothing".
+  // Mute is meaningless anyway when everything is already off, so hiding it removes the conflict
+  // entirely instead of just nudging positions further apart.
+  if (silenced) return null;
+  return (
+    <View style={[s.muteButtonCorner, { top: insets.top + 8 }]}>
+      <TouchableOpacity
+        style={[s.muteButton, muted && s.muteButtonActive]}
+        hitSlop={14}
+        onPress={() => { tap(); onToggleMute(); }}
+        accessibilityLabel={muted ? 'Pornește sunetul' : 'Mod mut, ascultă fără sunet'} accessibilityRole="button"
+        accessibilityState={{ selected: muted }}>
+        <Ionicons name={muted ? 'megaphone' : 'megaphone-outline'} size={22} color={muted ? '#2E3742' : GOLD} />
+      </TouchableOpacity>
+    </View>
+  );
 }
 
 // Small settings gear above the medallion — replaces the old bottom SYSTEM box. Spins slowly,
@@ -263,9 +313,9 @@ function Dashboard({ listening, micVolume }: { listening: boolean; micVolume: nu
 
 export function BensonMainScreen({
   listening, micVolume, loading, speaking, showQuickContacts,
-  lastReply, quickContacts, isInPip,
+  lastReply, quickContacts, isInPip, silenced, muted,
   onToggleConvMode, onOpenSettings, onToggleQuickContacts,
-  onQuickContactsChange, onSubmitText,
+  onQuickContactsChange, onSubmitText, onToggleSilence, onToggleMute,
 }: {
   listening: boolean;
   micVolume: number;
@@ -278,6 +328,8 @@ export function BensonMainScreen({
   lastReply: string;
   quickContacts: QuickContact[];
   isInPip?: boolean;
+  silenced: boolean;
+  muted: boolean;
   onToggleConvMode: () => void;
   onOpenSettings: () => void;
   onToggleQuickContacts: () => void;
@@ -286,11 +338,17 @@ export function BensonMainScreen({
   onClearCompletedTodo: () => void;
   onQuickContactsChange: (contacts: QuickContact[]) => void;
   onSubmitText: (text: string) => void;
+  onToggleSilence: () => void;
+  onToggleMute: () => void;
 }) {
   if (isInPip) return <PipLogoView />;
 
   return (
     <View style={s.root}>
+      <TopControls silenced={silenced} onToggleSilence={onToggleSilence} />
+
+      <MuteButton muted={muted} onToggleMute={onToggleMute} silenced={silenced} />
+
       <SettingsGear onOpenSettings={onOpenSettings} />
 
       <Medallion onToggleConvMode={onToggleConvMode} />
@@ -315,6 +373,25 @@ export function BensonMainScreen({
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG },
   pipRoot: { alignItems: 'center', justifyContent: 'center' },
+
+  // "Fully off" way-back-on banner — the only thing left up top; its trigger button now lives in
+  // Settings (see app/index.tsx).
+  silencedBanner: {
+    position: 'absolute', top: 44, left: 16, right: 16, zIndex: 20,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: '#B23A3A', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 16,
+  },
+  silencedBannerText: { color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
+
+  // Mute-only icon button — alone, near the bottom, below the listening indicator. Icon-only by
+  // design (a megaphone the user just taps), no pill/label.
+  // Top-left, floating — `top` set inline from real safe-area insets (see MuteButton).
+  muteButtonCorner: { position: 'absolute', left: 16, zIndex: 20 },
+  muteButton: {
+    width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: LINE, backgroundColor: BG_RAISED,
+  },
+  muteButtonActive: { backgroundColor: GOLD, borderColor: GOLD },
 
   // Gear sits above the medallion, centered — replaces the old bottom SYSTEM box.
   gearRow: { alignItems: 'center', paddingTop: 48, paddingHorizontal: 20 },

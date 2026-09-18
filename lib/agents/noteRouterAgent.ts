@@ -1,4 +1,4 @@
-import { LLM_PROXY_URL, SUPABASE_ANON_KEY } from '../supabaseConfig';
+import { ANTHROPIC_URL, anthropicHeaders } from '../llmConfig';
 
 export const NOTEPAD_PATTERN =
   /\b(?:notează|noteaza|note that|amintește-mi|aminteste-mi|remind me|spune-i lui|tell)\b|(?:adaugă|adauga|add)\s+.+\s+(?:pe listă|pe lista|to (?:the )?list)|(?:vreau să adaugi|vreau sa adaugi|please add).+(?:în app|in app|to the app)/i;
@@ -44,14 +44,10 @@ function buildSystemPrompt(): string {
 // because free-form multi-intent dictation isn't something regex can reliably parse.
 export async function runNoteRouterAgent(text: string, apiKey: string): Promise<ParsedNote | null> {
   try {
-    const res = await fetch(LLM_PROXY_URL, {
+    const res = await fetch(ANTHROPIC_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-      },
+      headers: anthropicHeaders(apiKey),
       body: JSON.stringify({
-        provider: 'anthropic',
         model: 'claude-sonnet-5',
         max_tokens: 400,
         thinking: { type: 'disabled' },

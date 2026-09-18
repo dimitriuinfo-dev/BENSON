@@ -118,7 +118,7 @@ const STEPS: Step[] = [
     id: 'battery',
     title: 'Optimizare Baterie',
     why: 'Fără această excepție, Android mă poate opri în fundal și nu te voi mai auzi când mă strigi.',
-    critical: true,
+    critical: false,
     check: isIgnoringBatteryOptimizations,
     action: requestIgnoreBatteryOptimizations,
     navigatesAway: true,
@@ -196,6 +196,7 @@ export function SetupWizard({ visible, onClose }: { visible: boolean; onClose: (
   }
 
   async function finish() {
+    if (!allCriticalGranted) { tap(); return; }
     tap();
     await setSetupWizardDone();
     onClose();
@@ -208,6 +209,10 @@ export function SetupWizard({ visible, onClose }: { visible: boolean; onClose: (
 
   if (!visible) return null;
 
+  const grantedCount = STEPS.filter(st => statuses[st.id] === 'granted').length;
+  const criticalMissing = STEPS.filter(st => st.critical && statuses[st.id] !== 'granted');
+  const allCriticalGranted = criticalMissing.length === 0;
+
   return (
     <Modal visible={visible} animationType="slide" transparent>
       <View style={s.bg}>
@@ -217,12 +222,20 @@ export function SetupWizard({ visible, onClose }: { visible: boolean; onClose: (
               step={STEPS[stepIndex]}
               index={stepIndex}
               total={STEPS.length}
+              grantedCount={grantedCount}
               status={statuses[STEPS[stepIndex].id] ?? 'unknown'}
               onAction={() => handleAction(STEPS[stepIndex])}
               onNext={next}
             />
           ) : (
-            <Dashboard statuses={statuses} onRedo={redo} onFinish={finish} />
+            <Dashboard
+              statuses={statuses}
+              grantedCount={grantedCount}
+              criticalMissing={criticalMissing}
+              allCriticalGranted={allCriticalGranted}
+              onRedo={redo}
+              onFinish={finish}
+            />
           )}
         </View>
       </View>
@@ -230,13 +243,18 @@ export function SetupWizard({ visible, onClose }: { visible: boolean; onClose: (
   );
 }
 
-function StepScreen({ step, index, total, status, onAction, onNext }: {
-  step: Step; index: number; total: number; status: Status;
+function StepScreen({ step, index, total, grantedCount, status, onAction, onNext }: {
+  step: Step; index: number; total: number; grantedCount: number; status: Status;
   onAction: () => void; onNext: () => void;
 }) {
+  // A critical step blocks progress until granted — the whole butler is dead without it, so the
+  // user must not be able to skip past it (unlike optional steps, which "CONTINUĂ" freely).
+  const blocked = step.critical && status !== 'granted';
   return (
     <View style={{ flex: 1 }}>
-      <Text style={s.progress}>PASUL {index + 1} DIN {total}{step.critical ? ' · ESENȚIAL' : ' · OPȚIONAL'}</Text>
+      <Text style={s.progress}>
+        PASUL {index + 1} DIN {total}{step.critical ? ' · ESENȚIAL' : ' · OPȚIONAL'}   ·   {grantedCount}/{total} ACTIVE
+      </Text>
       <Text style={s.title}>{step.title}</Text>
       <Text style={s.why}>{step.why}</Text>
 
@@ -247,9 +265,21 @@ function StepScreen({ step, index, total, status, onAction, onNext }: {
         <Text style={s.actionBtnText}>DESCHIDE</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={s.nextBtn} onPress={onNext}
-        accessibilityLabel="Continuă la pasul următor" accessibilityRole="button">
-        <Text style={s.nextBtnText}>{index + 1 < total ? 'CONTINUĂ →' : 'VEZI STATUSUL →'}</Text>
+      {blocked && (
+        <Text style={s.blockedHint}>
+          Acest pas este esențial — activează-l ca să poți continua. Benson nu poate funcționa fără el.
+        </Text>
+      )}
+
+      <TouchableOpacity
+        style={[s.nextBtn, blocked && s.nextBtnDisabled]}
+        onPress={onNext}
+        disabled={blocked}
+        accessibilityLabel="Continuă la pasul următor" accessibilityRole="button"
+        accessibilityState={{ disabled: blocked }}>
+        <Text style={[s.nextBtnText, blocked && s.nextBtnTextDisabled]}>
+          {index + 1 < total ? 'CONTINUĂ →' : 'VEZI STATUSUL →'}
+        </Text>
       </TouchableOpacity>
     </View>
   );
@@ -265,12 +295,21 @@ function StatusBadge({ status }: { status: Status }) {
   );
 }
 
-function Dashboard({ statuses, onRedo, onFinish }: {
-  statuses: Record<string, Status>; onRedo: (step: Step) => void; onFinish: () => void;
+function Dashboard({ statuses, grantedCount, criticalMissing, allCriticalGranted, onRedo, onFinish }: {
+  statuses: Record<string, Status>; grantedCount: number; criticalMissing: Step[];
+  allCriticalGranted: boolean; onRedo: (step: Step) => void; onFinish: () => void;
 }) {
   return (
     <View style={{ flex: 1 }}>
       <Text style={s.title}>STATUS BENSON</Text>
+      <Text style={s.progress}>{grantedCount}/{STEPS.length} PERMISIUNI ACTIVE</Text>
+      {allCriticalGranted ? (
+        <Text style={s.successLine}>✓ Tot ce e esențial este activat. Benson e gata de treabă.</Text>
+      ) : (
+        <Text style={s.blockedHint}>
+          Mai trebuie activat: {criticalMissing.map(st => st.title).join(', ')}. Fără acestea Benson nu poate porni.
+        </Text>
+      )}
       <ScrollView style={{ flex: 1 }}>
         {STEPS.map(step => {
           const st = statuses[step.id] ?? 'unknown';
@@ -293,9 +332,13 @@ function Dashboard({ statuses, onRedo, onFinish }: {
         })}
       </ScrollView>
       <Text style={s.factLine}>* esențial — restul sunt opționale, Benson funcționează și fără ele.</Text>
-      <TouchableOpacity style={s.actionBtn} onPress={onFinish}
-        accessibilityLabel="Finalizează configurarea" accessibilityRole="button">
-        <Text style={s.actionBtnText}>GATA</Text>
+      <TouchableOpacity
+        style={[s.actionBtn, !allCriticalGranted && s.actionBtnDisabled]}
+        onPress={onFinish}
+        disabled={!allCriticalGranted}
+        accessibilityLabel="Finalizează configurarea" accessibilityRole="button"
+        accessibilityState={{ disabled: !allCriticalGranted }}>
+        <Text style={[s.actionBtnText, !allCriticalGranted && s.actionBtnTextDisabled]}>GATA</Text>
       </TouchableOpacity>
     </View>
   );
@@ -314,8 +357,14 @@ const s = StyleSheet.create({
 
   actionBtn: { backgroundColor: GOLD, padding: 14, alignItems: 'center', marginTop: 'auto' },
   actionBtnText: { color: NAVY, fontWeight: '700', letterSpacing: 2, fontSize: 13 },
+  actionBtnDisabled: { backgroundColor: 'rgba(201,162,75,0.25)' },
+  actionBtnTextDisabled: { color: 'rgba(11,31,58,0.55)' },
   nextBtn: { padding: 14, alignItems: 'center', marginTop: 10 },
+  nextBtnDisabled: { opacity: 0.4 },
   nextBtnText: { color: MUTED, fontWeight: '600', letterSpacing: 1, fontSize: 12 },
+  nextBtnTextDisabled: { color: MUTED },
+  blockedHint: { color: RED, fontSize: 12, lineHeight: 17, marginTop: 12, textAlign: 'center' },
+  successLine: { color: GREEN, fontSize: 13, lineHeight: 18, marginTop: 4, marginBottom: 8, fontWeight: '600' },
 
   dashRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(201,162,75,0.15)' },
   dashLabel: { fontSize: 14, fontWeight: '600' },

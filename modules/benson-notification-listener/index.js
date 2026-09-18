@@ -15,3 +15,22 @@ export function isEnabled() {
 export function openNotificationListenerSettings() {
   return NativeModule.openNotificationListenerSettings();
 }
+
+// ROUND_MEDIA_GOVERNANCE_1 — Priority-1 media control via Android's own MediaSession framework.
+// JSON string of [{packageName, state, actions}], "SECURITY_EXCEPTION" if the notification
+// listener isn't actually enabled right now, or "[]".
+export function getActiveMediaSessions() {
+  return NativeModule.getActiveMediaSessions();
+}
+
+// action: "play" | "pause" | "stop" | "next" | "previous". packageName: "" = no filter (picks the
+// actively-playing session, else the first active session).
+export function mediaControl(packageName, action) {
+  return NativeModule.mediaControl(packageName, action);
+}
+
+// JSON string of {packageName, state}. state: -1 = no session, -2 = listener not enabled,
+// otherwise a PlaybackState.STATE_* constant (0=NONE,1=STOPPED,2=PAUSED,3=PLAYING,...).
+export function getPlaybackState(packageName) {
+  return NativeModule.getPlaybackState(packageName);
+}

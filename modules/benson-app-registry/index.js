@@ -42,6 +42,33 @@ export function openUriWithPackage(uri, packageName) {
   return NativeModule.openUriWithPackage(uri, packageName);
 }
 
+// ROUND_EMERGENCY_CORE_1 — classify a spoken utterance against the closed emergency set.
+// Returns 'NONE' | 'EXPLICIT_112' | 'GENERIC_HELP'. Synchronous, no side effects.
+export function classifyEmergencyIntent(text) {
+  try { return NativeModule.classifyEmergencyIntent(String(text ?? '')); } catch { return 'NONE'; }
+}
+
+// One-shot emergency context: { timestamp, batteryPct, network, locationAvailable }. Logged
+// natively; raw coordinates never cross the bridge. Null if the native context is unavailable.
+export function getEmergencyContext() {
+  try { return NativeModule.getEmergencyContext() ?? null; } catch { return null; }
+}
+
+// Routes 112 to the native Android telecom stack — a real placed call when CALL_PHONE is granted,
+// otherwise the system dialer pre-filled with 112. Never WhatsApp, never a chooser, never typing.
+// Resolves { success, mode: 'DIRECT_CALL'|'SYSTEM_DIALER'|'FAILED', reason }.
+export function routeEmergencyCall() {
+  return NativeModule.routeEmergencyCall();
+}
+
+// ROUND_WA_NATIVE_CALL_PROBE_1 — feasibility probe ONLY. Reads ContactsContract for the WhatsApp
+// voip.call MIME row of `contactName`, checks whether the typed contacts intent resolves against
+// com.whatsapp, and fires it ONLY when doLaunch === true (which places a REAL call). Does not
+// touch the existing call route. Resolves the probe result object.
+export function probeWhatsAppNativeCall(contactName, doLaunch = false) {
+  return NativeModule.probeWhatsAppNativeCall(String(contactName ?? ''), !!doLaunch);
+}
+
 // Real Android Picture-in-Picture — shrinks BENSON's own Activity into a small, user-movable
 // window right before another app (WhatsApp) takes over the rest of the screen. Only shrinks
 // BENSON itself; there is no API to force a different app into PiP from outside it. No-op

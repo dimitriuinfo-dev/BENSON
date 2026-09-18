@@ -1,24 +1,18 @@
-import { Audio, InterruptionModeAndroid } from 'expo-av';
+import { Audio } from 'expo-av';
 import { File, Paths } from 'expo-file-system';
+import { setNormalAudioMode } from './audioMode';
 
 let currentSound: Audio.Sound | null = null;
 let audioModeSet = false;
 
-// Explicitly claims playback audio focus (DoNotMix) instead of relying on the default —
-// audit finding: if the STT recognizer hasn't fully released the mic/AudioRecord yet,
-// playback can be ducked to near-silence or fail outright on some OEM audio stacks.
+// Uses a NON-exclusive (ducking) playback mode — see lib/agents/audioMode.ts for the full rationale.
+// Previously this claimed DoNotMix (exclusive AUDIOFOCUS_GAIN), which permanently killed other apps'
+// audio system-wide until a phone restart. DuckOthers only briefly lowers other audio while BENSON
+// speaks, then releases focus so the other app resumes on its own.
 async function ensurePlaybackAudioMode(): Promise<void> {
   if (audioModeSet) return;
-  try {
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      staysActiveInBackground: true,
-      interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
-      shouldDuckAndroid: false,
-      playThroughEarpieceAndroid: false,
-    });
-    audioModeSet = true;
-  } catch {}
+  await setNormalAudioMode();
+  audioModeSet = true;
 }
 
 // OpenAI TTS — optional cloud voice engine (opt-in via Settings). Falls back to

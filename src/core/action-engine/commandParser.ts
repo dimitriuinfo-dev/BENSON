@@ -54,28 +54,28 @@ const CLOSE_APP_PATTERNS: RegExp[] = [
 
 const OPEN_WHATSAPP_PATTERN = /\b(?:deschide|porne[șs]te|intr[ăa]\s+pe|vreau|pune|öffne|starte|open|start|launch)\s+whatsapp\b/i;
 
-// Contact-specific WhatsApp phrasings — checked BEFORE the generic open pattern above, so
-// "trimite WhatsApp lui Hannah" isn't swallowed as a plain app open with the name discarded.
-const WHATSAPP_CONTACT_PATTERNS: RegExp[] = [
+// ROUND_WA_GOVERNANCE_ROUTING — WhatsApp MESSAGE-family phrasings that name a contact but capture
+// NO body ("scrie-i lui Hannah pe WhatsApp", "trimite WhatsApp lui Hannah", "schreib Hannah auf
+// WhatsApp"). These are MESSAGE intents with an empty body: the router turns an empty body into
+// MESSAGE_BODY_MISSING and BENSON asks what to write. They are NEVER an open-chat intent and
+// never fall back to one. Checked AFTER the contact+body message patterns, BEFORE the open-chat
+// patterns.
+// (?:[- ]?i\b)? not (?:-i)?: this device's STT drops the clitic hyphen ("scrie-i" → "scrie i").
+const WHATSAPP_MESSAGE_NOBODY_PATTERNS: RegExp[] = [
   new RegExp(`\\btrimite\\s+whatsapp\\s+lui\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: trimite WhatsApp lui Hannah
-  // (?:[- ]?i\b)? not (?:-i)?: confirmed live 2026-07-17 — this device's STT drops the clitic
-  // hyphen entirely ("scrie-i" transcribed as "scrie i"), so a literal "-i" match failed
-  // silently (it's optional) and let the stray "i" (and the following "lui") get swallowed into
-  // the lazy contact-name capture instead of being consumed as the clitic — real capture was
-  // "i lui Hanna un mesaj" for "scrie-i lui Hanna un mesaj [text]", losing the actual name.
-  // Same optional "un mesaj" filler awareness as MESSAGE_CONTACT_PATTERN below — "scrie-i lui
-  // Hannah un mesaj pe WhatsApp" otherwise swallowed "un mesaj" into the name the same way.
-  /\bscrie(?:[- ]?i\b)?\s+(?:lui\s+)?(.+?)\s+(?:un\s+mesaj\s+)?pe\s+whatsapp\b/i, // RO: scrie-i lui Hannah pe WhatsApp
+  /\bscrie(?:[- ]?i\b)?\s+(?:lui\s+)?(.+?)\s+(?:un\s+mesaj\s+)?pe\s+whats(?:app)?\b/i, // RO: scrie-i lui Hannah pe WhatsApp
   /\bschreib\s+(.+?)\s+auf\s+whatsapp\b/i, // DE: schreib Hannah auf WhatsApp
+];
+
+// Explicit OPEN-the-chat phrasings — no message, no send. "deschide conversația cu Hannah pe
+// WhatsApp", "open the chat with Hannah on WhatsApp", "WhatsApp with Hannah". A distinct
+// capability from messaging; NEVER produced as a fallback from a failed message parse.
+const WHATSAPP_OPEN_CHAT_PATTERNS: RegExp[] = [
+  new RegExp(
+    `\\b(?:deschide|deschide-?mi|arat[ăa]-?mi|open|show|öffne)\\s+(?:-?mi\\s+)?(?:conversa[țt]ia|conversatia|discu[țt]ia|discutia|chat(?:ul)?|the\\s+chat)\\s+(?:cu\\s+|with\\s+)?(.+?)(?:\\s+(?:pe|auf|on)\\s+whats(?:app)?)?${NEXT_CLAUSE_BOUNDARY}`,
+    'i',
+  ),
   new RegExp(`\\bwhatsapp\\s+with\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // EN: open WhatsApp with Hannah
-  // The bare "^whatsapp (.+?)" fallback this used to have ("WhatsApp Hannah") was removed
-  // 2026-07-17 — confirmed live to catastrophically over-match any rambling utterance that merely
-  // *starts* with the word "whatsapp" (real capture: "WhatsApp nu l-ai deschis tu Benson te rog
-  // frumos trimite un mesaj lui Baby pe WhatsApp mesajul este te iubesc" had its ENTIRE remainder
-  // after the leading "whatsapp" swallowed as the "contact name", since NEXT_CLAUSE_BOUNDARY only
-  // stops at a conjunction or end-of-string, neither of which appeared). The narrow legitimate
-  // case (literally just saying "WhatsApp Hannah") is not worth this blast radius — the other,
-  // more specific phrasings above already cover real usage.
 ];
 
 // EN: "write Hannah on WhatsApp: I have left." / "...on WhatsApp, I have left" / "...on WhatsApp
@@ -85,6 +85,15 @@ const WHATSAPP_CONTACT_PATTERNS: RegExp[] = [
 // above). Checked before MESSAGE_CONTACT_PATTERN since both set MESSAGE_CONTACT/OPEN_WHATSAPP_CONTACT.
 const WHATSAPP_MESSAGE_EN_PATTERN = new RegExp(
   `\\bwrite\\s+(.+?)\\s+on\\s+whatsapp\\s*[:,]?\\s*(?:that\\s+)?(.+?)${NEXT_CLAUSE_BOUNDARY}`,
+  'i',
+);
+
+// ROUND_WA_GOVERNANCE_ROUTING — RO: "scrie-i lui X pe WhatsApp că Y" / "... pe WhatsApp: Y" /
+// "... pe WhatsApp, Y". The message form of the WhatsApp-contact phrasing. MUST be classified
+// before WHATSAPP_MESSAGE_NOBODY_PATTERNS (whose "scrie ... pe whatsapp" entry would otherwise
+// match the prefix and silently drop Y). contact = g1, message = g2 — both required by the caller.
+const WHATSAPP_MESSAGE_RO_PATTERN = new RegExp(
+  `\\bscrie(?:[- ]?i\\b)?\\s+(?:lui\\s+)?(.+?)\\s+(?:un\\s+mesaj\\s+)?pe\\s+whats(?:app)?(?:\\s*[:,]\\s*|\\s+c[ăa]\\s+)(.+?)${NEXT_CLAUSE_BOUNDARY}`,
   'i',
 );
 
@@ -267,6 +276,27 @@ function stripTrailingPunctuation(s: string): string {
   return s.replace(/[.,!?]+$/, '').trim();
 }
 
+// ROUND_WA_WRITE_MESSAGE_PAYLOAD — a wake-word token that bled into the captured MESSAGE body
+// ("...pe WhatsApp că Benson" / mis-heard as "Benzim" / "benzină") is STT contamination, never
+// the user's message. transcriptNormalizer only strips a LEADING wake word; a trailing/embedded
+// one survives into the `că …` body. Strip every occurrence; if nothing meaningful is left, the
+// body is EMPTY and the router stops with MESSAGE_BODY_MISSING — the wake word is NEVER sent as
+// the message. Mirrors transcriptNormalizer.LEADING_WAKE_WORD_PATTERN's variant list.
+const WAKE_WORD_TOKEN =
+  /\b(?:benson|bensen|bensson|benzon|benzim|benzin|benzine|benzin[ăa]|bentson|bennson|bänson|bensn|penson|penzon|benz[ăa])\b/gi;
+function sanitizeMessageBody(raw: string): string {
+  return raw
+    .replace(WAKE_WORD_TOKEN, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,.:;–-]+|[\s,.:;–-]+$/g, '')
+    .trim();
+}
+// The message body must never be the recipient token echoed back. Compares diacritic/case-folded.
+function bodyEqualsContact(body: string, contact: string): boolean {
+  const f = (s: string) => s.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
+  return f(body).length > 0 && f(body) === f(contact);
+}
+
 function firstMatch(patterns: RegExp[], text: string): string | null {
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -348,39 +378,60 @@ function classify(text: string): ParseResult {
     };
   }
 
+  // ── WhatsApp messaging (message-family verbs: scrie / write / schreib / trimite) ─────────────
+  // ROUND_WA_GOVERNANCE_ROUTING — ordered BEFORE the open-chat patterns so a message form is
+  // never downgraded to an open. A message-family utterance ALWAYS resolves to MESSAGE_CONTACT;
+  // an empty body is carried through (the router turns it into MESSAGE_BODY_MISSING).
+
+  // Helper — a message-family match ALWAYS resolves to MESSAGE_CONTACT (never open-chat). The
+  // body is sanitized (wake-word bleed removed); if it empties, or it's just the recipient token
+  // echoed back, the body stays "" and the router stops with MESSAGE_BODY_MISSING.
+  const messageContact = (contactRaw: string, bodyRaw: string, confidence: number): ParseResult => {
+    const contactName = stripTrailingPunctuation(contactRaw).replace(/\s+pe\s+whats(?:app)?$/i, '').trim();
+    let message = sanitizeMessageBody((bodyRaw ?? '').trim());
+    if (bodyEqualsContact(message, contactName)) message = '';
+    return { intent: 'MESSAGE_CONTACT', parameters: { contactName, message, channel: 'whatsapp' }, confidence };
+  };
+
+  // 1a. "write X on whatsapp Y"
   const whatsappMessageEn = text.match(WHATSAPP_MESSAGE_EN_PATTERN);
-  if (whatsappMessageEn && whatsappMessageEn[1]?.trim() && whatsappMessageEn[2]?.trim()) {
+  if (whatsappMessageEn && whatsappMessageEn[1]?.trim()) {
+    return messageContact(whatsappMessageEn[1], whatsappMessageEn[2] ?? '', 1.0);
+  }
+  // 1b. "scrie-i lui X pe WhatsApp că Y"
+  const whatsappMessageRo = text.match(WHATSAPP_MESSAGE_RO_PATTERN);
+  if (whatsappMessageRo && whatsappMessageRo[1]?.trim()) {
+    return messageContact(whatsappMessageRo[1], whatsappMessageRo[2] ?? '', 1.0);
+  }
+  // 1c. channel-less "scrie-i lui X că Y" (defaults to WhatsApp).
+  const messageMatch = text.match(MESSAGE_CONTACT_PATTERN);
+  if (messageMatch && messageMatch[1]?.trim()) {
+    return messageContact(messageMatch[1], messageMatch[2] ?? '', 0.9);
+  }
+
+  // 1d. message-family verb + contact but NO body → MESSAGE_CONTACT with an empty body. The
+  //     router turns this into MESSAGE_BODY_MISSING ("ce să-i scriu?"), NEVER an open-chat.
+  const whatsappMessageNoBody = firstMatch(WHATSAPP_MESSAGE_NOBODY_PATTERNS, text);
+  if (whatsappMessageNoBody) {
     return {
       intent: 'MESSAGE_CONTACT',
-      parameters: {
-        contactName: stripTrailingPunctuation(whatsappMessageEn[1]),
-        message: whatsappMessageEn[2].trim(),
-        channel: 'whatsapp',
-      },
-      confidence: 1.0,
+      parameters: { contactName: whatsappMessageNoBody, message: '', channel: 'whatsapp' },
+      confidence: 0.9,
     };
   }
 
-  const whatsappContactName = firstMatch(WHATSAPP_CONTACT_PATTERNS, text);
-  if (whatsappContactName) {
+  // 2. explicit OPEN-the-chat (no send) — a distinct intent, never a messaging fallback.
+  const whatsappOpenChat = firstMatch(WHATSAPP_OPEN_CHAT_PATTERNS, text);
+  if (whatsappOpenChat) {
     return {
       intent: 'OPEN_WHATSAPP_CONTACT',
-      parameters: { contactName: whatsappContactName, channel: 'whatsapp' },
+      parameters: { contactName: whatsappOpenChat, channel: 'whatsapp' },
       confidence: 1.0,
     };
   }
 
   if (OPEN_WHATSAPP_PATTERN.test(text)) {
     return { intent: 'OPEN_WHATSAPP', parameters: { targetApp: 'WhatsApp' }, confidence: 1.0 };
-  }
-
-  const messageMatch = text.match(MESSAGE_CONTACT_PATTERN);
-  if (messageMatch && messageMatch[1]?.trim()) {
-    return {
-      intent: 'MESSAGE_CONTACT',
-      parameters: { contactName: messageMatch[1].trim(), message: (messageMatch[2] ?? '').trim(), channel: 'whatsapp' },
-      confidence: 0.9,
-    };
   }
 
   const callContactName = firstMatch(CALL_CONTACT_PATTERNS, text);

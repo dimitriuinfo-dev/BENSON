@@ -1,24 +1,7 @@
-// Raw fetch against Supabase's PostgREST layer — no @supabase/supabase-js, matching every other
-// external API in this app (Anthropic, Tavily, open-meteo, Nominatim, YouTube are all plain fetch).
-//
-// One-time setup required in the Supabase SQL Editor for this project:
-//
-//   create table analytics_events (
-//     id uuid default gen_random_uuid() primary key,
-//     install_id uuid not null,
-//     command_type text,
-//     agent_used text,
-//     success boolean,
-//     language text,
-//     app_opened text,
-//     session_duration_seconds integer,
-//     error_type text,
-//     created_at timestamptz default now()
-//   );
-//   alter table analytics_events enable row level security;
-//   create policy "anon can insert" on analytics_events for insert to anon with check (true);
-
-import { SUPABASE_URL, SUPABASE_ANON_KEY as SUPABASE_KEY } from '../supabaseConfig';
+// Analytics events are sent to BENSON's own FastAPI backend (MongoDB-backed). The previous Supabase
+// Postgres (PostgREST) path was removed because Emergent's mobile deploy stack is Expo + FastAPI +
+// MongoDB and does not run Supabase. Best-effort and privacy-gated upstream (eventLog only calls
+// this with explicit consent): no-ops silently if no backend URL is configured (e.g. local dev).
 
 export type AnalyticsEvent = {
   install_id: string;
@@ -31,17 +14,15 @@ export type AnalyticsEvent = {
   error_type?: string;
 };
 
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+
 export async function insertEvents(events: AnalyticsEvent[]): Promise<boolean> {
+  if (!BACKEND_URL) return false;
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/analytics_events`, {
+    const res = await fetch(`${BACKEND_URL}/api/analytics`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify(events),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events }),
     });
     return res.ok;
   } catch {

@@ -1,11 +1,15 @@
 package expo.modules.audiocapture
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.os.Build
 import android.util.Log
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -29,13 +33,28 @@ private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
 // mistaken for "done talking," cutting the command in half before Whisper ever saw the rest of
 // it. Loosened both knobs: more silence tolerance before ending, and a lower bar for what counts
 // as "still talking" so a quieter second half of a sentence doesn't get missed.
-// TEMPORARY test constant (product-owner-directed 2026-08-02) — logcat confirmed bytes=0 /
-// reason=max_duration on a real spoken attempt (no PREROLL ever logged, meaning RMS never crossed
-// 350.0 for the full 15s window). Lowered to confirm the gate itself is the cause before any other
-// change. REVERT to 350.0 once confirmed/tuned — do not leave at 150.0 permanently unevaluated.
-private const val RMS_THRESHOLD = 150.0 // was 350.0
+// Tuned from real on-device peakRms measurements (2026-08-02/2026-08-23, BENSON_AUDIO logs), not
+// guessed. 150.0 was a deliberate temporary test-only value (see prior comment history) that was
+// never reverted — confirmed live 2026-08-23 as the actual cause of "wake word doesn't work":
+// every wake-scan cycle hit reason=max_duration (never vad_silence) because normal room ambience
+// kept re-triggering "still loud" at such a low bar, so genuine silence after "Benson" never had a
+// chance to register and end the capture. Raising it to 1500.0 fixed that, but overshot: confirmed
+// live minutes later (same day) as the cause of "Benson nu aude" — three consecutive conversation-
+// mode captures in a row hit reason=max_duration with bytes=0 (phase NEVER left pre_speech, so
+// nothing was ever written to pcm) at peakRms 1445.9 / 172.8 / 209.4. 1445.9 is almost certainly
+// real speech sitting just under the 1500 gate — the user was talking and BENSON silently dropped
+// 15 seconds of it, three times in a row, with the speech never even entering the recording. Real
+// ambient in that same room at that same moment was 172–209, well separated from 1445.9 — so 700.0
+// sits with ~3x headroom above the actual observed noise floor and ~2x margin below the actual
+// observed (quiet) speech peak, both measured in the same live session, not guessed. Loud speech
+// measured a different day (6584–13478) still clears this with enormous margin.
+private const val RMS_THRESHOLD = 700.0 // was 1500.0 (overshot, silently dropped quiet speech) / 150.0 (undershot) / originally 350.0
 private const val MIN_SPEECH_MS = 800L
-private const val SILENCE_TIMEOUT_MS = 2500L
+// E2-3 (2026-09-07, product-owner-directed): fereastra de tăcere după vorbire urcată de la 800ms
+// la 1600ms — 800ms tăia comenzile firești cu o pauză scurtă mid-propoziție („Sună-o pe Hannah
+// pe WhatsApp"). 1600ms e compromisul: destul cât să tolereze pauza naturală, sub cele 2500ms
+// de dinainte de E1. Revert: 800L (E1-3) sau 2500L (pre-E1).
+private const val SILENCE_TIMEOUT_MS = 1600L // was 800L (E2-3 2026-09-07) / 2500L (pre-E1) / 1600L original
 // User-requested 2026-07-30: with the old 6s pre-speech timeout, "LISTENING" cycled off/on every
 // few seconds while waiting for the user to start talking, feeling interrupted instead of
 // continuously listening. In conversation mode the app immediately starts a fresh capture the
@@ -43,6 +62,12 @@ private const val SILENCE_TIMEOUT_MS = 2500L
 // before restarting" — stretched way out so it reads as always-on rather than blinking.
 private const val PRE_SPEECH_TIMEOUT_MS = 60_000L
 private const val MAX_DURATION_MS = 15000L
+// E1-4 (2026-09-07, product-owner-directed): oprire timpurie pe tăcere. Dacă în primele
+// EARLY_NO_SPEECH_STOP_MS de captură pragul RMS nu a fost depășit deloc (faza încă "pre_speech"),
+// oprește captura — nu mai ține microfonul deschis până la MAX_DURATION_MS pe o captură fără
+// vorbire (log de până acum: șapte capturi consecutive bytes=0 reason=max_duration = 105s).
+// Revert: EARLY_NO_SPEECH_STOP_MS = MAX_DURATION_MS (dezactivează efectiv oprirea timpurie).
+private const val EARLY_NO_SPEECH_STOP_MS = 3000L
 private const val READ_CHUNK_MS = 50L
 
 // Pre-roll buffer (product-owner-directed, root cause confirmed in code review 2026-07-31):
@@ -76,10 +101,66 @@ class BensonAudioCaptureModule : Module() {
   private var captureThread: Thread? = null
   private val stopRequested = AtomicBoolean(false)
 
+  // Audio focus (2026-08-28) — while BENSON is capturing, ask the system to duck every other
+  // app's playback (AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK) so e.g. Waze's turn-by-turn voice drops
+  // in volume instead of being fed straight back into the mic. Released the instant capture ends
+  // (finish()), so the other app comes back to full volume with no lingering effect.
+  private var audioManager: AudioManager? = null
+  private var focusRequest: AudioFocusRequest? = null // API 26+ only; null on 24-25 (legacy path)
+
   private fun isNoiseSuppressorEnabled(context: Context): Boolean {
     return try {
       context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean("noise_suppressor_enabled", false)
     } catch (_: Exception) { false }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun requestAudioFocus(context: Context) {
+    try {
+      val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+      audioManager = am
+      Log.i("BENSON_AUDIO", "AUDIO_FOCUS state=requested")
+      val result: Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val attrs = AudioAttributes.Builder()
+          .setUsage(AudioAttributes.USAGE_ASSISTANT)
+          .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+          .build()
+        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+          .setAudioAttributes(attrs)
+          .setWillPauseWhenDucked(false)
+          .setOnAudioFocusChangeListener { }
+          .build()
+        focusRequest = req
+        am.requestAudioFocus(req)
+      } else {
+        am.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+      }
+      Log.i(
+        "BENSON_AUDIO",
+        "AUDIO_FOCUS state=${if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) "granted" else "denied"}",
+      )
+    } catch (e: Exception) {
+      Log.e(TAG, "requestAudioFocus failed", e)
+      Log.i("BENSON_AUDIO", "AUDIO_FOCUS state=denied")
+    }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun abandonAudioFocus() {
+    val am = audioManager ?: return
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        focusRequest?.let { am.abandonAudioFocusRequest(it) }
+      } else {
+        am.abandonAudioFocus(null)
+      }
+      Log.i("BENSON_AUDIO", "AUDIO_FOCUS state=released")
+    } catch (e: Exception) {
+      Log.e(TAG, "abandonAudioFocus failed", e)
+    } finally {
+      focusRequest = null
+      audioManager = null
+    }
   }
 
   override fun definition() = ModuleDefinition {
@@ -162,7 +243,10 @@ class BensonAudioCaptureModule : Module() {
     } catch (e: Exception) {
       Log.e(TAG, "AEC/NS setup failed (continuing without it)", e)
     }
-    Log.i("BENSON_AUDIO", "EFFECTS ns=${if (ns != null) "on" else "off"} aec=${if (aec != null) "on" else "off"}")
+    Log.i(
+      "BENSON_AUDIO",
+      "EFFECTS source=voice_recognition sessionId=${recorder.audioSessionId} aec=${if (aec != null) "on" else "off"} ns=${if (ns != null) "on" else "off"}",
+    )
 
     val pcm = java.io.ByteArrayOutputStream()
     var phase = "pre_speech" // pre_speech -> in_speech -> done
@@ -177,6 +261,9 @@ class BensonAudioCaptureModule : Module() {
     // Pre-roll ring buffer — see PRE_ROLL_CHUNKS doc comment above.
     val preRollBuffer = ArrayDeque<ByteArray>()
 
+    // Duck other apps' audio for the duration of the capture (released in finish()).
+    requestAudioFocus(context)
+
     try {
       recorder.startRecording()
       Log.i("BENSON_AUDIO", "CAPTURE_MIC state=ACQUIRE ts=${System.currentTimeMillis()}")
@@ -188,6 +275,13 @@ class BensonAudioCaptureModule : Module() {
 
         if (phase == "pre_speech" && elapsed > PRE_SPEECH_TIMEOUT_MS) {
           Log.i(TAG, "Pre-speech timeout, no speech detected")
+          finish(recorder, aec, ns, null, "no_speech", 0, peakRms)
+          return
+        }
+        // E1-4 — RMS_THRESHOLD never crossed within the first EARLY_NO_SPEECH_STOP_MS: end now
+        // instead of holding the mic open for the full MAX_DURATION_MS on silence.
+        if (phase == "pre_speech" && elapsed > EARLY_NO_SPEECH_STOP_MS) {
+          Log.i(TAG, "Early no-speech stop at ${elapsed}ms (RMS never crossed threshold, peakRms=$peakRms)")
           finish(recorder, aec, ns, null, "no_speech", 0, peakRms)
           return
         }
@@ -267,6 +361,7 @@ class BensonAudioCaptureModule : Module() {
   }
 
   private fun finish(recorder: AudioRecord, aec: AcousticEchoCanceler?, ns: NoiseSuppressor?, filePath: String?, reason: String, pcmBytes: Int, peakRms: Double) {
+    abandonAudioFocus()
     try { aec?.release() } catch (_: Exception) {}
     try { ns?.release() } catch (_: Exception) {}
     try { recorder.stop() } catch (_: Exception) {}

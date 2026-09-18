@@ -3,6 +3,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { LogBox, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import * as SplashScreen from 'expo-splash-screen';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 // Expo's own dev-client entry activates keep-awake automatically on load; on this device it
 // throws ("Unable to activate keep awake") before the Activity is ready. It's Expo internals,
@@ -71,12 +72,19 @@ const errorStyles = StyleSheet.create({
 
 export default function RootLayout() {
   return (
-    <RootErrorBoundary>
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="index" />
-        <Stack.Screen name="debug" />
-      </Stack>
-      <StatusBar style="light" backgroundColor="#0D1B2A" />
-    </RootErrorBoundary>
+    // Added product-owner-directed 2026-08-23: the app renders edge-to-edge with no safe-area
+    // handling anywhere, so a bottom-anchored element (the mute button) sat on top of the system
+    // nav bar/gesture area. This makes real insets available via useSafeAreaInsets() instead of a
+    // guessed fixed margin.
+    <SafeAreaProvider>
+      <RootErrorBoundary>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="index" />
+          <Stack.Screen name="debug" />
+          <Stack.Screen name="voicediag" />
+        </Stack>
+        <StatusBar style="light" backgroundColor="#0D1B2A" />
+      </RootErrorBoundary>
+    </SafeAreaProvider>
   );
 }

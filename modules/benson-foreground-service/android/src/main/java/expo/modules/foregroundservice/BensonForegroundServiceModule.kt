@@ -14,14 +14,38 @@ class BensonForegroundServiceModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("BensonForegroundService")
 
-    Events("onStopRequested", "onListenRequested", "onWakeWordDetected")
+    Events("onStopRequested", "onListenRequested", "onWakeWordDetected", "onWakePoke", "onSttWatchdogTimeout", "onTtsWatchdogTimeout", "onConfirmationResult")
 
     OnCreate {
+      // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — delivered as an event (survives backgrounding),
+      // unlike the JS setTimeout it replaces as the JS-side STT session gate's release mechanism.
+      BensonForegroundService.onSttWatchdogTimeout = { sessionId ->
+        sendEvent("onSttWatchdogTimeout", mapOf("sessionId" to sessionId))
+      }
+      // ROUND_TTS_WATCHDOG_NATIVE_1 — same idea, for the TTS mic-ownership hard timer.
+      BensonForegroundService.onTtsWatchdogTimeout = {
+        sendEvent("onTtsWatchdogTimeout", mapOf())
+      }
+      // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN confirmation capture result.
+      BensonForegroundService.onConfirmationResult = { confirmationId, verdict, transcript ->
+        sendEvent("onConfirmationResult", mapOf("confirmationId" to confirmationId, "verdict" to verdict, "transcript" to transcript))
+      }
+      // Durable delivery: a result that finished while JS had no listener registered (suspended)
+      // must not be silently dropped — flush it the moment this module is alive again.
+      BensonForegroundService.pendingConfirmationResult?.let { (confirmationId, verdict, transcript) ->
+        BensonForegroundService.pendingConfirmationResult = null
+        sendEvent("onConfirmationResult", mapOf("confirmationId" to confirmationId, "verdict" to verdict, "transcript" to transcript))
+      }
       BensonForegroundService.onStopRequested = {
         sendEvent("onStopRequested")
       }
       BensonForegroundService.onListenRequested = {
         sendEvent("onListenRequested")
+      }
+      // ROUND_WAKE_STATE_BUG_1 — native heartbeat. Delivered as an EVENT (executes while
+      // backgrounded, unlike JS setTimeout); JS re-arms its wake loop from the handler.
+      BensonForegroundService.onWakePoke = {
+        sendEvent("onWakePoke")
       }
       BensonForegroundService.onWakeWordDetected = { commandTail ->
         sendEvent("onWakeWordDetected", mapOf("commandTail" to commandTail))
@@ -39,6 +63,10 @@ class BensonForegroundServiceModule : Module() {
       BensonForegroundService.onStopRequested = null
       BensonForegroundService.onListenRequested = null
       BensonForegroundService.onWakeWordDetected = null
+      BensonForegroundService.onWakePoke = null
+      BensonForegroundService.onSttWatchdogTimeout = null
+      BensonForegroundService.onTtsWatchdogTimeout = null
+      BensonForegroundService.onConfirmationResult = null
     }
 
     Function("startService") { title: String, body: String ->
@@ -64,6 +92,20 @@ class BensonForegroundServiceModule : Module() {
         }
         context.startService(intent)
       }
+    }
+
+    // WAKE HEALTH DIAGNOSIS — re-issue the ongoing notification with an honest body when the wake
+    // recognizer's real state changes. Plain startService (the service is already running, so this
+    // is allowed from the background); handled by ACTION_UPDATE_NOTIFICATION which only calls
+    // NotificationManager.notify() — no startForeground(), no side effects.
+    Function("updateNotification") { title: String, body: String ->
+      val context = appContext.reactContext ?: return@Function
+      val intent = Intent(context, BensonForegroundService::class.java).apply {
+        action = BensonForegroundService.ACTION_UPDATE_NOTIFICATION
+        putExtra(BensonForegroundService.EXTRA_TITLE, title)
+        putExtra(BensonForegroundService.EXTRA_BODY, body)
+      }
+      try { context.startService(intent) } catch (_: Exception) {}
     }
 
     // Brings BENSON's MainActivity to the front — used by the "Benson, come back" voice
@@ -101,6 +143,113 @@ class BensonForegroundServiceModule : Module() {
     // main thread) instead of a fire-and-forget startService(Intent) — that Intent dispatch is
     // asynchronous, so JS could previously start its own recognizer before the native one had
     // actually released the mic, causing both to briefly fight over it.
+    // ── ROUND_NATIVE_WAKE_MICROWAKEWORD_1 ────────────────────────────────────────────────────────
+    // JS drives every non-WAKE mic-ownership transition of the native wake engine.
+    // owner ∈ {COMMAND_STT, TTS, CALL} suspends it; {WAKE, NONE} re-arms it. Idempotent.
+    Function("nativeWakeSetOwner") { owner: String ->
+      BensonForegroundService.instance?.nativeWakeSetOwner(owner)
+    }
+
+    // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — background-safe replacement for the JS setTimeout that
+    // used to release app/index.tsx's STT session gate. timeoutMs mirrors STT_SESSION_MAX_MS there.
+    Function("armSttSessionWatchdog") { sessionId: String, timeoutMs: Double ->
+      BensonForegroundService.instance?.armSttSessionWatchdog(sessionId, timeoutMs.toLong())
+    }
+    Function("cancelSttSessionWatchdog") { sessionId: String ->
+      BensonForegroundService.instance?.cancelSttSessionWatchdog(sessionId)
+    }
+
+    // ROUND_TTS_WATCHDOG_NATIVE_1 — background-safe replacement for the JS setTimeout hard timer
+    // that used to be the only bound on app/index.tsx's TTS mic-ownership block. timeoutMs mirrors
+    // TTS_MAX_BLOCK_MS there (passed in from JS, not duplicated here).
+    Function("armTtsWatchdog") { timeoutMs: Double ->
+      BensonForegroundService.instance?.armTtsWatchdog(timeoutMs.toLong())
+    }
+    Function("cancelTtsWatchdog") {
+      BensonForegroundService.instance?.cancelTtsWatchdog()
+    }
+
+    // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN capture (AudioRecord+VAD+cloud
+    // STT), survives BENSON being backgrounded (e.g. WhatsApp foreground) and JS timers suspended.
+    Function("startConfirmationListening") { confirmationId: String, timeoutMs: Double ->
+      BensonForegroundService.instance?.startConfirmationListening(confirmationId, timeoutMs.toLong())
+    }
+    Function("cancelConfirmationListening") { confirmationId: String ->
+      BensonForegroundService.instance?.cancelConfirmationListening(confirmationId)
+    }
+
+    // ROUND_WAKE_NATIVE_TO_JS_ACK_1 — atomic read+clear of a durable pending wake command. Called
+    // both from the live onWakeWordDetected listener (fast path) and from a heartbeat-poll fallback
+    // (app/index.tsx's wakePokeSub) so a wake that arrived while JS was suspended is still
+    // delivered the next time JS actually runs — the one consumption point either path shares.
+    Function("takePendingWakeCommand") {
+      BensonForegroundService.instance?.takePendingWakeCommand()
+    }
+    // { model, cloud, running } — model=false ⇒ benson.tflite not bundled; cloud=false ⇒ no STT
+    // credentials pushed yet (setNativeWakeCredentials). JS treats "model || cloud" as "some
+    // native engine can own passive wake" (ROUND_WAKE_NATIVE_GENERIC_1) — nothing pretends a
+    // native engine is active when neither is true; the JS Whisper fallback stays primary then.
+    Function("isNativeWakeAvailable") {
+      val context = appContext.reactContext
+      val model = context != null && MicroWakeWord.modelPresent(context)
+      val cloud = context != null && NativeCloudWake.available(context)
+      mapOf(
+        "model" to model,
+        "cloud" to cloud,
+        "running" to (BensonForegroundService.instance?.isNativeWakeRunning() == true),
+      )
+    }
+
+    // ── ROUND_WAKE_NATIVE_GENERIC_1 ────────────────────────────────────────────────────────────
+    // ONE authoritative wake-name config, native-persisted (survives JS suspension and service
+    // recreation) so the native cloud wake loop reads the same name Settings writes. Default
+    // "Benson". Same SharedPreferences-push idiom as setSttLanguage/setWakeWordEnabled — native
+    // has no direct AsyncStorage access.
+    Function("setWakeName") { name: String ->
+      val context = appContext.reactContext ?: return@Function
+      val trimmed = name.trim()
+      context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
+        .putString(NativeCloudWake.KEY_WAKE_NAME, if (trimmed.isNotBlank()) trimmed else NativeCloudWake.DEFAULT_WAKE_NAME)
+        .apply()
+    }
+
+    Function("getWakeName") {
+      val context = appContext.reactContext ?: return@Function NativeCloudWake.DEFAULT_WAKE_NAME
+      NativeCloudWake.currentWakeName(context)
+    }
+
+    // Pushes the active STT provider's credentials down so the native cloud wake loop
+    // (NativeCloudWake.kt) can transcribe an utterance without JS being alive. JS
+    // (settingsStore.ts + expo-secure-store) remains the sole place the real secret is authored —
+    // this is a runtime push, the same class of mechanism already established for
+    // setPorcupineAccessKey (a secret pushed into this same SharedPreferences file, not a second
+    // place the secret is written from). Never logged.
+    Function("setNativeWakeCredentials") { apiKey: String, baseUrl: String, model: String ->
+      val context = appContext.reactContext ?: return@Function
+      context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
+        .putString(NativeCloudWake.KEY_API_KEY, apiKey)
+        .putString(NativeCloudWake.KEY_BASE_URL, baseUrl)
+        .putString(NativeCloudWake.KEY_MODEL, model)
+        .apply()
+    }
+
+    Function("isNativeCloudWakeConfigured") {
+      val context = appContext.reactContext ?: return@Function false
+      NativeCloudWake.available(context)
+    }
+
+    // DEV_STT_DEEPGRAM_1 (2026-09-16) — SEPARATE credential push for the native confirmation
+    // listener (NativeConfirmationListener.kt), own SharedPreferences key
+    // (KEY_CONFIRM_DEEPGRAM_API_KEY), never NativeCloudWake's KEY_API_KEY above — a Deepgram key
+    // here must never redirect the passive wake loop, which stays on Groq. Same
+    // runtime-push-only idiom as setNativeWakeCredentials. Never logged.
+    Function("setConfirmationSttCredentials") { apiKey: String ->
+      val context = appContext.reactContext ?: return@Function
+      context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
+        .putString(NativeConfirmationListener.KEY_CONFIRM_DEEPGRAM_API_KEY, apiKey)
+        .apply()
+    }
+
     AsyncFunction("pauseHotword") { promise: Promise ->
       val service = BensonForegroundService.instance
       android.util.Log.i("BensonHotword", "JS called pauseHotword(), instance=${if (service == null) "NULL" else "present"}")
