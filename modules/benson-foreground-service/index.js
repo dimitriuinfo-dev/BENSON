@@ -222,6 +222,23 @@ export function isWakeWordEnabled() {
   return NativeModule.isWakeWordEnabled();
 }
 
+// Battery-fix hibernation kill switch (2026-09-18) — after 2h with the screen off and no phone
+// movement, the native wake engine stops itself entirely (not just gating bursts) until the
+// screen turns on, the phone moves, or a native OS alarm (Clock app) is about to ring. Default
+// OFF until proven on device; enforcement is entirely native, this only persists the choice.
+export function setHibernationEnabled(enabled) {
+  try { NativeModule.setHibernationEnabled(enabled); } catch {}
+}
+
+export function isHibernationEnabled() {
+  return NativeModule.isHibernationEnabled();
+}
+
+// Live state (not the toggle) — true only while actually hibernating right now.
+export function isHibernating() {
+  try { return NativeModule.isHibernating(); } catch { return false; }
+}
+
 // Picovoice Porcupine AccessKey — see SESSION_REPORT.md for how to obtain one. No Settings UI
 // wired to this yet; exists so the value can be set without another native round-trip later.
 export function setPorcupineAccessKey(key) {

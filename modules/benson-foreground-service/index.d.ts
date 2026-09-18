@@ -65,6 +65,11 @@ export declare function setPreferOnDeviceStt(enabled: boolean): void;
 export declare function isOnDeviceSttSupported(): boolean;
 export declare function setWakeWordEnabled(enabled: boolean): void;
 export declare function isWakeWordEnabled(): Promise<boolean> | boolean;
+/** Battery-fix hibernation kill switch (2026-09-18) — default OFF until proven on device. */
+export declare function setHibernationEnabled(enabled: boolean): void;
+export declare function isHibernationEnabled(): Promise<boolean> | boolean;
+/** Live state (not the toggle) — true only while actually hibernating right now. */
+export declare function isHibernating(): Promise<boolean> | boolean;
 export declare function setPorcupineAccessKey(key: string): void;
 export declare function isPorcupineConfigured(): Promise<boolean> | boolean;
 export declare function getPorcupineStatus(): Promise<{ hasKey: boolean; hasModel: boolean }> | { hasKey: boolean; hasModel: boolean };

@@ -357,6 +357,28 @@ class BensonForegroundServiceModule : Module() {
         .getBoolean("wake_word_enabled", true)
     }
 
+    // Battery-fix hibernation kill switch (product-owner-directed 2026-09-18) — same
+    // SharedPreferences idiom as setWakeWordEnabled above; default OFF (see HIBERNATION_ENABLED_DEFAULT
+    // in BensonForegroundService.kt) until proven on device. Enforcement lives entirely in
+    // BensonForegroundService's wakePokeTick/armNativeWake/startHotwordLoop.
+    Function("setHibernationEnabled") { enabled: Boolean ->
+      val context = appContext.reactContext ?: return@Function
+      context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
+        .putBoolean("hibernation_enabled", enabled).apply()
+    }
+
+    Function("isHibernationEnabled") {
+      val context = appContext.reactContext ?: return@Function false
+      context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE)
+        .getBoolean("hibernation_enabled", false)
+    }
+
+    // Live state (not the toggle) — true only while actually hibernating right now, for the
+    // Settings status line. Mirrors getActiveWakeEngine's "read real native state" idiom.
+    Function("isHibernating") {
+      BensonForegroundService.instance?.isHibernatingNow() ?: false
+    }
+
     // Picovoice Porcupine AccessKey (product-owner-directed 2026-08-01) — pasted by the user once
     // they've made a free Picovoice Console account (see SESSION_REPORT.md for the exact steps).
     // No UI wired to this yet this session — exists so the value CAN be set (e.g. from a debug

@@ -10,6 +10,10 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorManager
+import android.hardware.TriggerEvent
+import android.hardware.TriggerEventListener
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -217,6 +221,58 @@ class BensonForegroundService : Service() {
     }
   }
 
+  // Battery fix (product-owner-directed 2026-09-18) — the user's phone drained overnight while
+  // sitting untouched. Root cause: neither native wake engine, nor the legacy SpeechRecognizer
+  // loop, ever stops itself just because nothing has happened for hours — WakeGate above only
+  // throttles individual bursts on ambient silence, the engine/AudioRecord stream itself keeps
+  // running the whole time regardless. After IDLE_TIMEOUT_MS with the screen off and the phone
+  // physically still, stop the wake engine entirely (checked on the existing 3 s wakePokeTick
+  // heartbeat — no new timer) until the screen turns on, the phone moves, or a native OS alarm
+  // (Clock app) is about to ring. REVERSIBLE: default OFF via HIBERNATION_ENABLED_DEFAULT below
+  // (Settings-controlled, same kill-switch idiom as wake_word_enabled) until proven on device.
+  private object HibernationGate {
+    const val HIBERNATION_ENABLED_DEFAULT = false
+    const val IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000L
+    const val ALARM_LOOKAHEAD_MS = 15 * 60 * 1000L
+  }
+  @Volatile private var hibernating = false
+  private var lastActivityAtMs: Long = System.currentTimeMillis()
+  private var sensorManager: SensorManager? = null
+  private var significantMotionSensor: Sensor? = null
+
+  // TYPE_SIGNIFICANT_MOTION is a one-shot, hardware-backed, near-zero-power trigger built exactly
+  // for "was the device physically moved" — a different signal from Car Mode's GPS-speed detector
+  // (lib/carAutoDetect.ts), which only fires on sustained >25km/h driving and would never notice
+  // the phone being picked up off a nightstand. Self-disabling per the Android API — must
+  // re-request after every trigger.
+  private val motionTriggerListener = object : TriggerEventListener() {
+    override fun onTrigger(event: TriggerEvent?) {
+      AudioDiag.log(this@BensonForegroundService, "MOTION_DETECTED", "")
+      onActivityDetected("motion")
+      try { significantMotionSensor?.let { sensorManager?.requestTriggerSensor(this, it) } } catch (_: Exception) {}
+    }
+  }
+
+  private fun isAlarmImminent(): Boolean {
+    val next = try {
+      (getSystemService(ALARM_SERVICE) as? AlarmManager)?.nextAlarmClock?.triggerTime
+    } catch (_: Exception) { null } ?: return false
+    return next - System.currentTimeMillis() <= HibernationGate.ALARM_LOOKAHEAD_MS
+  }
+
+  // Any real sign of use — screen on, unlock, or phone movement. Exits hibernation if active;
+  // always resets the idle clock so the next hibernation window starts fresh from here.
+  private fun onActivityDetected(reason: String) {
+    lastActivityAtMs = System.currentTimeMillis()
+    if (hibernating) {
+      hibernating = false
+      AudioDiag.log(this, "HIBERNATE_EXIT", "reason=$reason")
+      mainHandler.post { startHotwordLoop() }
+    }
+  }
+
+  fun isHibernatingNow(): Boolean = hibernating
+
   private fun nativeWakeAvailable(): Boolean =
     MicroWakeWord.modelPresent(this) || NativeCloudWake.available(this)
 
@@ -227,6 +283,7 @@ class BensonForegroundService : Service() {
     val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
     if (prefs.getBoolean("user_stopped", false)) return
     if (!prefs.getBoolean("wake_word_enabled", true)) return
+    if (hibernating) { AudioDiag.log(this, "WAKE_AUDIO_BLOCKED", "why=$why reason=hibernating"); return }
     if (micOwner == "COMMAND_STT" || micOwner == "TTS" || micOwner == "CALL" || micOwner == "CONFIRMATION_STT") {
       AudioDiag.log(this, "WAKE_AUDIO_BLOCKED", "why=$why owner=$micOwner")
       return
@@ -364,6 +421,26 @@ class BensonForegroundService : Service() {
                 if (recovered) "NWW_SELF_HEAL_OK" else "NWW_SELF_HEAL_FAIL", "engine=$engineName")
             }
           }
+          // Hibernation entry/exit — see HibernationGate's comment above armNativeWake() for the
+          // full rationale. Checked on this same heartbeat; alarm-imminent is the one exit
+          // condition that has to be polled (screen-on/motion already exit immediately via their
+          // own callbacks, onActivityDetected).
+          val hibernationEnabled = prefs.getBoolean("hibernation_enabled", HibernationGate.HIBERNATION_ENABLED_DEFAULT)
+          if (hibernationEnabled) {
+            if (!hibernating) {
+              val pm = getSystemService(POWER_SERVICE) as? PowerManager
+              val screenOff = pm?.isInteractive == false
+              val idleMs = System.currentTimeMillis() - lastActivityAtMs
+              if (screenOff && idleMs >= HibernationGate.IDLE_TIMEOUT_MS && !isAlarmImminent()) {
+                hibernating = true
+                AudioDiag.log(this@BensonForegroundService, "HIBERNATE_ENTER", "idleMs=$idleMs")
+                suspendNativeWake("hibernation")
+                stopHotwordLoop()
+              }
+            } else if (isAlarmImminent()) {
+              onActivityDetected("alarm_imminent")
+            }
+          }
           // URGENT_REPAIR_AND_ADVANCE_1 — previously only invoked in the "no native model" branch
           // above (ROUND_WAKE_STATE_BUG_1's original JS-Whisper-wake-loop-only purpose). Proven
           // live: JS's own doStartListening() retry timers (tts_tail / post-action-mute) also go
@@ -402,6 +479,7 @@ class BensonForegroundService : Service() {
         else -> "unknown"
       }
       AudioDiag.log(context, "SCREEN_STATE", "state=$state")
+      if (state == "on" || state == "unlocked") onActivityDetected("screen_$state")
     }
   }
 
@@ -416,6 +494,12 @@ class BensonForegroundService : Service() {
         addAction(Intent.ACTION_SCREEN_OFF)
         addAction(Intent.ACTION_USER_PRESENT)
       })
+    } catch (_: Exception) {}
+    try {
+      sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+      significantMotionSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION)
+      significantMotionSensor?.let { sensorManager?.requestTriggerSensor(motionTriggerListener, it) }
+        ?: AudioDiag.log(this, "MOTION_SENSOR_UNAVAILABLE", "")
     } catch (_: Exception) {}
     touchGuardianHeartbeat()
     // WorkManager persists across process death/reboot once scheduled — a second, independent
@@ -590,6 +674,7 @@ class BensonForegroundService : Service() {
     stopHotwordLoop()
     releaseWakeLock()
     try { unregisterReceiver(screenStateReceiver) } catch (_: Exception) {}
+    try { significantMotionSensor?.let { sensorManager?.cancelTriggerSensor(motionTriggerListener, it) } } catch (_: Exception) {}
     super.onDestroy()
   }
 
@@ -714,6 +799,7 @@ class BensonForegroundService : Service() {
 
   private fun startHotwordLoop() {
     if (hotwordLoopRunning) return
+    if (hibernating) { AudioDiag.log(this, "HOTWORD_LOOP_SUPERSEDED", "reason=hibernating"); return }
     // ROUND_BENSON_STABILIZATION_CLEANUP_1 — proven duplicate-engine gap: every call site
     // (ACTION_REVIVE, ACTION_RESUME_HOTWORD, resumeHotwordAndNotify) called this unconditionally,
     // with no check for whether NativeCloudWake should be the sole wake authority instead. On a

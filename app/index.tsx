@@ -19,6 +19,7 @@ import {
   isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations,
   pauseHotword, resumeHotword, setSystemSoundsMuted, consumeRecoveryFlag, logAudioDiag,
   setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
+  setHibernationEnabled, isHibernationEnabled,
   setPorcupineAccessKey, getPorcupineStatus, getActiveWakeEngine,
   nativeWakeSetOwner, isNativeWakeAvailable, setWakeName, setNativeWakeCredentials,
   setConfirmationSttCredentials,
@@ -423,6 +424,11 @@ export default function BensonApp() {
   // mic control. This JS-side flag exists only to drive the Settings Switch and restore its
   // visual state at boot — the actual enforcement is entirely native.
   const [wakeWordEnabled, setWakeWordEnabledState] = useState(true);
+
+  // Battery-fix hibernation kill switch (product-owner-directed 2026-09-18) — default OFF until
+  // proven on device. Same restore/push idiom as wakeWordEnabled above; enforcement is entirely
+  // native (BensonForegroundService.kt), this only drives the Settings Switch.
+  const [hibernationEnabled, setHibernationEnabledState] = useState(false);
 
   // Picovoice Porcupine — Settings UI (product-owner-directed 2026-08-02). The AccessKey field is
   // write-only (no native getter reads it back — same idiom as the API key fields above), so it
@@ -2004,7 +2010,7 @@ export default function BensonApp() {
       if (m === 5 || m === 15 || m === 30) { setReminderMins(m); a11yReminderMsRef.current = m * 60 * 1000; }
     }).catch(() => {});
 
-    const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, gk, tp, cm, acm, cda, cdn, vig, rl, mp, se, ww, wn] = await Promise.all([
+    const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, gk, tp, cm, acm, cda, cdn, vig, rl, mp, se, ww, wn, hib] = await Promise.all([
       AsyncStorage.getItem('masterName'),
       AsyncStorage.getItem('anthropicKey'),
       AsyncStorage.getItem('bensonLang'),
@@ -2031,6 +2037,7 @@ export default function BensonApp() {
       AsyncStorage.getItem('bensonSttEngine'),
       AsyncStorage.getItem('bensonWakeWordEnabled'),
       AsyncStorage.getItem('bensonWakeName'),
+      AsyncStorage.getItem('bensonHibernationEnabled'),
     ]);
 
     if (sl) { setLang(sl); langRef.current = sl; try { setSttLanguage(sl); } catch {} }
@@ -2078,6 +2085,11 @@ export default function BensonApp() {
     setWakeNameState(resolvedWakeName);
     wakeNameRef.current = resolvedWakeName;
     try { setWakeName(resolvedWakeName); } catch {}
+    // Hibernation kill switch — restore the visual toggle state and push it to native explicitly,
+    // same discipline as the wake-word kill switch above. Default OFF (hib === 'true' required).
+    const hibernationOn = hib === 'true';
+    setHibernationEnabledState(hibernationOn);
+    try { setHibernationEnabled(hibernationOn); } catch {}
     // Push the already-saved Groq STT credentials down to the native cloud wake loop so it can
     // transcribe an utterance without JS being alive — JS/expo-secure-store remains the sole
     // place the real secret is authored (settingsStore.ts); this is a runtime push only, same
@@ -2751,6 +2763,16 @@ export default function BensonApp() {
     setWakeWordEnabledState(v);
     await AsyncStorage.setItem('bensonWakeWordEnabled', v.toString());
     try { setWakeWordEnabled(v); } catch {}
+  }
+
+  // Battery-fix hibernation kill switch — the actual enforcement (stop the wake engine after 2h
+  // idle with the screen off) lives entirely in native (BensonForegroundService.kt), gated on the
+  // same SharedPreferences key this pushes to. This just persists the choice and syncs the
+  // toggle's visual state, same shape as toggleWakeWord above.
+  async function toggleHibernation(v: boolean) {
+    setHibernationEnabledState(v);
+    await AsyncStorage.setItem('bensonHibernationEnabled', v.toString());
+    try { setHibernationEnabled(v); } catch {}
   }
 
   // ROUND_WAKE_NATIVE_GENERIC_1 — change the ONE authoritative wake name (default "Benson"),
@@ -5242,6 +5264,16 @@ export default function BensonApp() {
                 accessibilityLabel="Wake word active" accessibilityRole="switch" />
               <Text style={s.factLine}>
                 When off, Benson never listens for "Benson" in the background — the mic stays closed until you tap to talk.
+              </Text>
+
+              {/* Battery-fix hibernation kill switch (2026-09-18) */}
+              <Text style={s.label}>HIBERNARE (ECONOMISIRE BATERIE)</Text>
+              <Switch value={hibernationEnabled} onValueChange={toggleHibernation}
+                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
+                accessibilityLabel="Hibernation battery saving" accessibilityRole="switch" />
+              <Text style={s.factLine}>
+                After 2h with the screen off and the phone untouched, Benson stops listening for the wake word to save
+                battery. Wakes up automatically when the phone moves, the screen turns on, or a Clock alarm is about to ring.
               </Text>
 
               {/* Picovoice Porcupine — AccessKey field + live status (product-owner-directed
