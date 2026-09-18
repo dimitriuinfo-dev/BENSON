@@ -120,6 +120,62 @@ export async function checkSevereWeather(lat: number, lon: number): Promise<Seve
   }
 }
 
+// General (not just severe) WMO weather_code → short spoken phrase, localized — used by the
+// weather agent's forecast reply (product-owner-directed 2026-09-18: "nu știe cum va fi vremea
+// mâine sau în următoarele 5 zile", confirmed real — runWeatherAgent only ever fetched CURRENT
+// conditions and replied in hardcoded English regardless of the user's language). Codes per
+// https://open-meteo.com/en/docs (WMO 4677).
+export function describeWeatherCode(code: number, lang: string): string {
+  const l = (lang || '').toLowerCase();
+  const ro = l.startsWith('ro'), de = l.startsWith('de');
+  if (code === 0) return ro ? 'cer senin' : de ? 'klarer Himmel' : 'clear sky';
+  if (code === 1 || code === 2) return ro ? 'parțial înnorat' : de ? 'teilweise bewölkt' : 'partly cloudy';
+  if (code === 3) return ro ? 'cer înnorat' : de ? 'bedeckt' : 'overcast';
+  if (code === 45 || code === 48) return ro ? 'ceață' : de ? 'Nebel' : 'fog';
+  if (code >= 51 && code <= 57) return ro ? 'burniță' : de ? 'Nieselregen' : 'drizzle';
+  if (code === 61 || code === 63) return ro ? 'ploaie' : de ? 'Regen' : 'rain';
+  if (code === 65 || code === 82) return ro ? 'ploaie torențială' : de ? 'Starkregen' : 'heavy rain';
+  if (code === 66 || code === 67) return ro ? 'ploaie înghețată' : de ? 'gefrierender Regen' : 'freezing rain';
+  if (code >= 71 && code <= 77) return ro ? 'ninsoare' : de ? 'Schnee' : 'snow';
+  if (code === 75 || code === 86) return ro ? 'ninsoare abundentă' : de ? 'starker Schneefall' : 'heavy snow';
+  if (code === 80 || code === 81) return ro ? 'averse' : de ? 'Regenschauer' : 'rain showers';
+  if (code === 95 || code === 96 || code === 99) return ro ? 'furtună cu descărcări electrice' : de ? 'Gewitter' : 'thunderstorm';
+  return ro ? 'vreme schimbătoare' : de ? 'wechselhaftes Wetter' : 'changeable weather';
+}
+
+export type ForecastDay = {
+  dateISO: string;
+  tempMaxC: number;
+  tempMinC: number;
+  code: number;
+  precipitationSum: number;
+};
+
+// Free, no-key multi-day forecast — same Open-Meteo host as fetchWeatherData/checkSevereWeather,
+// the `daily=` param instead of `current=`. Up to 16 days supported by the API; callers should
+// keep `days` small (a spoken reply listing more than ~5 days stops being useful).
+export async function fetchWeatherForecast(lat: number, lon: number, days: number): Promise<ForecastDay[] | null> {
+  try {
+    const res = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+      `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum` +
+      `&forecast_days=${Math.max(1, Math.min(16, days))}&timezone=auto`
+    );
+    const data = await res.json();
+    const dates: string[] = data.daily?.time;
+    if (!Array.isArray(dates)) return null;
+    return dates.map((dateISO, i) => ({
+      dateISO,
+      tempMaxC: data.daily.temperature_2m_max[i],
+      tempMinC: data.daily.temperature_2m_min[i],
+      code: data.daily.weather_code[i],
+      precipitationSum: data.daily.precipitation_sum?.[i] ?? 0,
+    }));
+  } catch {
+    return null;
+  }
+}
+
 // Free, no-key place search via Nominatim (OpenStreetMap) — no device permission needed,
 // unlike Location.geocodeAsync which is gated behind Android's location permission.
 // Usage policy: identify with a User-Agent, keep to on-demand single lookups (not bulk queries).

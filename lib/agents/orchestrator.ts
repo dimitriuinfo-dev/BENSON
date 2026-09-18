@@ -17,6 +17,7 @@ export { conversationFallbackLine };
 
 export type ModelProvider = 'claude' | 'openai' | 'gemini';
 import { WEATHER_PATTERN, runWeatherAgent } from './weatherAgent';
+import { TIME_PATTERN, LOCATION_PATTERN, runTimeAgent, runLocationAgent } from './deviceFactsAgent';
 import { PLAY_PATTERN, runMediaAgent } from './mediaAgent';
 import { GALLERY_PATTERN, runGalleryAgent } from './galleryAgent';
 import { NOTEPAD_PATTERN, runNoteRouterAgent, isConfident, type ParsedNote } from './noteRouterAgent';
@@ -74,7 +75,7 @@ function isSimpleConversational(text: string, historyLength: number): boolean {
   return true;
 }
 
-export type AgentName = 'contacts' | 'appLauncher' | 'search' | 'claude' | 'weather' | 'media' | 'gallery' | 'notepad';
+export type AgentName = 'contacts' | 'appLauncher' | 'search' | 'claude' | 'weather' | 'media' | 'gallery' | 'notepad' | 'time' | 'location';
 
 export type OrchestratorResult = {
   agent: AgentName;
@@ -88,8 +89,9 @@ export type OrchestratorResult = {
 };
 
 // Benson Core Orchestrator — decides which agent handles an incoming command:
-// Contacts > Media (play X) > App Launcher (open/navigate) > Weather > Gallery > Search
-// (news is a specialization of Search) > Claude Agent (default fallback).
+// Contacts > Media (play X) > App Launcher (open/navigate) > Time > Location > Weather > Gallery >
+// Search (news is a specialization of Search) > Claude Agent (default fallback, still has
+// getCurrentDateTime/getLocation tools of its own for phrasings Time/Location's patterns miss).
 export async function routeCommand(
   text: string,
   ctx: OrchestratorContext,
@@ -142,8 +144,18 @@ export async function routeCommand(
     return { agent: 'appLauncher', ...launcherResult };
   }
 
+  // Deterministic, not tool-calling — see deviceFactsAgent.ts's doc comment for why.
+  if (TIME_PATTERN.test(text)) {
+    return { agent: 'time', ...runTimeAgent(ctx.lang, ctx.address) };
+  }
+
+  if (LOCATION_PATTERN.test(text)) {
+    const result = await runLocationAgent(ctx.lang, ctx.address);
+    return { agent: 'location', ...result };
+  }
+
   if (WEATHER_PATTERN.test(text)) {
-    const result = await runWeatherAgent(text, ctx.address);
+    const result = await runWeatherAgent(text, ctx.address, ctx.lang);
     return { agent: 'weather', ...result };
   }
 
