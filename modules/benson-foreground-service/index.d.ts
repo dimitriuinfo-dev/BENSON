@@ -70,6 +70,8 @@ export declare function setHibernationEnabled(enabled: boolean): void;
 export declare function isHibernationEnabled(): Promise<boolean> | boolean;
 /** Live state (not the toggle) — true only while actually hibernating right now. */
 export declare function isHibernating(): Promise<boolean> | boolean;
+/** JS-driven exit (severe-weather danger check). Same effect as the native motion/screen-on triggers. */
+export declare function wakeFromHibernation(reason: string): void;
 export declare function setPorcupineAccessKey(key: string): void;
 export declare function isPorcupineConfigured(): Promise<boolean> | boolean;
 export declare function getPorcupineStatus(): Promise<{ hasKey: boolean; hasModel: boolean }> | { hasKey: boolean; hasModel: boolean };

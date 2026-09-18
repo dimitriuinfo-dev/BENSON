@@ -381,6 +381,12 @@ class BensonForegroundServiceModule : Module() {
       BensonForegroundService.instance?.isHibernatingNow() ?: false
     }
 
+    // JS-driven exit (severe-weather danger check — see checkSevereWeather in
+    // lib/contextEngine.ts). Same effect as the native motion/screen-on triggers.
+    Function("wakeFromHibernation") { reason: String ->
+      BensonForegroundService.instance?.exitHibernationFromJs(reason)
+    }
+
     // Picovoice Porcupine AccessKey (product-owner-directed 2026-08-01) — pasted by the user once
     // they've made a free Picovoice Console account (see SESSION_REPORT.md for the exact steps).
     // No UI wired to this yet this session — exists so the value CAN be set (e.g. from a debug

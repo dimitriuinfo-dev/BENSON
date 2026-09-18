@@ -276,6 +276,15 @@ class BensonForegroundService : Service() {
 
   fun isHibernatingNow(): Boolean = hibernating
 
+  // JS-driven exit — the severe-weather danger check runs in JS (checkSevereWeather in
+  // lib/contextEngine.ts, driven off this same wakePokeTick heartbeat via onWakePoke), since it
+  // needs a network fetch + GPS, neither of which belongs in this service. Posts through
+  // onActivityDetected exactly like the native motion/screen triggers, so JS can't put this
+  // service into any state the native triggers couldn't also reach.
+  fun exitHibernationFromJs(reason: String) {
+    mainHandler.post { onActivityDetected(reason) }
+  }
+
   private fun nativeWakeAvailable(): Boolean =
     MicroWakeWord.modelPresent(this) || NativeCloudWake.available(this)
 

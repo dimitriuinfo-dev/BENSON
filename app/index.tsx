@@ -19,7 +19,7 @@ import {
   isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations,
   pauseHotword, resumeHotword, setSystemSoundsMuted, consumeRecoveryFlag, logAudioDiag,
   setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
-  setHibernationEnabled, isHibernationEnabled,
+  setHibernationEnabled, isHibernationEnabled, isHibernating, wakeFromHibernation,
   setPorcupineAccessKey, getPorcupineStatus, getActiveWakeEngine,
   nativeWakeSetOwner, isNativeWakeAvailable, setWakeName, setNativeWakeCredentials,
   setConfirmationSttCredentials,
@@ -92,7 +92,7 @@ import {
 import { getBondedDevices, type BluetoothDeviceInfo } from 'benson-car-bluetooth';
 import { addPipModeListener } from 'benson-app-registry';
 import {
-  startContextWatch, BORDER_CROSSINGS,
+  startContextWatch, BORDER_CROSSINGS, checkSevereWeather,
   type ContextWatchHandle, type RoadType, type BorderCrossing,
 } from '../lib/contextEngine';
 import { BensonMainScreen } from '../components/BensonMainScreen';
@@ -681,6 +681,7 @@ export default function BensonApp() {
   // mic-ownership handoff at command/TTS/call boundaries and never runs its own wake loop.
   const nativeWakeRef = useRef(false);
   const nativeWakeEventAtRef = useRef(0);    // Date.now() a native wake event reached JS (for WAKE_TO_COMMAND_LATENCY)
+  const hibernationWeatherCheckedAtRef = useRef(0); // Date.now() of the last checkSevereWeather call while hibernating
   const nwOwner = (o: 'WAKE' | 'COMMAND_STT' | 'TTS' | 'CALL' | 'NONE') => {
     if (!nativeWakeRef.current) return;
     try { nativeWakeSetOwner(o); } catch {}
@@ -1481,6 +1482,28 @@ export default function BensonApp() {
       // are NATIVE-side logs that fire regardless of whether sendEvent() ever reaches this
       // callback — never independently verified from the JS side until now.
       logAudioDiag('WAKE_POKE_JS_RECEIVED', `ts=${Date.now()}`);
+      // Battery-fix hibernation danger-wake condition (product-owner-directed 2026-09-18) —
+      // independent try/catch so a failure here can never affect the wake self-heal logic below.
+      // Throttled to once per HIBERNATION_WEATHER_CHECK_INTERVAL_MS (not every ~3s poke) — a
+      // network fetch on every heartbeat would be wasteful and pointless while hibernating.
+      try {
+        const HIBERNATION_WEATHER_CHECK_INTERVAL_MS = 20 * 60 * 1000;
+        if (Date.now() - hibernationWeatherCheckedAtRef.current >= HIBERNATION_WEATHER_CHECK_INTERVAL_MS) {
+          hibernationWeatherCheckedAtRef.current = Date.now();
+          Promise.resolve(isHibernating()).then(async (hibernatingNow) => {
+            if (!hibernatingNow) return;
+            const perm = await Location.getForegroundPermissionsAsync().catch(() => null);
+            if (!perm?.granted) return;
+            const pos = await Location.getCurrentPositionAsync({}).catch(() => null);
+            if (!pos) return;
+            const alert = await checkSevereWeather(pos.coords.latitude, pos.coords.longitude).catch(() => null);
+            if (!alert?.severe) return;
+            logAudioDiag('HIBERNATE_EXIT_JS', `reason=weather_danger description="${alert.description}"`);
+            wakeFromHibernation('weather_danger');
+            speakDangerAlert(`Atenție, ${getAddress()}: ${alert.description} anunțată în zona ta. Am ieșit din hibernare.`);
+          }).catch(() => {});
+        }
+      } catch {}
       try {
         // Fallback consumption of a durable pending wake command that the live onWakeWordDetected
         // event failed to deliver. takePendingWakeCommand() is an atomic read+clear, so if the
@@ -2574,6 +2597,34 @@ export default function BensonApp() {
     bumpSessionKeepAwake();
     // Fire-and-forget still blocks the mic for the duration + tail (previously it did NOT touch
     // speakingRef at all, so the mic stayed open through these replies — a real echo source).
+    beginTtsBlock();
+    if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
+      speakWithGemini(text, geminiKeyRef.current, 'Kore', () => endTtsBlock('success'))
+        .catch(() => speakOnDevice(text));
+    } else if (ttsProviderRef.current === 'openai' && openaiKeyRef.current) {
+      speakWithOpenAI(text, openaiKeyRef.current, 'onyx', () => endTtsBlock('success'), currentVoiceInstructions())
+        .catch(() => speakOnDevice(text));
+    } else {
+      speakOnDevice(text);
+    }
+  }
+
+  // Battery-fix hibernation danger alert (product-owner-directed 2026-09-18) — the ONE deliberate
+  // exception to E1-0 ("Tăcerea e implicită") in this file. Every other proactive-speech case
+  // (accessibility dropped, Guardian recovery, mission re-announce, exec watchdog) stays silently
+  // suppressed under E1_USER_ONLY by explicit product-owner choice — this one doesn't, because
+  // it's a safety alert (severe weather while the phone sat hibernating, unattended) rather than
+  // a convenience nag. Still respects an explicit user mute (silencedRef/mutedRef/voiceEnabledRef)
+  // — this bypasses E1-0 only, never the user's own kill switches. Same body as speak() above,
+  // minus the e1SuppressSpeak() call.
+  function speakDangerAlert(text: string) {
+    if (silencedRef.current || mutedRef.current) {
+      logAudioDiag('SPEAK_SUPPRESSED', 'reason=user_silenced source=hibernation_danger');
+      return;
+    }
+    if (!voiceEnabledRef.current) return;
+    rememberSpoken(text);
+    bumpSessionKeepAwake();
     beginTtsBlock();
     if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
       speakWithGemini(text, geminiKeyRef.current, 'Kore', () => endTtsBlock('success'))

@@ -239,6 +239,12 @@ export function isHibernating() {
   try { return NativeModule.isHibernating(); } catch { return false; }
 }
 
+// JS-driven exit (severe-weather danger check — see checkSevereWeather in lib/contextEngine.ts).
+// Same effect as the native motion/screen-on triggers.
+export function wakeFromHibernation(reason) {
+  try { NativeModule.wakeFromHibernation(String(reason)); } catch {}
+}
+
 // Picovoice Porcupine AccessKey — see SESSION_REPORT.md for how to obtain one. No Settings UI
 // wired to this yet; exists so the value can be set without another native round-trip later.
 export function setPorcupineAccessKey(key) {
