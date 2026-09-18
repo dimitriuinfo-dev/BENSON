@@ -5370,7 +5370,13 @@ export default function BensonApp() {
                 {porcupineStatus.hasKey && porcupineStatus.hasModel ? ' — Porcupine ready.' : ' — falls back to the classic engine until both are present.'}
               </Text>
               <Text style={s.factLine}>
-                Wake-word engine running right now: {activeWakeEngine === 'porcupine' ? 'Porcupine' : activeWakeEngine === 'speechrecognizer' ? 'Classic (SpeechRecognizer)' : 'none (wake word off)'}
+                Wake-word engine running right now: {
+                  activeWakeEngine === 'microwakeword' ? 'MicroWakeWord (on-device)' :
+                  activeWakeEngine === 'native_cloud' ? 'Native Cloud (Groq/Deepgram)' :
+                  activeWakeEngine === 'porcupine' ? 'Porcupine' :
+                  activeWakeEngine === 'speechrecognizer' ? 'Classic (SpeechRecognizer)' :
+                  'none (wake word off or not armed)'
+                }
               </Text>
 
               {/* Car Mode */}

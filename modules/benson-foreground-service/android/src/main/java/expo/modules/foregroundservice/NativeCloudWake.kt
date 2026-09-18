@@ -51,6 +51,22 @@ class NativeCloudWake(
     const val DEFAULT_MODEL = "whisper-large-v3-turbo"
     const val DEFAULT_WAKE_NAME = "Benson"
 
+    // 2026-09-18 wake-silence audit — root cause found: this is the ONLY STT call the passive wake
+    // loop ever made (postToGroq below), and Groq's request quota has been confirmed exhausted
+    // since 2026-09-16 (NativeConfirmationListener.kt's DEV_STT_DEEPGRAM_1 comment: "this must
+    // never repoint the passive wake loop, which stays on Groq" — a deliberate, narrow-scope
+    // decision at the time, whose consequence is this exact live failure: every burst's STT call
+    // 429s, is silently logged as WAKE_NATIVE_ERROR reason=stt_http code=429, and treated
+    // identically to ambient silence — "Benson" can never be recognized, indefinitely, with zero
+    // visible error to the user. Reuses NativeConfirmationListener's already-proven Deepgram path
+    // and its ALREADY-PUSHED credential (KEY_CONFIRM_DEEPGRAM_API_KEY — same key JS already sends
+    // on every app launch for confirmation listening; no new JS/bridge plumbing needed here).
+    // REVERSIBLE VIA THIS ONE CONSTANT: false restores the exact prior Groq-only behavior the
+    // instant Groq's quota is restored.
+    const val USE_DEEPGRAM_FOR_WAKE = true
+    private const val DEEPGRAM_BASE_URL = "https://api.deepgram.com/v1/listen"
+    private const val DEEPGRAM_MODEL = "nova-3"
+
     // Audio format — identical to BensonAudioCaptureModule.kt / MicroWakeWord.kt.
     private const val SAMPLE_RATE = 16000
     private const val READ_CHUNK_MS = 50L
@@ -71,7 +87,9 @@ class NativeCloudWake(
     private const val PRE_ROLL_CHUNKS = 11
 
     fun available(context: Context): Boolean {
-      val key = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_API_KEY, "") ?: ""
+      val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+      val keyName = if (USE_DEEPGRAM_FOR_WAKE) NativeConfirmationListener.KEY_CONFIRM_DEEPGRAM_API_KEY else KEY_API_KEY
+      val key = prefs.getString(keyName, "") ?: ""
       return key.isNotBlank()
     }
 
@@ -290,7 +308,9 @@ class NativeCloudWake(
     if (pcmBytes.isEmpty() || !running) return
     val wakeName = currentWakeName(context)
     log("WAKE_STT_REQUEST", "bytes=${pcmBytes.size}")
-    val transcript = postToGroq(pcmBytes)
+    // 2026-09-18 — see USE_DEEPGRAM_FOR_WAKE's comment above. postToGroq(pcmBytes) stays fully in
+    // place, unused, for the production revert once Groq's quota is restored.
+    val transcript = if (USE_DEEPGRAM_FOR_WAKE) postToDeepgram(pcmBytes) else postToGroq(pcmBytes)
     if (!running) return // stopped while the network call was in flight — never fire a stale trigger
     if (transcript == null) {
       log("WAKE_STT_RESULT", "ok=false")
@@ -345,6 +365,47 @@ class NativeCloudWake(
       // since it is expected mic-ownership behavior, not a fault.
       if (!running) return null
       log("WAKE_NATIVE_ERROR", "reason=stt_exception error=\"${e.javaClass.simpleName}: ${e.message}\"")
+      null
+    } finally {
+      currentCall = null
+    }
+  }
+
+  // 2026-09-18 — same idiom as NativeConfirmationListener.kt's own postToDeepgram (Deepgram's
+  // pre-recorded /listen endpoint takes the raw WAV bytes as the request body directly, no
+  // multipart, unlike Groq's postToGroq above). Reuses that file's already-pushed credential
+  // (KEY_CONFIRM_DEEPGRAM_API_KEY) — see USE_DEEPGRAM_FOR_WAKE's comment for why.
+  private fun postToDeepgram(pcmBytes: ByteArray): String? {
+    log("WAKE_STT_PROVIDER_ATTEMPT", "provider=deepgram")
+    if (pcmBytes.isEmpty()) { log("WAKE_STT_RESULT", "provider=deepgram status=error reason=empty_audio"); return null }
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val apiKey = prefs.getString(NativeConfirmationListener.KEY_CONFIRM_DEEPGRAM_API_KEY, "") ?: ""
+    if (apiKey.isBlank()) { log("WAKE_STT_RESULT", "provider=deepgram status=error reason=no_api_key"); return null }
+    val sttLang = (prefs.getString("stt_language", null) ?: "ro-RO").split("-").firstOrNull()?.lowercase() ?: "ro"
+    val wav = buildWav(pcmBytes)
+    val body = wav.toRequestBody("audio/wav".toMediaType())
+    val url = "$DEEPGRAM_BASE_URL?model=$DEEPGRAM_MODEL&language=$sttLang"
+    val request = Request.Builder().url(url).addHeader("Authorization", "Token $apiKey").post(body).build()
+    val call = client.newCall(request)
+    currentCall = call
+    return try {
+      call.execute().use { resp ->
+        if (!resp.isSuccessful) {
+          log("WAKE_STT_RESULT", "provider=deepgram status=error http_status=${resp.code}")
+          return null
+        }
+        val json = resp.body?.string() ?: return null
+        val alt = JSONObject(json).optJSONObject("results")
+          ?.optJSONArray("channels")?.optJSONObject(0)
+          ?.optJSONArray("alternatives")?.optJSONObject(0)
+        val transcript = (alt?.optString("transcript", "") ?: "").trim()
+        log("WAKE_STT_RESULT", "provider=deepgram status=ok http_status=${resp.code}")
+        transcript
+      }
+    } catch (e: Exception) {
+      if (!running) return null
+      log("WAKE_NATIVE_ERROR", "reason=deepgram_stt_exception error=\"${e.message}\"")
+      log("WAKE_STT_RESULT", "provider=deepgram status=exception")
       null
     } finally {
       currentCall = null

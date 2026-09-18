@@ -933,7 +933,21 @@ class BensonForegroundService : Service() {
   // fall back to SpeechRecognizer at start time (missing model/key/init failure), so the
   // preference alone would lie to the user about what's really listening. "none" when the
   // hotword loop isn't running at all (e.g. kill switch off, or paused during command capture).
-  fun getActiveWakeEngine(): String = activeWakeEngine ?: "none"
+  // BUG FOUND during 2026-09-18 wake-silence audit: `activeWakeEngine` is only ever set to
+  // "porcupine"/"speechrecognizer" (the legacy path, see startHotwordLoop/tryStartPorcupine below)
+  // — armNativeWake() above never sets it for MicroWakeWord/NativeCloudWake, the two engines that
+  // actually run on any build where either is configured (armNativeWake supersedes the legacy path
+  // entirely when nativeWakeAvailable() is true). Settings' "Wake-word engine running right now"
+  // status line read this and would ALWAYS show "none (wake word off)" on such a build even while
+  // wake word was genuinely working — or, more importantly for a real silence report, this made it
+  // impossible to tell from Settings alone whether a native engine was truly not running (the real
+  // bug) or just mis-reported (this one). Now checks live engine state directly instead of trusting
+  // the legacy-only variable.
+  fun getActiveWakeEngine(): String {
+    if (microWakeWord?.isRunning() == true) return "microwakeword"
+    if (nativeCloudWake?.isRunning() == true) return "native_cloud"
+    return activeWakeEngine ?: "none"
+  }
 
   private fun stopHotwordLoop() {
     hotwordLoopRunning = false
