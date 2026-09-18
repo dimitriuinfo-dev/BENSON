@@ -25,7 +25,6 @@ const REQUEST_TIMEOUT_MS = 20000;
 // guard against reading a file mid-write, but with a real stat it returns after ~one poll instead
 // of burning the full timeout.
 const FILE_READY_TIMEOUT_MS = 1500;
-const FILE_READY_POLL_MS = 100;
 const WAV_HEADER_BYTES = 44;
 
 // Single source of truth: the `file://` URI used for size checks AND for the multipart upload.
@@ -44,33 +43,50 @@ async function statSize(uri: string): Promise<{ exists: boolean; size: number }>
 export async function waitForWavReady(fileUri: string, captureEndAt?: number): Promise<number> {
   const since = () => (captureEndAt ? String(Date.now() - captureEndAt) : 'n/a');
   const deadline = Date.now() + FILE_READY_TIMEOUT_MS;
+  logAudioDiag('WAV_READY_START', `path=${JSON.stringify(fileUri)} tSinceFinishMs=${since()}`);
 
   const first = await statSize(fileUri);
   logAudioDiag(
     'AUDIO_FILE',
     `engine=groq phase=first_read path=${JSON.stringify(fileUri)} existsAtRead=${first.exists} bytes=${first.size} tSinceFinishMs=${since()}`,
   );
-  // Already present and non-trivial, and capture ended long enough ago that the write is done:
-  // no reason to poll again.
-  if (first.size > WAV_HEADER_BYTES && (captureEndAt ? Date.now() - captureEndAt >= 250 : false)) {
+  // Native writes the WAV synchronously before firing onCaptureEnd (see this file's header
+  // comment) — a non-trivial size on the very FIRST read already proves a complete file. No
+  // additional elapsed-time gate (there used to be one, requiring 250ms since capture end before
+  // trusting an already-correct size) — that gate is exactly what forced an already-good file into
+  // the retry loop below unnecessarily.
+  if (first.size > WAV_HEADER_BYTES) {
     logAudioDiag('AUDIO_FILE', `engine=groq phase=ready bytes=${first.size} tSinceFinishMs=${since()}`);
+    logAudioDiag('WAV_READY_SUCCESS', `bytes=${first.size} tSinceFinishMs=${since()}`);
     return first.size;
   }
 
+  // BACKGROUND-SAFE RETRY (2026-09-17) — was `await new Promise(r => setTimeout(r, FILE_READY_POLL_MS))`
+  // between checks. A plain JS setTimeout can freeze while BENSON is backgrounded (the same class
+  // of bug already fixed elsewhere in this codebase by moving critical timers to native
+  // Handler.postDelayed — e.g. BensonBubbleService.kt's auto-dismiss, the STT/TTS session
+  // watchdogs). A frozen setTimeout here meant this function — and everything awaiting it
+  // (transcribeWithGroq/transcribeWithDeepgram) — hung indefinitely until the UNRELATED 30s STT
+  // session watchdog force-closed the session, silently losing the whole command
+  // (device-confirmed 2026-09-17). No artificial delay now: each iteration is itself a real
+  // awaited native-module round trip (FileSystem.getInfoAsync, routed through Expo's native
+  // module bridge, NOT React Native's JS timer module), which naturally paces the loop without
+  // depending on any timer surviving backgrounding. Still hard-bounded by the same Date.now()
+  // deadline as before — this can never hang indefinitely.
   let last = first.size;
-  for (;;) {
-    if (Date.now() >= deadline) {
-      logAudioDiag('AUDIO_FILE', `engine=groq phase=timeout bytes=${last} tSinceFinishMs=${since()}`);
-      return last;
-    }
-    await new Promise((r) => setTimeout(r, FILE_READY_POLL_MS));
+  while (Date.now() < deadline) {
+    logAudioDiag('WAV_READY_CHECK', `lastBytes=${last} tSinceFinishMs=${since()}`);
     const cur = await statSize(fileUri);
     if (cur.size > WAV_HEADER_BYTES && cur.size === last) {
       logAudioDiag('AUDIO_FILE', `engine=groq phase=ready bytes=${cur.size} tSinceFinishMs=${since()}`);
+      logAudioDiag('WAV_READY_SUCCESS', `bytes=${cur.size} tSinceFinishMs=${since()}`);
       return cur.size;
     }
     last = cur.size;
   }
+  logAudioDiag('AUDIO_FILE', `engine=groq phase=timeout bytes=${last} tSinceFinishMs=${since()}`);
+  logAudioDiag('WAV_READY_TIMEOUT', `bytes=${last} tSinceFinishMs=${since()}`);
+  return last;
 }
 
 function resolvedBaseUrl(config: EngineConfig): string {
@@ -166,6 +182,7 @@ export async function transcribeWithGroq(
   logAudioDiag('STT_REQUEST', `engine=groq bytes=${bytes} durationSec=${durationSec.toFixed(2)}`);
 
   logAudioDiag('STT_PROVIDER_ATTEMPT', 'provider=groq');
+  logAudioDiag('STT_UPLOAD_START', `provider=groq bytes=${bytes}`);
   const startedAt = Date.now();
   let res: Response;
   try {

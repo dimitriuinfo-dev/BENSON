@@ -178,6 +178,79 @@ class BensonForegroundService : Service() {
     }
   }
 
+  // MIC_RESUME_WATCHDOG_NATIVE_1 (2026-09-17) — mirrors armTtsWatchdog above exactly, same root
+  // cause class, different call site: app/index.tsx's doStartListening() has a short (~500ms)
+  // TTS_TAIL_MS grace wait after speech ends (anti-self-echo — don't open the mic on the acoustic
+  // tail of BENSON's own voice) that used to defer its retry via a plain JS
+  // `setTimeout(() => doStartListening(), ttsTailLeft)`. Device-confirmed 2026-09-17: that JS timer
+  // can go inert while BENSON is backgrounded exactly like the ones ROUND_TTS_WATCHDOG_NATIVE_1
+  // already fixed — the retry never ran, mic ownership stayed stranded at TTS for the full 45s
+  // generic OwnerWatchdog instead of ~500ms. This native, epoch-guarded timer replaces that one
+  // JS setTimeout; unlike armTtsWatchdog it does NOT touch micOwner itself (the tail wait isn't an
+  // ownership-stuck condition, just a timing gate before doStartListening() proceeds) — firing only
+  // tells JS "the tail has elapsed, retry now."
+  private var micResumeWatchdogEpoch = 0
+  private var micResumeWatchdogArmed = false
+
+  fun armMicResumeWatchdog(timeoutMs: Long) {
+    micResumeWatchdogEpoch += 1
+    val epoch = micResumeWatchdogEpoch
+    micResumeWatchdogArmed = true
+    AudioDiag.log(this, "MIC_RESUME_WATCHDOG_ARM", "timeoutMs=$timeoutMs")
+    mainHandler.postDelayed({
+      if (micResumeWatchdogArmed && micResumeWatchdogEpoch == epoch) {
+        AudioDiag.log(this, "MIC_RESUME_WATCHDOG_FIRE", "timeoutMs=$timeoutMs")
+        micResumeWatchdogArmed = false
+        onMicResumeWatchdogTimeout?.invoke()
+      }
+    }, timeoutMs)
+  }
+
+  fun cancelMicResumeWatchdog() {
+    if (micResumeWatchdogArmed) {
+      AudioDiag.log(this, "MIC_RESUME_WATCHDOG_CANCEL", "")
+      micResumeWatchdogArmed = false
+      micResumeWatchdogEpoch += 1
+    }
+  }
+
+  // CLOUD_FETCH_WATCHDOG_NATIVE_1 (2026-09-17) — same root cause class, fourth instance found in
+  // one session: lib/agents/fetchWithTimeout.ts (the ONE shared timeout wrapper around every
+  // cloud call — Groq/Deepgram STT, the AI brain chat completion) used a plain JS
+  // `setTimeout(() => controller.abort(), timeoutMs)`. Device-confirmed 2026-09-17: while
+  // backgrounded, that timer can go inert, so `await fetch(...)` never settles at all — not even
+  // as an error. app/index.tsx's handleIncomingText() already wraps its whole body in
+  // try/finally specifically to guarantee loadingRef resets on ANY exception, but a finally block
+  // can only run once its try block's execution resumes — an await that never resolves or rejects
+  // never resumes, so that finally never fires either, and loadingRef stays stuck true forever
+  // (silently dropping every later command via handleIncomingText's own
+  // `if (!msg || loadingRef.current) return;` guard). Unlike armTtsWatchdog/armMicResumeWatchdog
+  // (one call at a time), cloud fetches can genuinely overlap (STT + a brain call, etc.), so this
+  // is ID-keyed rather than a single epoch — each request gets its own independent timer, and a
+  // late/stale fire for an already-finished or already-cancelled id is a no-op.
+  private val cloudFetchWatchdogs = mutableMapOf<String, Int>()
+  private var cloudFetchWatchdogEpochCounter = 0
+
+  fun armCloudFetchWatchdog(requestId: String, timeoutMs: Long) {
+    cloudFetchWatchdogEpochCounter += 1
+    val epoch = cloudFetchWatchdogEpochCounter
+    cloudFetchWatchdogs[requestId] = epoch
+    AudioDiag.log(this, "CLOUD_FETCH_TIMEOUT_ARM", "requestId=$requestId timeoutMs=$timeoutMs")
+    mainHandler.postDelayed({
+      if (cloudFetchWatchdogs[requestId] == epoch) {
+        cloudFetchWatchdogs.remove(requestId)
+        AudioDiag.log(this, "CLOUD_FETCH_TIMEOUT_FIRE", "requestId=$requestId")
+        onCloudFetchTimeout?.invoke(requestId)
+      }
+    }, timeoutMs)
+  }
+
+  fun cancelCloudFetchWatchdog(requestId: String) {
+    if (cloudFetchWatchdogs.remove(requestId) != null) {
+      AudioDiag.log(this, "CLOUD_FETCH_TIMEOUT_CANCEL", "requestId=$requestId")
+    }
+  }
+
   // URGENT_CONFIRMATION_NATIVE_1 — one-shot YES/NO/UNKNOWN confirmation capture, entirely native
   // (AudioRecord+VAD+cloud-STT, same recipe as NativeCloudWake — see NativeConfirmationListener).
   // Proven live that a JS-owned mic loop cannot reliably re-arm while BENSON is backgrounded
@@ -1466,6 +1539,14 @@ class BensonForegroundService : Service() {
     // ROUND_TTS_WATCHDOG_NATIVE_1 — fired when armTtsWatchdog's native timer expires while still
     // armed. No argument — TTS has no session id, only one block can be active at a time.
     var onTtsWatchdogTimeout: (() -> Unit)? = null
+
+    // MIC_RESUME_WATCHDOG_NATIVE_1 — fired when armMicResumeWatchdog's native timer expires while
+    // still armed. No argument — same one-at-a-time reasoning as onTtsWatchdogTimeout.
+    var onMicResumeWatchdogTimeout: (() -> Unit)? = null
+
+    // CLOUD_FETCH_WATCHDOG_NATIVE_1 — fired when armCloudFetchWatchdog's native timer expires for
+    // the still-current requestId. Argument is that request's id (ID-keyed — see companion note).
+    var onCloudFetchTimeout: ((String) -> Unit)? = null
 
     // URGENT_CONFIRMATION_NATIVE_1 — (confirmationId, verdict, transcript). Durable: if no JS
     // listener is registered when the native capture finishes (JS suspended), the result is held

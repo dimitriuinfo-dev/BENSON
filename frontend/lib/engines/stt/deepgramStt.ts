@@ -52,6 +52,7 @@ export async function transcribeWithDeepgram(
   // multipart) — FileSystem.uploadAsync's BINARY_CONTENT mode streams the file directly, same
   // "one canonical file:// URI" discipline as groqStt.ts's multipart upload.
   const url = `${baseUrl}?model=${encodeURIComponent(model)}&language=${encodeURIComponent(langCode)}`;
+  logAudioDiag('STT_UPLOAD_START', `provider=deepgram bytes=${bytes}`);
   const startedAt = Date.now();
   let res: FileSystem.FileSystemUploadResult;
   try {

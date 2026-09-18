@@ -370,6 +370,7 @@ class BensonAccessibilityService : AccessibilityService() {
         Log.i("BENSON_AUDIO", "WA_SERVICE_LIFECYCLE event=connected epoch=$connectionEpoch")
         maybeResurrect("onServiceConnected")
         registerAcc1TestReceiver()
+        startForegroundStateReassertLoop()
         // WA-LIFECYCLE-FIX-1 — a previous instance may have died mid-call; recover the persisted
         // WhatsApp call lifecycle before anything else can assume the mic hold is stale.
         try { recoverWhatsAppCallLifecycle() } catch (e: Exception) { Log.w(TAG, "recoverWhatsAppCallLifecycle threw: ${e.message}") }
@@ -1593,9 +1594,23 @@ class BensonAccessibilityService : AccessibilityService() {
     // for JS's getForegroundPackage()/addForegroundChangeListener, rather than adding a second
     // observation mechanism.
     @Volatile private var lastForegroundIsSelfForBubble: Boolean? = null
-    private fun pushForegroundPackageToBubble(foregroundPackage: String) {
+    // ROUND_OVERLAY_FOREGROUND_STALENESS_1 (2026-09-18, device-confirmed) — a real 6+ minute
+    // device session showed isSelfForeground latched at `true` (from an earlier genuine
+    // self-foreground moment) and NEVER updated again despite the user genuinely being on other
+    // apps/the launcher the whole time (confirmed: window-title history from dumpsys accessibility
+    // showed real launcher transitions in that window) — the overlay stayed permanently suppressed,
+    // so the bubble never once appeared for the Calculator wake attempt. The push is a single
+    // best-effort startService() call wrapped in a silent catch (no log), so either a missed/
+    // undelivered TYPE_WINDOW_STATE_CHANGED event or a transient startService() failure (this
+    // session already confirmed background_start_restriction errors are real on this device, in
+    // BensonForegroundService's own startup) can go unnoticed indefinitely. Two changes: log the
+    // catch instead of silently swallowing it, and periodically RE-ASSERT the last known state
+    // (bypassing the dedup) so any missed/failed push self-corrects within a few seconds instead
+    // of staying wrong for the rest of the session — same self-healing idiom already used
+    // elsewhere in this project (BensonForegroundService's own native heartbeat).
+    private fun pushForegroundPackageToBubble(foregroundPackage: String, forceSend: Boolean = false) {
         val isSelf = foregroundPackage == packageName
-        if (isSelf == lastForegroundIsSelfForBubble) return
+        if (!forceSend && isSelf == lastForegroundIsSelfForBubble) return
         lastForegroundIsSelfForBubble = isSelf
         try {
             val i = Intent().apply {
@@ -1604,7 +1619,18 @@ class BensonAccessibilityService : AccessibilityService() {
                 putExtra("is_self_foreground", isSelf)
             }
             startService(i)
-        } catch (_: Exception) { /* overlay service not startable right now — ignore */ }
+        } catch (e: Exception) {
+            Log.w("BENSON_AUDIO", "OVERLAY_PUSH_FAILED isSelf=$isSelf error=\"${e.javaClass.simpleName}: ${e.message}\"")
+        }
+    }
+
+    private fun startForegroundStateReassertLoop() {
+        serviceScope.launch {
+            while (true) {
+                delay(4000)
+                lastForegroundPackage?.let { pushForegroundPackageToBubble(it, forceSend = true) }
+            }
+        }
     }
 
     private fun observeEnvironment(): AppEnvironmentSnapshot {

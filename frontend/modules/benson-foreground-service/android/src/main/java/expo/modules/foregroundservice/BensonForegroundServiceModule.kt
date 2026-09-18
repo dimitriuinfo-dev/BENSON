@@ -14,7 +14,7 @@ class BensonForegroundServiceModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("BensonForegroundService")
 
-    Events("onStopRequested", "onListenRequested", "onWakeWordDetected", "onWakePoke", "onSttWatchdogTimeout", "onTtsWatchdogTimeout", "onConfirmationResult")
+    Events("onStopRequested", "onListenRequested", "onWakeWordDetected", "onWakePoke", "onSttWatchdogTimeout", "onTtsWatchdogTimeout", "onMicResumeWatchdogTimeout", "onCloudFetchTimeout", "onConfirmationResult")
 
     OnCreate {
       // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — delivered as an event (survives backgrounding),
@@ -25,6 +25,14 @@ class BensonForegroundServiceModule : Module() {
       // ROUND_TTS_WATCHDOG_NATIVE_1 — same idea, for the TTS mic-ownership hard timer.
       BensonForegroundService.onTtsWatchdogTimeout = {
         sendEvent("onTtsWatchdogTimeout", mapOf())
+      }
+      // MIC_RESUME_WATCHDOG_NATIVE_1 — same idea, for doStartListening()'s post-TTS tail-wait retry.
+      BensonForegroundService.onMicResumeWatchdogTimeout = {
+        sendEvent("onMicResumeWatchdogTimeout", mapOf())
+      }
+      // CLOUD_FETCH_WATCHDOG_NATIVE_1 — same idea, for fetchWithTimeout.ts's abort trigger.
+      BensonForegroundService.onCloudFetchTimeout = { requestId ->
+        sendEvent("onCloudFetchTimeout", mapOf("requestId" to requestId))
       }
       // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN confirmation capture result.
       BensonForegroundService.onConfirmationResult = { confirmationId, verdict, transcript ->
@@ -66,6 +74,8 @@ class BensonForegroundServiceModule : Module() {
       BensonForegroundService.onWakePoke = null
       BensonForegroundService.onSttWatchdogTimeout = null
       BensonForegroundService.onTtsWatchdogTimeout = null
+      BensonForegroundService.onMicResumeWatchdogTimeout = null
+      BensonForegroundService.onCloudFetchTimeout = null
       BensonForegroundService.onConfirmationResult = null
     }
 
@@ -169,6 +179,25 @@ class BensonForegroundServiceModule : Module() {
       BensonForegroundService.instance?.cancelTtsWatchdog()
     }
 
+    // MIC_RESUME_WATCHDOG_NATIVE_1 — background-safe replacement for doStartListening()'s post-TTS
+    // tail-wait JS setTimeout retry (TTS_TAIL_MS, passed in from JS, not duplicated here).
+    Function("armMicResumeWatchdog") { timeoutMs: Double ->
+      BensonForegroundService.instance?.armMicResumeWatchdog(timeoutMs.toLong())
+    }
+    Function("cancelMicResumeWatchdog") {
+      BensonForegroundService.instance?.cancelMicResumeWatchdog()
+    }
+
+    // CLOUD_FETCH_WATCHDOG_NATIVE_1 — background-safe replacement for fetchWithTimeout.ts's JS
+    // setTimeout-driven AbortController trigger. ID-keyed: requestId lets multiple concurrent
+    // cloud calls (STT + brain, etc.) each own an independent timer with no collision.
+    Function("armCloudFetchWatchdog") { requestId: String, timeoutMs: Double ->
+      BensonForegroundService.instance?.armCloudFetchWatchdog(requestId, timeoutMs.toLong())
+    }
+    Function("cancelCloudFetchWatchdog") { requestId: String ->
+      BensonForegroundService.instance?.cancelCloudFetchWatchdog(requestId)
+    }
+
     // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN capture (AudioRecord+VAD+cloud
     // STT), survives BENSON being backgrounded (e.g. WhatsApp foreground) and JS timers suspended.
     Function("startConfirmationListening") { confirmationId: String, timeoutMs: Double ->
@@ -247,6 +276,17 @@ class BensonForegroundServiceModule : Module() {
       val context = appContext.reactContext ?: return@Function
       context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
         .putString(NativeConfirmationListener.KEY_CONFIRM_DEEPGRAM_API_KEY, apiKey)
+        .apply()
+    }
+
+    // DEV_STT_DEEPGRAM_WAKE_1 (2026-09-17) — a THIRD independent credential push, own
+    // SharedPreferences key (KEY_WAKE_DEEPGRAM_API_KEY), for the native wake loop
+    // (NativeCloudWake.kt) — never shares a slot with the confirmation listener's key above or the
+    // Groq wake key from setNativeWakeCredentials.
+    Function("setWakeDeepgramCredentials") { apiKey: String ->
+      val context = appContext.reactContext ?: return@Function
+      context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
+        .putString(NativeCloudWake.KEY_WAKE_DEEPGRAM_API_KEY, apiKey)
         .apply()
     }
 

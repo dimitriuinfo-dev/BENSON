@@ -23,7 +23,33 @@ import {
   execute as executeGoverned,
 } from '../mission';
 import type { MissionAction, ToolName } from '../mission';
-import { logAudioDiag } from 'benson-foreground-service';
+import { logAudioDiag, armCloudFetchWatchdog, addCloudFetchTimeoutListener } from 'benson-foreground-service';
+
+// NATIVE_DELAY_WATCHDOG_1 (2026-09-17, device-confirmed) — runGovernedTask()'s foreground-verify
+// step below used a plain `await new Promise((r) => setTimeout(r, 1200))`. Same root-cause class
+// found four other times this session (WAV-readiness polling, the post-TTS mic-resume retry, the
+// post-TTS tail-wait, fetchWithTimeout's abort trigger): a JS setTimeout can go inert while
+// BENSON is backgrounded — which this delay always runs under, right after any governed app
+// launch (WhatsApp/Waze open). Device-confirmed: this one hung the ENTIRE runMission() call
+// indefinitely (ORCHESTRATOR_HANDOFF_COMPLETED never logged), which cascaded into mic ownership
+// stuck at TTS for the full 45s native safety net AND app/index.tsx's loadingRef stuck for 56s+
+// (every later command silently dropped) — took down WhatsApp CALL and MESSAGE, which both start
+// with exactly this same OPEN_APP verify step. Reuses the SAME native Handler-based, ID-keyed
+// timer already built for fetchWithTimeout.ts (armCloudFetchWatchdog/addCloudFetchTimeoutListener)
+// — the "CloudFetch" naming is a historical artifact of its first use; the underlying primitive is
+// a generic "fire this id after ms, survives backgrounding" timer, exactly what a plain delay needs.
+let nativeDelaySeq = 0;
+function nativeDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const id = `orch-delay-${Date.now()}-${++nativeDelaySeq}`;
+    const sub = addCloudFetchTimeoutListener((firedId) => {
+      if (firedId !== id) return;
+      sub.remove();
+      resolve();
+    });
+    armCloudFetchWatchdog(id, ms);
+  });
+}
 // ROUND_EXECUTION_PIPELINE_DIAG_1 — independent, uniform foreground verification for BOTH the
 // generic (AppLauncherExecutor) and governed (Waze/WhatsApp) OPEN_APP paths. Read-only import of
 // an already-exported, non-protected function — does not touch missionExecutor.ts/whatsappTool.ts
@@ -284,7 +310,7 @@ async function runGovernedTask(
   // Accessibility to be bound). Only meaningful for an actual OPEN_APP launch attempt, not
   // placeCall/prepareMessage/etc.
   if (expectedPackage && (outcome.mission.state === 'Completed' || outcome.mission.state === 'WaitingUser')) {
-    await new Promise((r) => setTimeout(r, 1200));
+    await nativeDelay(1200);
     const observed = getForegroundPackage();
     logAudioDiag('EXEC_TRACE_FOREGROUND_VERIFY', `expected=${JSON.stringify(expectedPackage)} observed=${JSON.stringify(observed)} confirmedByEvent=false method=post_hoc_check`);
     if (observed !== expectedPackage) {

@@ -21,9 +21,11 @@ import {
   setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
   setPorcupineAccessKey, getPorcupineStatus, getActiveWakeEngine,
   nativeWakeSetOwner, isNativeWakeAvailable, setWakeName, setNativeWakeCredentials,
-  setConfirmationSttCredentials,
+  setConfirmationSttCredentials, setWakeDeepgramCredentials,
   armSttSessionWatchdog, cancelSttSessionWatchdog, addSttWatchdogTimeoutListener,
   armTtsWatchdog, cancelTtsWatchdog, addTtsWatchdogTimeoutListener,
+  armMicResumeWatchdog, addMicResumeWatchdogTimeoutListener,
+  armCloudFetchWatchdog, cancelCloudFetchWatchdog, addCloudFetchTimeoutListener,
   startConfirmationListening, cancelConfirmationListening, addConfirmationResultListener,
   takePendingWakeCommand,
 } from 'benson-foreground-service';
@@ -556,6 +558,14 @@ export default function BensonApp() {
   const convModeRef     = useRef(false);
   const listeningRef    = useRef(false);
   const loadingRef      = useRef(false);
+  // LOADING_DEADLOCK_GUARD_1 (2026-09-17) — timestamp of the last loadingRef.current=true, so the
+  // handleIncomingText() entry guard can distinguish "a call is genuinely in flight" from "loading
+  // has been stuck far longer than any real cloud call could take" (see that guard below).
+  const loadingSetAtRef = useRef(0);
+  // Longer than any single cloud attempt + one retry could realistically take (REQUEST_TIMEOUT_MS
+  // values in this codebase top out around 20000ms), short enough to recover well before the
+  // stuck-forever symptom this guards against compounds across many missed commands.
+  const LOADING_MAX_AGE_MS = 40000;
   const speakingRef     = useRef(false);
   const backgroundModeRef = useRef(false);
   const serviceActiveRef  = useRef(false);
@@ -655,6 +665,12 @@ export default function BensonApp() {
   // every finishHandledMission() call (true or false) and consumed/cleared by endTtsBlock() the
   // instant it's read, so it can never leak into an unrelated later TTS-end event.
   const pendingDisambigReplyRef = useRef<boolean>(false);
+  // ROUND_WAITINGUSER_LISTEN_ARM_1 — same read-and-clear pattern as pendingDisambigReplyRef,
+  // but for a governed mission (e.g. WhatsApp) that returned WaitingUser: runGovernedTask()
+  // marks the orchestrator task DONE regardless, so mr.pendingTask is never set for this case
+  // and the CONFIRM_LISTEN_ARM gate below would otherwise never fire, leaving no listener armed
+  // after WhatsApp opens waiting for a reply.
+  const pendingGovernedReplyRef = useRef<boolean>(false);
   function logMicCaptureDiag(reason: string, transcript: string) {
     const d = micCaptureDiagRef.current;
     if (!d.active) return;
@@ -891,6 +907,33 @@ export default function BensonApp() {
     logAudioDiag('RESULT_READ_DWELL_START', `dwellMs=${dwellMs}`);
     try { updateBubbleStatus(label, lastUserTranscriptRef.current, true, true, Date.now(), dwellMs); } catch {}
   }
+
+  // GENERIC_POST_MISSION_WINDOW_1 (2026-09-16) — after ANY successful command/mission completes
+  // while BENSON is backgrounded (bubble visible over whatever app is in front — Spotify, Netflix,
+  // WhatsApp, anything), keep command STT armed for POST_MISSION_WINDOW_MS so a follow-up needs no
+  // repeated "Benson". Provider/app-agnostic on purpose: gated only on the same generic terminal-
+  // result signal scheduleResultDismiss() already uses (bensonStateRef==='DONE', not foreground,
+  // not silenced, overlay service active) — never on which mission/executor/app just ran.
+  const POST_MISSION_WINDOW_MS = 10000;
+  function postMissionWindowEligible(): boolean {
+    return !isForegroundRef.current && !silencedRef.current && serviceActiveRef.current
+      && bensonStateRef.current === 'DONE';
+  }
+  // Reuses doStartListening() verbatim (same permission/hotword-pause/single-session-gate/mic-
+  // ownership sequencing as every real wake-triggered command) — setting wakeTriggeredRef mirrors
+  // exactly what a live wake-word event does, so this session behaves identically to one. The only
+  // new behavior is a SHORTER native watchdog (POST_MISSION_WINDOW_MS instead of the normal
+  // STT_SESSION_MAX_MS): if nothing is heard in time, the EXISTING sttWatchdogSub handler already
+  // closes the session, stops recognition, and calls resumeListeningAfterUnblock() — i.e. "stop
+  // command STT, return to shadow, re-arm wake" already happens with no new cleanup code here. A
+  // real result cancels that same watchdog via closeSttSession('result')'s existing
+  // cancelSttSessionWatchdog() call — "speech cancels the inactivity timeout" is free too.
+  function armPostMissionWindow() {
+    wakeTriggeredRef.current = true;
+    logAudioDiag('TTS_OWNER_RELEASE', 'nextOwner=COMMAND_STT');
+    logAudioDiag('POST_MISSION_WINDOW_ARM', `windowMs=${POST_MISSION_WINDOW_MS}`);
+    try { doStartListening({ sttWatchdogMs: POST_MISSION_WINDOW_MS }); } catch {}
+  }
   // Date.now() al ultimei rostiri recunoscute / atingeri directe. Pornește 0 → la boot nicio
   // rostire nu e „a userului", deci salutul/ orice rostire de pornire e suprimată automat.
   const lastUserActionAtRef = useRef(0);
@@ -1009,7 +1052,17 @@ export default function BensonApp() {
   // androidIntentOptions in lib/agents/voiceAgent.ts). A natural mid-sentence pause ends session N
   // early, and its half of the sentence used to reach handleIncomingText immediately as its own,
   // unrelated command. See scheduleAssembledDispatch below for how this is used.
-  const pendingAssemblyRef = useRef<{ text: string; timer: ReturnType<typeof setTimeout> | null }>({ text: '', timer: null });
+  // ROUND_FRAGMENT_ASSEMBLY_WATCHDOG_NATIVE_1 (2026-09-18, device-confirmed) — this used to be a
+  // plain JS setTimeout, the SAME root-cause class fixed five other times this session (WAV-ready
+  // polling, TTS-tail mic resume, fetchWithTimeout's abort trigger, missionOrchestrator's
+  // foreground-verify delay): the timer goes inert while BENSON is backgrounded. Device log proved
+  // it live: "Benson, scrie-i lui Hannah..." reached WAKE_COMMAND_CAPTURED text="mesaj pe whatsapp
+  // te rog", scheduleAssembledDispatch() armed the (JS) timer, and the trail stopped there —
+  // handleIncomingText() was NEVER called, no error, no bubble, total silence ("Fara reactie").
+  // requestId replaces the JS timer handle; reuses the existing ID-keyed native watchdog primitive
+  // (armCloudFetchWatchdog/addCloudFetchTimeoutListener) rather than adding a new one.
+  const pendingAssemblyRef = useRef<{ text: string; requestId: string | null }>({ text: '', requestId: null });
+  const fragmentAssemblySeqRef = useRef(0);
   // Self-echo guard: confirmed live 2026-07-16 — BENSON's own TTS ("Am solicitat deschiderea
   // Waze.") was picked back up by the mic once conv-mode re-armed listening, transcribed as if it
   // were a fresh user command, and re-triggered the same mission — a self-sustaining loop. Not a
@@ -1190,6 +1243,24 @@ export default function BensonApp() {
     const ttsWatchdogSub = addTtsWatchdogTimeoutListener(() => {
       handleTtsHardTimeout('native_watchdog');
     });
+    // MIC_RESUME_WATCHDOG_NATIVE_1 — background-safe replacement for doStartListening()'s post-TTS
+    // tail-wait JS setTimeout retry (see doStartListening()'s ttsTailLeft branch, which now arms
+    // this instead of using a plain setTimeout). doStartListening() re-validates everything itself
+    // (silenced/confirmation-active/call-hold/single-session-gate/speaking) on every call, so firing
+    // here is always safe to just retry — never a forced action.
+    const micResumeWatchdogSub = addMicResumeWatchdogTimeoutListener(() => {
+      logAudioDiag('MIC_RESUME_WATCHDOG_RETRY', 'source=native');
+      try { doStartListening(); } catch {}
+    });
+    // ROUND_FRAGMENT_ASSEMBLY_WATCHDOG_NATIVE_1 — see pendingAssemblyRef's own comment above.
+    const fragmentAssemblySub = addCloudFetchTimeoutListener((firedId) => {
+      if (firedId !== pendingAssemblyRef.current.requestId) return;
+      const assembled = pendingAssemblyRef.current.text;
+      pendingAssemblyRef.current = { text: '', requestId: null };
+      // Voice path — carry the byte size of the utterance that produced this transcript so an
+      // empty-audio "da" can't satisfy a Confirmation Gate (see handleIncomingText / Task 2).
+      if (assembled) handleIncomingText(assembled, { viaVoice: true, utteranceBytes: getLastUtteranceBytes() });
+    });
     // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO reply capture result. Entirely
     // survives BENSON being backgrounded (WhatsApp/etc. foreground) since the listening WINDOW
     // itself is timed natively, not by a JS timer. A stale result (confirmationId no longer the
@@ -1217,7 +1288,15 @@ export default function BensonApp() {
       // pendingMissionTaskRef, none of which this file reaches into directly) since none of them
       // get consumed unless handleIncomingText runs. Re-arms the same confirmation listener once,
       // same shape as the original arm in endTtsBlock().
-      if (looksLikeSelfEcho(transcript)) {
+      // ROUND_CONFIRM_ECHO_VERDICT_OVERRIDE_1 (2026-09-18, device-confirmed) — a real "da" got
+      // discarded: transcript "o deschid da" (echoing BENSON's own "...o deschid?" plus a genuine
+      // trailing "da") was already classified verdict=YES by the native listener, but this guard
+      // rejected it anyway on 67% word overlap with BENSON's own recent speech — Romanian replies
+      // routinely echo part of the question ("da, o deschid"), so the overlap heuristic alone
+      // can't tell a real affirmative from a true echo. A decisive native verdict (YES/NO) is
+      // stronger evidence than the fuzzy overlap guard; only apply the guard when the native
+      // classifier itself couldn't decide (UNKNOWN) — its original "last-resort" purpose.
+      if (verdict === 'UNKNOWN' && looksLikeSelfEcho(transcript, CONFIRM_ECHO_WINDOW_MS)) {
         logAudioDiag('CONFIRM_SELF_ECHO_REJECTED', `confirmationId=${confirmationId} text="${transcript.slice(0, 60)}"`);
         const nextId = `confirm-${Date.now()}`;
         pendingConfirmationIdRef.current = nextId;
@@ -1542,26 +1621,31 @@ export default function BensonApp() {
         // no native engine is configured. Revert: delete this block.
         if (nativeWakeRef.current) { try { nwOwner('WAKE'); } catch {} }
 
-        // Leaving the foreground (screen off, Home pressed, another app opened manually) — JS's
-        // own conv-mode SpeechRecognizer session ('cloud'/'ondevice' engines) is not a safe mic
-        // owner here (see isForegroundRef doc above: confirmed live 2026-07-18 it can silently die
-        // with no recovery), so hand the mic back to the native, foreground-service-backed hotword
-        // loop instead. Without this, BENSON went completely deaf until the user manually reopened
-        // the app — the exact "always have to search for and open the app" complaint, since conv
-        // mode being on by default meant JS grabbed the mic away from the native loop on every
-        // launch and never gave it back on its own.
+        // GENERIC_BACKGROUND_LIFECYCLE_1 (2026-09-17, device-confirmed) — conv mode must not
+        // persist indefinitely just because BENSON was foreground once (enterChatMode() defaults
+        // it on at boot). Proven live: leaving it on while backgrounded meant BENSON kept running
+        // its OWN continuous conv-mode capture loop instead of ever arming the "Benson" wake
+        // engine — zero WAKE_TRIGGER for the whole session, only ambient noise transcribed on
+        // loop (trigger=conversation_mode, micOwner=COMMAND_STT/native_cloud running=false,
+        // start to finish). This used to be gated on `sttEngineRef.current !== 'local'` (the
+        // 'local' engine was exempted — see history below); that engine-specific special case is
+        // removed: the lifecycle policy must be generic, and clearing convModeRef here (which the
+        // old code never did) already fixes the exact deafness the exemption was protecting
+        // against — see the ROOT CAUSE note.
         //
-        // The 'local' engine (the default) is DIFFERENT and exempt from this (product-owner-
-        // directed 2026-08-24): it's the same AudioRecord+VAD capture, backed by the same
-        // foreground service, either way — not the fragile SpeechRecognizer this caution was
-        // written for. Stopping and hopping to the native hotword fallback here was leaving
-        // BENSON silently unable to hear anything at all while backgrounded with conv mode on
-        // (startLocalWakeLoop() itself no-ops whenever convModeRef is true, by design — see its
-        // own comment — so this handoff produced neither engine actually listening). The floating
-        // bubble is the visible cue this is happening: as long as it's up, BENSON should stay
-        // awake and reachable without repeating the wake word, exactly like still being in
-        // foreground — so for 'local', just leave the current capture loop running untouched.
-        if (convModeRef.current && sttEngineRef.current !== 'local') {
+        // An in-progress wake-triggered session (wakeTriggeredRef) or a pending confirmation is
+        // the one legitimate reason to keep listening without tearing anything down — that's the
+        // real explicit active-session / post-mission-window signal, never stale convModeRef.
+        //
+        // ROOT CAUSE of the old exemption (2026-08-24) — startLocalWakeLoop() itself no-ops
+        // whenever convModeRef is true, so the previous code's resumePassiveWake() call (with
+        // convModeRef left TRUE) produced neither engine actually listening for 'local', leaving
+        // BENSON deaf until manually reopened. Now that convModeRef is explicitly cleared FIRST,
+        // resumePassiveWake() -> startLocalWakeLoop() sees convModeRef=false and arms correctly —
+        // the exemption's precondition no longer holds, so it's gone rather than special-cased.
+        if (convModeRef.current && !wakeTriggeredRef.current && !pendingConfirmationIdRef.current) {
+          logAudioDiag('CONV_MODE_BACKGROUND_STOP', 'reason=left_foreground_no_active_session');
+          convModeRef.current = false; setConvMode(false);
           try { stopRecognition(); } catch {}
           setListening(false); listeningRef.current = false;
           closeSttSession('background'); // C3 — recognizer torn down here; free the gate
@@ -1768,7 +1852,7 @@ export default function BensonApp() {
       if (sttSessionActiveRef.current) { try { cancelSttSessionWatchdog(sttSessionActiveRef.current); } catch {} }
       try { cancelTtsWatchdog(); } catch {}
       resultSub.remove(); errorSub.remove(); endSub.remove(); volumeSub.remove();
-      speechStartSub.remove(); speechEndSub.remove(); sttWatchdogSub.remove(); ttsWatchdogSub.remove(); confirmResultSub.remove();
+      speechStartSub.remove(); speechEndSub.remove(); sttWatchdogSub.remove(); ttsWatchdogSub.remove(); micResumeWatchdogSub.remove(); fragmentAssemblySub.remove(); confirmResultSub.remove();
       if (pendingConfirmationIdRef.current) { try { cancelConfirmationListening(pendingConfirmationIdRef.current); } catch {} }
       stopReqSub.remove(); listenReqSub.remove(); bubbleTapSub.remove();
       wakeWordSub.remove(); wakePokeSub.remove(); appStateSub.remove();
@@ -2093,7 +2177,10 @@ export default function BensonApp() {
     // so the native confirmation listener has its Deepgram key on app launch too, not only after
     // a Settings save.
     getEngineConfig('stt', 'deepgram').then((cfg) => {
-      if (cfg?.apiKey) { try { setConfirmationSttCredentials(cfg.apiKey); } catch {} }
+      if (cfg?.apiKey) {
+        try { setConfirmationSttCredentials(cfg.apiKey); } catch {}
+        try { setWakeDeepgramCredentials(cfg.apiKey); } catch {}
+      }
     }).catch(() => {});
     if (cm) { const c = cm === 'true'; setCarMode(c); carModeRef.current = c; }
     if (cda) { setCarDeviceAddress(cda); carDeviceAddressRef.current = cda; }
@@ -2284,7 +2371,17 @@ export default function BensonApp() {
   // staleness, or which exact entry is compared against — closes that gap structurally instead of
   // trying to tune the fuzzy-overlap threshold further.
   const SELF_ECHO_FINGERPRINTS = ['quite catch', 'did not catch', 'not catch that'];
-  function looksLikeSelfEcho(transcript: string): boolean {
+  // ROUND_CONFIRM_ECHO_WINDOW_FIX_1 (2026-09-18, device-confirmed) — the native confirmation
+  // listener's own round trip (arm -> VAD -> Deepgram) routinely takes 4-6+s (device log: TTS
+  // ended at 49.418, the self-echoed reply wasn't even checked until 54.908 — 5.49s later),
+  // which is already past ECHO_WINDOW_MS=3000. That window was deliberately tuned to 3s for the
+  // JS command-STT loop (see ECHO_WINDOW_MS's own history above — 120s caused a 2-minute block on
+  // real commands there), but applying the SAME 3s bound to the confirmation-listener call site
+  // defeats the guard almost every time for that flow, letting BENSON's own echoed TTS slip
+  // through, fail to resolve the pending disambiguation, and permanently consume it (device-
+  // confirmed: "Benson, deschide Calculatorul" never opened Calculator because of exactly this).
+  const CONFIRM_ECHO_WINDOW_MS = 10000;
+  function looksLikeSelfEcho(transcript: string, windowMs: number = ECHO_WINDOW_MS): boolean {
     const norm = normalizeForEcho(transcript);
     if (norm.length < 4) return false;
     if (SELF_ECHO_FINGERPRINTS.some((f) => norm.includes(f))) return true;
@@ -2292,7 +2389,7 @@ export default function BensonApp() {
     if (recent.length === 0) return false;
     const now = Date.now();
     return recent.some((last) => {
-      if (now - last.at > ECHO_WINDOW_MS) return false;
+      if (now - last.at > windowMs) return false;
       if (last.normalized.includes(norm) || norm.includes(last.normalized)) return true;
       const spokenWords = new Set(last.normalized.split(' ').filter((w) => w.length > 1));
       const heardWords = norm.split(' ').filter((w) => w.length > 1);
@@ -2326,14 +2423,10 @@ export default function BensonApp() {
     if (!trimmedChunk) return;
     const pending = pendingAssemblyRef.current;
     pending.text = pending.text ? `${pending.text} ${trimmedChunk}` : trimmedChunk;
-    if (pending.timer) clearTimeout(pending.timer);
-    pending.timer = setTimeout(() => {
-      const assembled = pendingAssemblyRef.current.text;
-      pendingAssemblyRef.current = { text: '', timer: null };
-      // Voice path — carry the byte size of the utterance that produced this transcript so an
-      // empty-audio "da" can't satisfy a Confirmation Gate (see handleIncomingText / Task 2).
-      if (assembled) handleIncomingText(assembled, { viaVoice: true, utteranceBytes: getLastUtteranceBytes() });
-    }, FRAGMENT_ASSEMBLY_WINDOW_MS);
+    if (pending.requestId) { try { cancelCloudFetchWatchdog(pending.requestId); } catch {} }
+    const requestId = `frag-${Date.now()}-${++fragmentAssemblySeqRef.current}`;
+    pending.requestId = requestId;
+    try { armCloudFetchWatchdog(requestId, FRAGMENT_ASSEMBLY_WINDOW_MS); } catch {}
   }
 
   // Called at the very start of every TTS utterance: raise the speaking flag and hard-stop any
@@ -2413,7 +2506,21 @@ export default function BensonApp() {
     // reply actually finishes being spoken (the HandyParken bug this round fixes).
     if (wasBlocking && (bensonStateRef.current === 'DONE' || bensonStateRef.current === 'ERROR')) {
       logAudioDiag('RESULT_TTS_DONE', `reason=${reason}`);
-      scheduleResultDismiss(RESULT_DWELL_AFTER_TTS_MS);
+      scheduleResultDismiss(postMissionWindowEligible() ? POST_MISSION_WINDOW_MS : RESULT_DWELL_AFTER_TTS_MS);
+      // GENERIC_POST_MISSION_WINDOW_1 — RACE FIX (2026-09-17, device-confirmed): the afterX
+      // callback (afterFinalSpeak/afterResumeSpeak/afterPromptRearm) that normally decides what to
+      // listen for next can fire BEFORE this point — the "ack already spoken, skip the final TTS"
+      // optimization calls it synchronously while an earlier parallel ack utterance is still
+      // playing. When that happens, its doStartListening() call hits speakingRef.current still
+      // true, gets silently dropped (no retry existed), and NOTHING ever re-arms — native mic
+      // ownership stayed stuck at TTS for the full 45s owner-timeout safety net, dead air the
+      // whole time. This IS the one authoritative "TTS has truly finished" point (speakingRef is
+      // already false above), so arming here — independent of whether some earlier afterX call
+      // already ran (and possibly already got dropped) — closes that gap. doStartListening()'s own
+      // C3_SINGLE_SESSION_GATE makes a redundant call from a NORMALLY-timed afterX callback a safe
+      // no-op (logged STT_REJECTED reason=session_active), not a conflict.
+      logAudioDiag('POST_TTS_NEXT_STATE', `eligible=${postMissionWindowEligible()}`);
+      if (postMissionWindowEligible()) { armPostMissionWindow(); }
     }
     // URGENT_CONFIRMATION_NATIVE_1 — a mission is waiting for a YES/NO reply (e.g. "Îl trimit?").
     // Arm the native one-shot listener instead of relying on the JS mic loop to re-arm itself:
@@ -2423,10 +2530,12 @@ export default function BensonApp() {
     // unrelated later TTS-end event; the WhatsApp mission-gate condition is untouched/unaffected.
     const wasDisambigReply = pendingDisambigReplyRef.current;
     pendingDisambigReplyRef.current = false;
-    if (wasBlocking && (pendingMissionTaskRef.current || wasDisambigReply)) {
+    const wasGovernedReply = pendingGovernedReplyRef.current;
+    pendingGovernedReplyRef.current = false;
+    if (wasBlocking && (pendingMissionTaskRef.current || wasDisambigReply || wasGovernedReply)) {
       const confirmationId = `confirm-${Date.now()}`;
       pendingConfirmationIdRef.current = confirmationId;
-      logAudioDiag('CONFIRM_LISTEN_ARM', `confirmationId=${confirmationId} timeoutMs=${CONFIRMATION_LISTEN_TIMEOUT_MS} source=${wasDisambigReply ? 'disambiguation' : 'mission_gate'}`);
+      logAudioDiag('CONFIRM_LISTEN_ARM', `confirmationId=${confirmationId} timeoutMs=${CONFIRMATION_LISTEN_TIMEOUT_MS} source=${wasDisambigReply ? 'disambiguation' : (wasGovernedReply ? 'governed_waiting_user' : 'mission_gate')}`);
       try { setMicLevel(0.3, true); } catch {}
       try { startConfirmationListening(confirmationId, CONFIRMATION_LISTEN_TIMEOUT_MS); } catch {}
     }
@@ -2456,6 +2565,7 @@ export default function BensonApp() {
       return;
     }
     if (expectReply || convModeRef.current || wakeTriggeredRef.current) { try { doStartListening(); } catch {} }
+    else if (postMissionWindowEligible()) { armPostMissionWindow(); }
     else { try { resumePassiveWake(); } catch {} }
     logAudioDiag('WAKE_REARM_OK', `mode=${(expectReply || convModeRef.current || wakeTriggeredRef.current) ? 'command' : 'wake'}`);
   }
@@ -2811,6 +2921,7 @@ export default function BensonApp() {
         setSavedDeepgramMasked(maskApiKey(dg));
         setDeepgramKey('');
         try { setConfirmationSttCredentials(dg); } catch {}
+        try { setWakeDeepgramCredentials(dg); } catch {}
       } catch {}
     }
     addMessage('benson', `API keys updated, ${getAddress()}.`);
@@ -3074,8 +3185,9 @@ export default function BensonApp() {
     if (!norm.trim()) return false;
     if (WAKE_VARIANTS.some((w) => norm.includes(w))) return true;
     if (WAKE_UP_VARIANTS.some((w) => norm.includes(w))) return true;
-    // fuzzy: any single token within edit-distance 1 of "benson"
-    return norm.split(/[^a-z]+/).some((tok) => tok.length >= 5 && lev(tok, 'benson') <= 1);
+    // fuzzy: mirrors NativeCloudWake.kt's matchWake() tolerance (2026-09-18, device-confirmed:
+    // real "benson" transcripts came back distance-2, e.g. "bensăm"/"benzan" — see that file).
+    return norm.split(/[^a-z]+/).some((tok) => tok.length >= 6 ? lev(tok, 'benson') <= 2 : tok.length >= 5 && lev(tok, 'benson') <= 1);
   }
   function lev(a: string, b: string): number {
     const m = a.length, n = b.length;
@@ -3338,7 +3450,10 @@ export default function BensonApp() {
     if (C3_SESSION_CLEANUP) logAudioDiag('STT_SESSION_CLOSED', `session=${sid} reason=${reason}`);
   }
 
-  async function doStartListening() {
+  // GENERIC_POST_MISSION_WINDOW_1 — opts is optional and unused by every existing call site (15+),
+  // so this is a zero-behavior-change addition for all of them; only armPostMissionWindow() passes
+  // sttWatchdogMs, to shorten the native session watchdog for that one flow specifically.
+  async function doStartListening(opts?: { sttWatchdogMs?: number }) {
     if (silencedRef.current) return;
     // URGENT_CONFIRMATION_NATIVE_1 — a native confirmation capture owns the mic; the JS loop must
     // not compete with it (native already refuses to re-arm passive wake for the same reason).
@@ -3355,13 +3470,35 @@ export default function BensonApp() {
     // Hard mic close while BENSON is speaking, and for TTS_TAIL_MS after the last word.
     if (speakingRef.current) {
       logAudioDiag('MIC_BLOCKED', 'reason=tts_speaking');
-      if (bensonStateRef.current !== 'CONFIRMING' && bensonStateRef.current !== 'EXECUTING') setBensonState('BLOCKED', 'tts_speaking');
+      // RACE FIX (2026-09-17, device-confirmed) — DONE/ERROR is a logical MISSION result, not a UI
+      // mode; it must survive until endTtsBlock() reads it moments later to decide whether to
+      // schedule the result dwell / post-mission window. A parasitic doStartListening() call
+      // landing here mid-speech (the "ack already spoken, skip final TTS" path calls its afterX
+      // callback synchronously, before the parallel ack utterance actually finishes) used to
+      // downgrade DONE→BLOCKED — a temporary audio-resource conflict overwriting a real mission
+      // outcome. endTtsBlock()'s own `bensonStateRef.current === 'DONE'` check then failed, and the
+      // whole post-mission window silently never armed. BLOCKED is a real UI mode only for
+      // LISTENING/THINKING-shaped moments; never write it over a terminal mission result.
+      logAudioDiag('MISSION_STATE_PRESERVED', `state=${bensonStateRef.current}`);
+      if (bensonStateRef.current !== 'CONFIRMING' && bensonStateRef.current !== 'EXECUTING'
+        && bensonStateRef.current !== 'DONE' && bensonStateRef.current !== 'ERROR') {
+        setBensonState('BLOCKED', 'tts_speaking');
+      }
+      logAudioDiag('LISTEN_DEFERRED_TTS', 'reason=tts_still_speaking picked_up_by=endTtsBlock');
       return;
     }
     const ttsTailLeft = micResumeAtRef.current - Date.now();
     if (ttsTailLeft > 0) {
+      // MIC_RESUME_WATCHDOG_NATIVE_1 (2026-09-17, device-confirmed) — was
+      // `setTimeout(() => doStartListening(), ttsTailLeft)`. That JS timer can go inert while
+      // BENSON is backgrounded (same root cause class already fixed for the STT/TTS watchdogs):
+      // proven live, this retry silently never fired, stranding mic ownership at TTS for the full
+      // 45s generic OwnerWatchdog instead of ~500ms — exactly the gap that broke the post-mission
+      // listen window every time it tried to arm itself right after a backgrounded TTS finished.
+      // Native Handler.postDelayed survives backgrounding; the listener (set up once, module-level)
+      // just retries this same call.
       logAudioDiag('MIC_BLOCKED', `reason=tts_tail deferMs=${ttsTailLeft}`);
-      setTimeout(() => doStartListening(), ttsTailLeft);
+      try { armMicResumeWatchdog(ttsTailLeft); } catch {}
       return;
     }
     if (ttsEndedAtRef.current) {
@@ -3402,8 +3539,9 @@ export default function BensonApp() {
       // foreground service (Handler.postDelayed), NOT a JS setTimeout — proven live that the JS
       // timer this replaced goes inert while backgrounded, leaving the gate stuck forever
       // (STT_REJECTED reason=session_active, minutes on end, only an app restart cleared it).
-      if (Number.isFinite(STT_SESSION_MAX_MS)) {
-        try { armSttSessionWatchdog(sessionId, STT_SESSION_MAX_MS); } catch {}
+      const watchdogMs = opts?.sttWatchdogMs ?? STT_SESSION_MAX_MS;
+      if (Number.isFinite(watchdogMs)) {
+        try { armSttSessionWatchdog(sessionId, watchdogMs); } catch {}
       }
     }
     // A new session supersedes any pending partial-fallback grace timer from the previous one.
@@ -3956,7 +4094,23 @@ export default function BensonApp() {
 
   // ── Central message handler — routes through the Benson Core Orchestrator ──
   async function handleIncomingText(msg: string, opts?: { viaVoice?: boolean; utteranceBytes?: number }) {
-    if (!msg || loadingRef.current) return;
+    if (!msg) return;
+    // LOADING_DEADLOCK_GUARD_1 — the existing try/finally around this whole function (below)
+    // guarantees loadingRef resets on any exception, but it structurally cannot help if the
+    // awaited call inside it never resolves OR rejects (device-confirmed 2026-09-17: exactly what
+    // a background-frozen fetch timeout used to cause) — that finally never runs because the
+    // function's execution never resumes. Rather than dropping every later command silently
+    // forever in that case, treat a loading flag that's been set far longer than any real cloud
+    // call could take as stale and recover deterministically instead of staying blocked.
+    if (loadingRef.current) {
+      const ageMs = Date.now() - loadingSetAtRef.current;
+      if (ageMs < LOADING_MAX_AGE_MS) {
+        logAudioDiag('COMMAND_REJECTED_LOADING_BUSY', `ageMs=${ageMs} text=${JSON.stringify(msg.slice(0, 60))}`);
+        return;
+      }
+      logAudioDiag('LOADING_STALE_RECOVERED', `ageMs=${ageMs}`);
+      loadingRef.current = false; setLoading(false);
+    }
     // ROUND_WAKE_COMMAND_HANDOFF_FIX_1 — captured ONCE at entry: whether this turn originated from
     // a wake trigger (same-breath tail, e.g. "Benson, deschide calculatorul" — CASE 3 — or a
     // follow-up utterance captured after a bare/control-only wake armed listening — CASE 4).
@@ -4006,7 +4160,8 @@ export default function BensonApp() {
     }
 
     addMessage('user', msg);
-    setLoading(true); loadingRef.current = true;
+    setLoading(true); loadingRef.current = true; loadingSetAtRef.current = Date.now();
+    logAudioDiag('LOADING_REF_SET', 'value=true');
 
     // Safety net: every branch below already resets loading state on its own successful path,
     // but if anything throws unexpectedly partway through (a native module rejecting, an
@@ -4339,7 +4494,13 @@ export default function BensonApp() {
             wakeTriggeredRef.current = false;
             try { hideWakeRing(); } catch {}
             try { resumePassiveWake(); } catch {}
+            return;
           }
+          // GENERIC_POST_MISSION_WINDOW_1 — none of the above applied: a plain successful resumed-
+          // mission result, backgrounded. This used to leave BENSON silently deaf until the next
+          // "Benson".
+          if (postMissionWindowEligible()) { armPostMissionWindow(); }
+          else { try { resumePassiveWake(); } catch {} }
         };
         // E1-5 — "O sun." was already spoken in parallel with the WhatsApp/Waze side effect;
         // suppress the long final line on a clean success (still shown in the transcript above).
@@ -4348,7 +4509,7 @@ export default function BensonApp() {
           afterResumeSpeak();
           // ROUND_ASSISTANT_SESSION_UX_FIX_1 — no additional TTS plays for this result (the ACK
           // already covered it); nothing else marks "the user could start reading this now".
-          scheduleResultDismiss(RESULT_DWELL_NO_TTS_MS);
+          scheduleResultDismiss(postMissionWindowEligible() ? POST_MISSION_WINDOW_MS : RESULT_DWELL_NO_TTS_MS);
         } else {
           speakText(resumeResult.message, afterResumeSpeak);
         }
@@ -4481,7 +4642,9 @@ export default function BensonApp() {
       // below, once this TTS finishes) for a disambiguation question, same mechanism already
       // proven for WhatsApp's "Îl trimit?" gate. Set unconditionally (true or false) every call.
       pendingDisambigReplyRef.current = isDisambig;
-      const isConfirming = isDisambig || !!mr.pendingTask || getActiveMission()?.state === 'WaitingConfirmation';
+      const isWaitingUserReply = getActiveMission()?.state === 'WaitingUser';
+      pendingGovernedReplyRef.current = isWaitingUserReply;
+      const isConfirming = isDisambig || !!mr.pendingTask || isWaitingUserReply || getActiveMission()?.state === 'WaitingConfirmation';
       setBensonState(
         isConfirming ? 'CONFIRMING' : (isFailureReply(mr.message) ? 'ERROR' : 'DONE'),
         isConfirming ? (isDisambig ? 'disambiguation' : 'mission_gate') : 'mission_result',
@@ -4502,7 +4665,14 @@ export default function BensonApp() {
           wakeTriggeredRef.current = false;
           try { hideWakeRing(); } catch {}
           try { resumePassiveWake(); } catch {}
+          return;
         }
+        // GENERIC_POST_MISSION_WINDOW_1 — none of the above applied: a plain successful mission
+        // result (Spotify/YouTube/any executor), backgrounded. This used to leave BENSON silently
+        // deaf until the next "Benson" — root cause behind the 2026-09-16 Spotify device evidence
+        // showing no re-listen after a completed command.
+        if (postMissionWindowEligible()) { armPostMissionWindow(); }
+        else { try { resumePassiveWake(); } catch {} }
       };
       // E1-5 — the short ACK ("Pornesc traseul." / "Deschid.") was already spoken in parallel with
       // the launch (see the onAck below). On a clean success, don't also speak the final line —
@@ -4513,7 +4683,7 @@ export default function BensonApp() {
         afterFinalSpeak();
         // ROUND_ASSISTANT_SESSION_UX_FIX_1 — no additional TTS plays for this result; mark it
         // readable now (the longer, no-TTS dwell — nothing else signals "shown to the user").
-        scheduleResultDismiss(RESULT_DWELL_NO_TTS_MS);
+        scheduleResultDismiss(postMissionWindowEligible() ? POST_MISSION_WINDOW_MS : RESULT_DWELL_NO_TTS_MS);
       } else {
         speakText(mr.message, afterFinalSpeak);
       }
@@ -4649,7 +4819,12 @@ export default function BensonApp() {
             wakeTriggeredRef.current = false;
             try { hideWakeRing(); } catch {}
             try { resumePassiveWake(); } catch {}
+            return;
           }
+          // GENERIC_POST_MISSION_WINDOW_1 — a plain conversational reply also reaches DONE (via
+          // addMessage's auto-classification); same generic window applies here as everywhere else.
+          if (postMissionWindowEligible()) { armPostMissionWindow(); }
+          else { try { resumePassiveWake(); } catch {} }
         });
         return;
       }
@@ -4687,7 +4862,11 @@ export default function BensonApp() {
             wakeTriggeredRef.current = false;
             try { hideWakeRing(); } catch {}
             try { resumePassiveWake(); } catch {}
+            return;
           }
+          // GENERIC_POST_MISSION_WINDOW_1 — same generic window as every other completion path.
+          if (postMissionWindowEligible()) { armPostMissionWindow(); }
+          else { try { resumePassiveWake(); } catch {} }
         }, instructions)
       : null;
     try {
@@ -4772,6 +4951,7 @@ export default function BensonApp() {
     } finally {
       setLoading(false);
       loadingRef.current = false;
+      logAudioDiag('LOADING_REF_SET', 'value=false source=finally');
     }
   }
 

@@ -35,6 +35,18 @@ export declare function cancelTtsWatchdog(): void;
 export declare function addTtsWatchdogTimeoutListener(
   listener: () => void
 ): { remove: () => void };
+/** MIC_RESUME_WATCHDOG_NATIVE_1 — native Handler timer for doStartListening()'s post-TTS tail-wait retry; survives JS suspension while backgrounded. */
+export declare function armMicResumeWatchdog(timeoutMs: number): void;
+export declare function cancelMicResumeWatchdog(): void;
+export declare function addMicResumeWatchdogTimeoutListener(
+  listener: () => void
+): { remove: () => void };
+/** CLOUD_FETCH_WATCHDOG_NATIVE_1 — native Handler timer, ID-keyed, for fetchWithTimeout.ts's abort trigger; survives JS suspension while backgrounded. */
+export declare function armCloudFetchWatchdog(requestId: string, timeoutMs: number): void;
+export declare function cancelCloudFetchWatchdog(requestId: string): void;
+export declare function addCloudFetchTimeoutListener(
+  listener: (requestId: string) => void
+): { remove: () => void };
 /** URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN capture; survives backgrounding. */
 export declare function startConfirmationListening(confirmationId: string, timeoutMs: number): void;
 export declare function cancelConfirmationListening(confirmationId: string): void;
@@ -48,6 +60,8 @@ export declare function getWakeName(): string | Promise<string>;
 export declare function setNativeWakeCredentials(apiKey: string, baseUrl: string, model: string): void;
 /** DEV_STT_DEEPGRAM_1 — separate Deepgram key push for the native confirmation listener only; never touches the wake loop's Groq credentials above. Never logged. */
 export declare function setConfirmationSttCredentials(apiKey: string): void;
+/** DEV_STT_DEEPGRAM_WAKE_1 — separate Deepgram key push for the native wake loop only; own SharedPreferences key, independent of the confirmation listener's. Never logged. */
+export declare function setWakeDeepgramCredentials(apiKey: string): void;
 export declare function isNativeCloudWakeConfigured(): boolean | Promise<boolean>;
 export declare function bringToForeground(): void;
 export declare function isIgnoringBatteryOptimizations(): boolean;

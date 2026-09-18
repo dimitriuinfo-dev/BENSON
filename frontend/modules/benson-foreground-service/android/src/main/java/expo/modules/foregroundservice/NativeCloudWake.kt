@@ -51,6 +51,18 @@ class NativeCloudWake(
     const val DEFAULT_MODEL = "whisper-large-v3-turbo"
     const val DEFAULT_WAKE_NAME = "Benson"
 
+    // DEV_STT_DEEPGRAM_WAKE_1 (2026-09-17) — Groq's request quota is exhausted AGAIN
+    // (device-confirmed: WAKE_NATIVE_ERROR reason=stt_http code=429 on the large majority of wake
+    // calls this session, the ONE remaining STT path still on Groq after main-command and
+    // confirmation already moved to Deepgram for the same reason). Own SharedPreferences key,
+    // deliberately separate from both KEY_API_KEY above (Groq, stays in place for revert) and
+    // NativeConfirmationListener's confirmation-only Deepgram key — three independent consumers,
+    // never sharing a credential slot, so changing one can never silently affect another.
+    const val KEY_WAKE_DEEPGRAM_API_KEY = "wake_stt_deepgram_api_key"
+    private const val DEEPGRAM_BASE_URL = "https://api.deepgram.com/v1/listen"
+    private const val DEEPGRAM_MODEL = "nova-3"
+    private const val DEEPGRAM_LANGUAGE = "ro"
+
     // Audio format — identical to BensonAudioCaptureModule.kt / MicroWakeWord.kt.
     private const val SAMPLE_RATE = 16000
     private const val READ_CHUNK_MS = 50L
@@ -129,9 +141,18 @@ class NativeCloudWake(
           return Triple(true, true, words.drop(i + 1).joinToString(" ").trim())
         }
       }
-      // Fuzzy fallback — same tolerance rule as the JS gate: only for names of 5+ normalized
-      // characters (a distance-1 tolerance on a 3-4 letter name matches almost anything).
-      val maxDist = if (normName.length >= 5) 1 else 0
+      // Fuzzy fallback — same tolerance rule as the JS gate. 2026-09-18, device-confirmed: real
+      // Deepgram transcripts of "Benson" spoken by a Romanian speaker came back as "bensăm" and
+      // "benzan" (edit distance 2 from "benson") and were both rejected by a distance-1 tolerance,
+      // producing WAKE_NO_MATCH on a genuine wake attempt — the user said the word, it transcribed
+      // close but not within 1 edit. Only names of 5+ normalized characters get any tolerance at
+      // all (a distance-1 fuzzy match on a 3-4 letter name would match almost anything); 6+ chars
+      // get distance-2, since a false match risk on a 6-letter name at 2 edits is still low.
+      val maxDist = when {
+        normName.length >= 6 -> 2
+        normName.length >= 5 -> 1
+        else -> 0
+      }
       for (i in words.indices) {
         val normW = normalize(cleanWord(words[i]))
         if (normW.length < 3) continue
@@ -290,7 +311,9 @@ class NativeCloudWake(
     if (pcmBytes.isEmpty() || !running) return
     val wakeName = currentWakeName(context)
     log("WAKE_STT_REQUEST", "bytes=${pcmBytes.size}")
-    val transcript = postToGroq(pcmBytes)
+    // DEV_STT_DEEPGRAM_WAKE_1 — dev routing; postToGroq(pcmBytes) is the production call this
+    // reverts to (see companion object comment above).
+    val transcript = postToDeepgram(pcmBytes)
     if (!running) return // stopped while the network call was in flight — never fire a stale trigger
     if (transcript == null) {
       log("WAKE_STT_RESULT", "ok=false")
@@ -305,6 +328,43 @@ class NativeCloudWake(
     log(if (exact) "WAKE_MATCH_EXACT" else "WAKE_MATCH_FUZZY", "wakeName=\"$wakeName\" tail=\"$tail\"")
     log("WAKE_TRIGGER", "source=native_cloud tail=\"$tail\"")
     onDetected(tail)
+  }
+
+  // DEV_STT_DEEPGRAM_WAKE_1 — Deepgram's pre-recorded /listen endpoint takes the raw WAV bytes as
+  // the request body directly (no multipart, unlike postToGroq below). Never logs the API key.
+  // Returns null on any failure (network, non-2xx, empty body, no key configured) — the caller
+  // treats that as "no match this cycle", same as a VAD miss.
+  private fun postToDeepgram(pcmBytes: ByteArray): String? {
+    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    val apiKey = prefs.getString(KEY_WAKE_DEEPGRAM_API_KEY, "") ?: ""
+    log("WAKE_STT_PROVIDER_ATTEMPT", "provider=deepgram")
+    if (apiKey.isBlank()) { log("WAKE_STT_PROVIDER_RESULT", "provider=deepgram status=error reason=no_api_key"); return null }
+    val wav = buildWav(pcmBytes)
+    val body = wav.toRequestBody("audio/wav".toMediaType())
+    val url = "$DEEPGRAM_BASE_URL?model=$DEEPGRAM_MODEL&language=$DEEPGRAM_LANGUAGE"
+    val request = Request.Builder().url(url).addHeader("Authorization", "Token $apiKey").post(body).build()
+    val call = client.newCall(request)
+    currentCall = call
+    return try {
+      call.execute().use { resp ->
+        log("WAKE_STT_PROVIDER_RESULT", "provider=deepgram http_status=${resp.code}")
+        if (!resp.isSuccessful) {
+          log("WAKE_NATIVE_ERROR", "reason=stt_http code=${resp.code}")
+          return null
+        }
+        val json = resp.body?.string() ?: return null
+        val alt = JSONObject(json).optJSONObject("results")
+          ?.optJSONArray("channels")?.optJSONObject(0)
+          ?.optJSONArray("alternatives")?.optJSONObject(0)
+        (alt?.optString("transcript", "") ?: "").trim()
+      }
+    } catch (e: Exception) {
+      if (!running) return null
+      log("WAKE_NATIVE_ERROR", "reason=deepgram_stt_exception error=\"${e.javaClass.simpleName}: ${e.message}\"")
+      null
+    } finally {
+      currentCall = null
+    }
   }
 
   // Never logs the API key. Returns null on any failure (network, non-2xx, empty body) — the

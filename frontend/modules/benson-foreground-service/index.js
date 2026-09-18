@@ -93,6 +93,31 @@ export function addTtsWatchdogTimeoutListener(listener) {
   return emitter.addListener('onTtsWatchdogTimeout', () => listener());
 }
 
+// MIC_RESUME_WATCHDOG_NATIVE_1 — same shape, for doStartListening()'s post-TTS tail-wait retry
+// (device-confirmed 2026-09-17: the plain JS setTimeout it replaces can go inert while
+// backgrounded, stranding mic ownership at TTS for the full 45s generic OwnerWatchdog).
+export function armMicResumeWatchdog(timeoutMs) {
+  try { return NativeModule.armMicResumeWatchdog(timeoutMs); } catch { return undefined; }
+}
+export function cancelMicResumeWatchdog() {
+  try { return NativeModule.cancelMicResumeWatchdog(); } catch { return undefined; }
+}
+export function addMicResumeWatchdogTimeoutListener(listener) {
+  return emitter.addListener('onMicResumeWatchdogTimeout', () => listener());
+}
+
+// CLOUD_FETCH_WATCHDOG_NATIVE_1 — background-safe replacement for fetchWithTimeout.ts's own JS
+// setTimeout-driven abort trigger. ID-keyed so concurrent cloud calls never collide.
+export function armCloudFetchWatchdog(requestId, timeoutMs) {
+  try { return NativeModule.armCloudFetchWatchdog(requestId, timeoutMs); } catch { return undefined; }
+}
+export function cancelCloudFetchWatchdog(requestId) {
+  try { return NativeModule.cancelCloudFetchWatchdog(requestId); } catch { return undefined; }
+}
+export function addCloudFetchTimeoutListener(listener) {
+  return emitter.addListener('onCloudFetchTimeout', (ev) => listener(ev?.requestId ?? ''));
+}
+
 // URGENT_CONFIRMATION_NATIVE_1 — native one-shot YES/NO/UNKNOWN reply capture (AudioRecord+VAD+
 // cloud STT inside the foreground service), survives BENSON backgrounded + JS timers suspended.
 // verdict from native is diagnostic only; callers should re-classify the transcript themselves.
@@ -136,6 +161,12 @@ export function setNativeWakeCredentials(apiKey, baseUrl, model) {
 // listener only (see NativeConfirmationListener.kt / BensonForegroundServiceModule.kt).
 export function setConfirmationSttCredentials(apiKey) {
   try { return NativeModule.setConfirmationSttCredentials(apiKey); } catch { return undefined; }
+}
+
+// DEV_STT_DEEPGRAM_WAKE_1 — a third independent push, own SharedPreferences key, for the native
+// wake loop only (see NativeCloudWake.kt / BensonForegroundServiceModule.kt).
+export function setWakeDeepgramCredentials(apiKey) {
+  try { return NativeModule.setWakeDeepgramCredentials(apiKey); } catch { return undefined; }
 }
 
 export function isNativeCloudWakeConfigured() {

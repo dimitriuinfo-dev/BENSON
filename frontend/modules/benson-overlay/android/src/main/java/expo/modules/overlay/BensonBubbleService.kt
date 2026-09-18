@@ -79,6 +79,17 @@ class BensonBubbleService : Service() {
   private var dismissRunnable: Runnable? = null
   private var lastAppliedTurnId: Long = 0L
 
+  // ROUND_BUBBLE_REFOREGROUND_RESTORE_1 (2026-09-18, device-confirmed) — a state push that races
+  // self_app_foreground (e.g. CONFIRMING fired the instant BENSON's own window was still
+  // transitioning to WhatsApp) got torn down in applyForegroundState() and never redrawn, because
+  // updateStatus() only runs on a JS state PUSH — and JS has nothing new to push while BENSON just
+  // sits waiting for the user's reply. Device log: OVERLAY_HIDE_SELF_APP at wake, BENSON left
+  // foreground ~6s later, but no OVERLAY_SHOW_ACTIVE until the user's reply arrived ~9s after
+  // that — the bubble was invisible for the entire "Ce să-i scriu?" wait. Cache the last
+  // non-terminal visible push so applyForegroundState(false) can redraw it immediately.
+  private data class PendingStatus(val state: String, val transcript: String, val terminal: Boolean, val turnId: Long, val dismissDelayMs: Long)
+  private var lastActiveStatus: PendingStatus? = null
+
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -115,14 +126,36 @@ class BensonBubbleService : Service() {
   // own Activity becomes foreground, any active overlay is force-torn-down — no idle bubble is
   // ever restored afterward, per this round's explicit correction of the previous one.
   @Volatile private var isSelfForeground = false
+  private var pendingSelfForegroundRunnable: Runnable? = null
   private fun applyForegroundState(selfForeground: Boolean) {
     Log.i("BENSON_AUDIO", "OVERLAY_POLICY_EVAL isSelfForeground=$selfForeground hadActiveOverlay=${statusView != null}")
-    isSelfForeground = selfForeground
+    pendingSelfForegroundRunnable?.let { dismissHandler.removeCallbacks(it) }
+    pendingSelfForegroundRunnable = null
     if (selfForeground) {
-      hideWakeRing()
-      if (statusView != null || bubbleView != null) {
-        Log.i("BENSON_AUDIO", "OVERLAY_HIDE_SELF_APP")
-        dismissNow("self_app_foreground")
+      // ROUND_SELF_FOREGROUND_DEBOUNCE_1 — don't act on this immediately; confirm it holds for
+      // SELF_FOREGROUND_DEBOUNCE_MS with no contradicting `false` event first (see constant doc).
+      val r = Runnable {
+        pendingSelfForegroundRunnable = null
+        isSelfForeground = true
+        Log.i("BENSON_AUDIO", "OVERLAY_POLICY_CONFIRMED isSelfForeground=true")
+        hideWakeRing()
+        if (statusView != null || bubbleView != null) {
+          Log.i("BENSON_AUDIO", "OVERLAY_HIDE_SELF_APP")
+          dismissNow("self_app_foreground")
+        }
+      }
+      pendingSelfForegroundRunnable = r
+      dismissHandler.postDelayed(r, SELF_FOREGROUND_DEBOUNCE_MS)
+    } else {
+      isSelfForeground = false
+      // ROUND_BUBBLE_REFOREGROUND_RESTORE_1 — BENSON just left its own foreground; if a
+      // non-terminal state was asked for but suppressed/torn down (self_app_foreground raced it,
+      // or it simply never got the chance to render), redraw it now instead of waiting for a JS
+      // push that may not come for many seconds (e.g. while just listening for a reply).
+      val pending = lastActiveStatus
+      if (pending != null && statusView == null && bubbleView == null) {
+        Log.i("BENSON_AUDIO", "OVERLAY_RESTORE_ON_REFOREGROUND turnId=${pending.turnId}")
+        updateStatus(pending.state, pending.transcript, true, pending.terminal, pending.turnId, pending.dismissDelayMs)
       }
     }
   }
@@ -130,6 +163,8 @@ class BensonBubbleService : Service() {
   override fun onDestroy() {
     instance = null
     cancelDismissTimer()
+    pendingSelfForegroundRunnable?.let { dismissHandler.removeCallbacks(it) }
+    pendingSelfForegroundRunnable = null
     removeBubble()
     hideWakeRing()
     removeStatus()
@@ -175,12 +210,15 @@ class BensonBubbleService : Service() {
       PixelFormat.TRANSLUCENT,
     ).apply {
       gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-      // Restore the user's last manual position; fall back to the historic default (100dp above
-      // the bottom edge). Always clamped into the current safe bounds (screen may have rotated /
-      // the saved value may be stale).
+      // Restore the user's last manual position; fall back to the default resting spot — near the
+      // right edge (2026-09-17, product-owner-directed: "de obicei in partea dreapta sus, la 80%
+      // din inaltime"), ~80% of screen height up from the bottom. A huge x here is deliberate: the
+      // clampToSafeBounds(lp) call right below always pulls it down to the real rightmost position
+      // (screen width/size-dependent), so this doesn't duplicate that math. Still fully draggable —
+      // this only changes the FIRST-LAUNCH default, never overrides a saved manual position.
       val saved = loadManualPosition()
-      x = saved?.first ?: 0
-      y = saved?.second ?: (100 * density).toInt()
+      x = saved?.first ?: Int.MAX_VALUE / 2
+      y = saved?.second ?: (resources.displayMetrics.heightPixels * 0.8f).toInt()
     }
     clampToSafeBounds(lp)
 
@@ -301,13 +339,25 @@ class BensonBubbleService : Service() {
   }
 
   private fun bubblePrefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+  // POSITION_SCHEMA_MIGRATION_1 (2026-09-17) — a position saved under an OLDER schema version is
+  // stale, not a real user preference, for two reasons this round: (1) the default resting spot
+  // moved (bottom-center -> top-right ~80% height — product-owner-directed) and a saved value from
+  // before that pins the OLD default, silently overriding the new one forever; (2) the status
+  // card's own gravity changed BOTTOM|CENTER_HORIZONTAL -> TOP|START in this same round, so an old
+  // saved (x,y) pair is coordinate-system-garbage under the new one, not just visually stale.
+  // Bump POSITION_SCHEMA_VERSION on any future change to either default or coordinate system; a
+  // stored version that doesn't match is treated as "never saved" exactly once, and the user's next
+  // real drag re-saves it (stamped with the current version) as an intentional preference again.
   private fun loadManualPosition(): Pair<Int, Int>? {
     val p = bubblePrefs()
+    if (p.getInt(KEY_POS_SCHEMA_VERSION, -1) != POSITION_SCHEMA_VERSION) return null
     if (!p.getBoolean(KEY_HAS_POS, false)) return null
     return p.getInt(KEY_X, 0) to p.getInt(KEY_Y, 0)
   }
   private fun persistManualPosition(x: Int, y: Int) {
-    bubblePrefs().edit().putBoolean(KEY_HAS_POS, true).putInt(KEY_X, x).putInt(KEY_Y, y).apply()
+    bubblePrefs().edit().putBoolean(KEY_HAS_POS, true).putInt(KEY_X, x).putInt(KEY_Y, y)
+      .putInt(KEY_POS_SCHEMA_VERSION, POSITION_SCHEMA_VERSION).apply()
   }
 
   // ROUND_BUBBLE_GEMINI_BEHAVIOR_1 — the written/status card gets its own persisted position,
@@ -316,11 +366,17 @@ class BensonBubbleService : Service() {
   // the card, its own position is remembered from then on.
   private fun loadStatusPosition(): Pair<Int, Int>? {
     val p = bubblePrefs()
+    // POSITION_SCHEMA_MIGRATION_1 — see loadManualPosition()'s comment: this one specifically
+    // guards against a saved (x,y) from the OLD BOTTOM|CENTER_HORIZONTAL card gravity being
+    // reinterpreted under the new TOP|START one — not just visual staleness but a coordinate-
+    // system mismatch.
+    if (p.getInt(KEY_STATUS_POS_SCHEMA_VERSION, -1) != POSITION_SCHEMA_VERSION) return null
     if (!p.getBoolean(KEY_STATUS_HAS_POS, false)) return null
     return p.getInt(KEY_STATUS_X, 0) to p.getInt(KEY_STATUS_Y, 0)
   }
   private fun persistStatusPosition(x: Int, y: Int) {
-    bubblePrefs().edit().putBoolean(KEY_STATUS_HAS_POS, true).putInt(KEY_STATUS_X, x).putInt(KEY_STATUS_Y, y).apply()
+    bubblePrefs().edit().putBoolean(KEY_STATUS_HAS_POS, true).putInt(KEY_STATUS_X, x).putInt(KEY_STATUS_Y, y)
+      .putInt(KEY_STATUS_POS_SCHEMA_VERSION, POSITION_SCHEMA_VERSION).apply()
   }
 
   private fun removeBubble() {
@@ -354,6 +410,14 @@ class BensonBubbleService : Service() {
     }
     lastAppliedTurnId = turnId
     Log.i("BENSON_AUDIO", "UI_STATE_SYNC turnId=$turnId")
+
+    // ROUND_BUBBLE_REFOREGROUND_RESTORE_1 — record this even if it's about to be suppressed below
+    // (self_app_foreground/!visible), so applyForegroundState(false) can redraw it later. Only
+    // non-terminal pushes: a finished/terminal result should not be resurrectable by an unrelated
+    // later foreground toggle.
+    if (visible && !terminal) {
+      lastActiveStatus = PendingStatus(state, transcript, terminal, turnId, dismissDelayMs)
+    }
 
     if (!visible || (state.isBlank() && transcript.isBlank())) {
       dismissNow("explicit_hide")
@@ -437,12 +501,25 @@ class BensonBubbleService : Service() {
 
       // ROUND_BUBBLE_GEMINI_BEHAVIOR_1 — draggable (was FLAG_NOT_TOUCHABLE, the exact reason it
       // could never be dragged: that flag makes every touch pass straight through to whatever is
-      // behind it). Default position anchors just above the idle bubble's CURRENT spot — "move
-      // together as one logical unit" on first appearance — unless the user has already dragged
+      // behind it). Default position anchors just BELOW the idle bubble's CURRENT spot, right edge
+      // aligned to the bubble's right edge (2026-09-17, product-owner-directed: "sub bula Benson,
+      // sau in stinga, in cazul in care bula se afla la perete") — grows leftward from there, so it
+      // never runs off-screen even when the bubble rests against the right wall (its usual default
+      // now — see addBubble()). Absolute TOP|START coordinates (not the bubble's own
+      // BOTTOM|CENTER_HORIZONTAL system) because "below, right-edge-aligned" is a plain top-left
+      // corner computation once converted to screen pixels — unless the user has already dragged
       // the card before, in which case its own saved position wins.
+      val dm = resources.displayMetrics
       val bubbleLp = params
-      val anchoredX = bubbleLp?.x ?: 0
-      val anchoredY = (bubbleLp?.y ?: (100 * density).toInt()) + bubbleSizePx + (10 * density).toInt()
+      val effectiveBubbleX = bubbleLp?.x ?: 0
+      val effectiveBubbleY = bubbleLp?.y ?: (100 * density).toInt()
+      val bubbleLeftAbs = dm.widthPixels / 2 + effectiveBubbleX - bubbleSizePx / 2
+      val bubbleRightAbs = bubbleLeftAbs + bubbleSizePx
+      val bubbleBottomAbs = dm.heightPixels - effectiveBubbleY // absolute Y of the bubble's bottom edge
+      val cardMaxWidth = (dm.widthPixels * 0.85f).toInt()
+      val edgeMargin = (10 * density).toInt()
+      val anchoredX = (bubbleRightAbs - cardMaxWidth).coerceIn(edgeMargin, dm.widthPixels - cardMaxWidth - edgeMargin)
+      val anchoredY = (bubbleBottomAbs + edgeMargin).coerceIn(edgeMargin, dm.heightPixels - edgeMargin)
       val savedStatusPos = loadStatusPosition()
 
       // ROUND_ASSISTANT_SESSION_UX_FIX_1 — keep-screen-awake for an active session while another
@@ -463,7 +540,7 @@ class BensonBubbleService : Service() {
           WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
         PixelFormat.TRANSLUCENT,
       ).apply {
-        gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        gravity = Gravity.TOP or Gravity.START
         x = savedStatusPos?.first ?: anchoredX
         y = savedStatusPos?.second ?: anchoredY
       }
@@ -490,7 +567,10 @@ class BensonBubbleService : Service() {
             }
             if (moved) {
               lp.x = startX + dx
-              lp.y = startY - dy
+              // TOP|START gravity now (was BOTTOM|CENTER_HORIZONTAL): y is a top-edge offset, so
+              // dragging DOWN (dy>0) must INCREASE it — the opposite sign from the idle bubble's
+              // own (still BOTTOM-anchored) drag handler above.
+              lp.y = startY + dy
               try { windowManager?.updateViewLayout(v, lp) } catch (_: Exception) {}
             }
             true
@@ -583,6 +663,13 @@ class BensonBubbleService : Service() {
   // showing (e.g. two dismiss paths racing).
   private fun dismissNow(reason: String) {
     cancelDismissTimer()
+    // ROUND_BUBBLE_REFOREGROUND_RESTORE_1 — a real completion/timeout/explicit hide means the
+    // mission is actually over; don't let a later unrelated foreground toggle resurrect it.
+    // self_app_foreground is the one case that must survive — that's exactly the state we want
+    // applyForegroundState(false) to redraw once BENSON leaves its own foreground again.
+    if (reason != "self_app_foreground") {
+      lastActiveStatus = null
+    }
     statusStateText?.text = ""
     statusTranscriptText?.text = ""
     val hadOverlay = statusView != null || bubbleView != null
@@ -728,6 +815,12 @@ class BensonBubbleService : Service() {
     private const val KEY_STATUS_HAS_POS = "status_has_pos"
     private const val KEY_STATUS_X = "status_x"
     private const val KEY_STATUS_Y = "status_y"
+    // POSITION_SCHEMA_MIGRATION_1 — bump on any future default-position or coordinate-system
+    // change for either the idle bubble or the status card; invalidates stale saved positions
+    // exactly once (see loadManualPosition()/loadStatusPosition()).
+    private const val KEY_POS_SCHEMA_VERSION = "bubble_pos_schema_version"
+    private const val KEY_STATUS_POS_SCHEMA_VERSION = "status_pos_schema_version"
+    private const val POSITION_SCHEMA_VERSION = 2
     // ROUND_BUBBLE_GEMINI_BEHAVIOR_1 — was 64. Revert: 64.
     private const val IDLE_BUBBLE_SIZE_DP = 44
     // ROUND_BUBBLE_STATE_DESYNC_FIX_1 — native-owned dismiss timing.
@@ -740,5 +833,14 @@ class BensonBubbleService : Service() {
     // CONFIRMING wait is never cut short by this backstop — it only fires if JS never got the
     // chance to resolve or expire that on its own.
     private const val NON_TERMINAL_SAFETY_NET_MS = 65_000L
+    // ROUND_SELF_FOREGROUND_DEBOUNCE_1 (2026-09-18, device-confirmed) — the isSelfForeground
+    // signal from BensonAccessibilityService's TYPE_WINDOW_STATE_CHANGED stream blips true for
+    // ~300-400ms right after this service's own overlay window is added (this OEM's accessibility
+    // stack attributes the event to com.benson.butler even though no Activity was actually
+    // brought forward), then reverts back to false — device log showed OVERLAY_POLICY_EVAL
+    // flipping false→true→false→true within a ~400ms window with no real app switch in between,
+    // tearing the overlay down and immediately recreating it (via the reforeground-restore fix
+    // above) in a fast show/hide flicker loop instead of the previous permanent-hide bug.
+    private const val SELF_FOREGROUND_DEBOUNCE_MS = 450L
   }
 }
