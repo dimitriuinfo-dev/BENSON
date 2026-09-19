@@ -1,5 +1,7 @@
 package expo.modules.overlay
 
+import android.app.Activity
+import android.app.Application
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -8,6 +10,7 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -48,8 +51,10 @@ class BensonBubbleService : Service() {
   private var bubbleView: View? = null
   private var params: WindowManager.LayoutParams? = null
 
-  // E3-2 — the bubble is now transparent; these three counter-rotating dots ARE the visible cue.
-  private var bubbleDots: BubbleDotsView? = null
+  // RUNDA_UI_SINGLE_THINKING_INDICATOR_1 (2026-09-19) — was BubbleDotsView (3-dot); now the same
+  // counter-rotating arc design as the (now-disabled) large wake ring, scaled down. See
+  // SmallArcBubbleView.kt.
+  private var bubbleDots: SmallArcBubbleView? = null
   private var bubbleMotion: String = "static" // remembered so a re-created bubble keeps its state
 
   private var wakeRingView: FrameLayout? = null
@@ -127,8 +132,52 @@ class BensonBubbleService : Service() {
   // ever restored afterward, per this round's explicit correction of the previous one.
   @Volatile private var isSelfForeground = false
   private var pendingSelfForegroundRunnable: Runnable? = null
-  private fun applyForegroundState(selfForeground: Boolean) {
+
+  // RUNDA_BUBBLE_STABLE_VISIBILITY_1 (2026-09-19, log-proven) — authoritative in-process answer to
+  // "is BENSON's own Activity actually in front?". The accessibility-derived claim cannot answer
+  // it: THIS service's own overlay window emits a TYPE_WINDOW_STATE_CHANGED attributed to
+  // com.benson.butler, which the a11y side stores as lastForegroundPackage and then re-asserts
+  // every 4s forever (see the constant's doc). The overlay lives in the same process as
+  // MainActivity, so a resumed-activity count is exact, needs no other module, and stays correct
+  // with JS dead.
+  @Volatile private var resumedActivities = 0
+  private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
+
+  private fun registerActivityForegroundProbe() {
+    if (!BUBBLE_STABLE_VISIBILITY || lifecycleCallbacks != null) return
+    val app = applicationContext as? Application ?: return
+    val cb = object : Application.ActivityLifecycleCallbacks {
+      override fun onActivityResumed(activity: Activity) {
+        resumedActivities++
+        Log.i("BENSON_AUDIO", "OVERLAY_SELF_ACTIVITY count=$resumedActivities event=resumed")
+        applyForegroundState(true)
+      }
+      override fun onActivityPaused(activity: Activity) {
+        resumedActivities = max(0, resumedActivities - 1)
+        Log.i("BENSON_AUDIO", "OVERLAY_SELF_ACTIVITY count=$resumedActivities event=paused")
+        if (resumedActivities == 0) applyForegroundState(false)
+      }
+      override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+      override fun onActivityStarted(activity: Activity) {}
+      override fun onActivityStopped(activity: Activity) {}
+      override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+      override fun onActivityDestroyed(activity: Activity) {}
+    }
+    app.registerActivityLifecycleCallbacks(cb)
+    lifecycleCallbacks = cb
+  }
+
+  // A self-foreground claim is only credible while one of our own Activities is resumed.
+  // BUBBLE_STABLE_VISIBILITY=false → always credible, i.e. the previous behavior verbatim.
+  private fun selfAppForegroundCredible(): Boolean =
+    if (!BUBBLE_STABLE_VISIBILITY) true else resumedActivities > 0
+
+  private fun applyForegroundState(rawSelfForeground: Boolean) {
+    val selfForeground = rawSelfForeground && selfAppForegroundCredible()
     Log.i("BENSON_AUDIO", "OVERLAY_POLICY_EVAL isSelfForeground=$selfForeground hadActiveOverlay=${statusView != null}")
+    if (rawSelfForeground && !selfForeground) {
+      Log.i("BENSON_AUDIO", "OVERLAY_POLICY_REJECTED reason=no_resumed_activity raw=true")
+    }
     pendingSelfForegroundRunnable?.let { dismissHandler.removeCallbacks(it) }
     pendingSelfForegroundRunnable = null
     if (selfForeground) {
@@ -160,8 +209,15 @@ class BensonBubbleService : Service() {
     }
   }
 
+  override fun onCreate() {
+    super.onCreate()
+    registerActivityForegroundProbe()
+  }
+
   override fun onDestroy() {
     instance = null
+    lifecycleCallbacks?.let { (applicationContext as? Application)?.unregisterActivityLifecycleCallbacks(it) }
+    lifecycleCallbacks = null
     cancelDismissTimer()
     pendingSelfForegroundRunnable?.let { dismissHandler.removeCallbacks(it) }
     pendingSelfForegroundRunnable = null
@@ -181,13 +237,15 @@ class BensonBubbleService : Service() {
     // sits meaningfully smaller than even that inner ring) rather than the 180dp outer arcs. Same
     // dots/colors/identity (BubbleDotsView, stroke color) — only the diameter changed. Revert: 64.
     val size = (IDLE_BUBBLE_SIZE_DP * density).toInt()
-    val dots = BubbleDotsView(this)
+    val dots = SmallArcBubbleView(this)
     bubbleDots = dots
     val view = FrameLayout(this).apply {
+      // RUNDA_UI_BUBBLE_NO_BORDER_1 (2026-09-19, product-owner-directed) — no visible edge on the
+      // bubble at all; only the arc animation itself should read. Was a 1.5dp ~35% gold stroke
+      // outlining the whole circle (setStroke below) — removed. Fill was already TRANSPARENT.
       background = GradientDrawable().apply {
         shape = GradientDrawable.OVAL
         setColor(Color.TRANSPARENT)
-        setStroke((1.5f * density).toInt(), Color.parseColor("#59D4AF37")) // ~35% gold — see-through
       }
       addView(dots, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
     }
@@ -406,6 +464,14 @@ class BensonBubbleService : Service() {
 
     if (turnId < lastAppliedTurnId) {
       Log.i("BENSON_AUDIO", "UI_STATE_DESYNC reason=stale_turn incoming=$turnId lastApplied=$lastAppliedTurnId")
+      // ROUND_STALE_RESTORE_CACHE_FIX_1 (2026-09-18, device-confirmed) — lastActiveStatus (the
+      // ROUND_BUBBLE_REFOREGROUND_RESTORE_1 cache) can hold a turnId that a later push has since
+      // superseded via a path that never updates it (visible=false or terminal=true). Nothing
+      // invalidated it, so the periodic foreground re-assert (BensonAccessibilityService, ~4s)
+      // kept retrying this exact stale turn forever — device log showed this UI_STATE_DESYNC line
+      // repeating every ~4s in a loop that never resolved. Once a turn is confirmed stale, drop it
+      // from the restore cache too so nothing keeps trying to resurrect it.
+      if (lastActiveStatus?.turnId == turnId) lastActiveStatus = null
       return
     }
     lastAppliedTurnId = turnId
@@ -427,6 +493,14 @@ class BensonBubbleService : Service() {
     // ROUND_BUBBLE_VISIBILITY_POLICY_1 — CASE 1/self-app suppression, enforced here too (not only
     // in applyForegroundState()) so a request that races the foreground-change broadcast can
     // never slip a visible overlay onto BENSON's own screen even for one frame.
+    // RUNDA_BUBBLE_STABLE_VISIBILITY_1 — un-latch a claim that is no longer credible. The device
+    // log showed isSelfForeground stuck at true for minutes while the user was on another app, so
+    // every later push died here without ever drawing a frame (UI_STATE_NATIVE immediately
+    // followed by OVERLAY_HIDE_SELF_APP, no OVERLAY_SHOW_ACTIVE in between).
+    if (isSelfForeground && !selfAppForegroundCredible()) {
+      Log.i("BENSON_AUDIO", "OVERLAY_POLICY_UNLATCH reason=no_resumed_activity")
+      isSelfForeground = false
+    }
     if (isSelfForeground) {
       Log.i("BENSON_AUDIO", "OVERLAY_HIDE_SELF_APP")
       dismissNow("self_app_foreground")
@@ -727,9 +801,21 @@ class BensonBubbleService : Service() {
   // natively (two counter-rotating RingArcViews) rather than hosting a second React Native
   // surface — far simpler and avoids a second bridge/root-view lifecycle to manage.
   private fun showWakeRing() {
+    // RUNDA_UI_SINGLE_THINKING_INDICATOR_1 (2026-09-19) — the large center ring and the small
+    // bubble (below, addBubble()) used to appear together: BensonForegroundService's
+    // onHotwordDetected() calls showBubbleNative() then showWakeRingNative() unconditionally, no
+    // mutual exclusion. Only one BENSON thinking indicator is allowed now — the small bubble,
+    // which already carries the same arc design (SmallArcBubbleView) — so this one is disabled at
+    // the source instead of touching the wake-detection call sites. Every hideWakeRing() call
+    // site stays a harmless no-op (wakeRingView is simply always null). Revert: true.
+    if (!LARGE_WAKE_RING_ENABLED) return
     if (wakeRingView != null) return
     // ROUND_BUBBLE_VISIBILITY_POLICY_1 — "If BENSON is already foreground: use the in-app
     // listening UI only. Do NOT create floating overlay."
+    if (isSelfForeground && !selfAppForegroundCredible()) {
+      Log.i("BENSON_AUDIO", "OVERLAY_POLICY_UNLATCH reason=no_resumed_activity")
+      isSelfForeground = false
+    }
     if (isSelfForeground) {
       Log.i("BENSON_AUDIO", "OVERLAY_HIDE_SELF_APP reason=wake_ring_suppressed")
       return
@@ -842,5 +928,23 @@ class BensonBubbleService : Service() {
     // tearing the overlay down and immediately recreating it (via the reforeground-restore fix
     // above) in a fast show/hide flicker loop instead of the previous permanent-hide bug.
     private const val SELF_FOREGROUND_DEBOUNCE_MS = 450L
+    // RUNDA_BUBBLE_STABLE_VISIBILITY_1 (2026-09-19) — REVERT CONSTANT for this round. `false`
+    // restores the previous behavior verbatim (the accessibility self-foreground claim is trusted
+    // blindly; the lifecycle probe is never registered).
+    //
+    // Why the previous SELF_FOREGROUND_DEBOUNCE_MS fix was not enough — device log 09-18 17:13:
+    //   17:13:47.657  OVERLAY_SHOW_ACTIVE state="ASCULT"
+    //   17:13:47.992  OVERLAY_POLICY_EVAL isSelfForeground=true hadActiveOverlay=true   (+335ms)
+    //   17:13:48.442  OVERLAY_POLICY_CONFIRMED / OVERLAY_HIDE_SELF_APP                 (+785ms)
+    // 4/4 shows in that session died 220-400ms after appearing. The claim does NOT revert inside
+    // the debounce window: BensonAccessibilityService stores our own overlay's window event as
+    // lastForegroundPackage and its 4s re-assert loop then re-sends is_self_foreground=true
+    // indefinitely, so isSelfForeground stayed latched true for over a minute while the user was
+    // on another app. A time-based debounce cannot distinguish the echo; a resumed-Activity count
+    // can, because no Activity of ours is ever resumed when the echo fires.
+    const val BUBBLE_STABLE_VISIBILITY = true
+    // RUNDA_UI_SINGLE_THINKING_INDICATOR_1 (2026-09-19) — REVERT CONSTANT. false restores the
+    // large center wake ring exactly as before (showWakeRing() builds it again).
+    private const val LARGE_WAKE_RING_ENABLED = false
   }
 }
