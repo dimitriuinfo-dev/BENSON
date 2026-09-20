@@ -123,6 +123,10 @@ Acestea au funcționat pe dispozitiv, cu dovadă. Nicio rundă nu are voie să l
 | Microfon închis cât vorbește BENSON (fără ecou) | 29.08, verificat în log |
 | Index de aplicații 274 | 29.08 |
 | Microfonul se auto-repară după o acțiune care lansează altă aplicație (C1+C2) — revenire fără atingerea medalionului | 31.08, 7 comenzi / 0 atingeri în log |
+| „Benson, deschide X" (nume ambiguu/inexact ca aplicație) → un singur candidat instalat → BENSON propune ("Am găsit X. O deschid?") → confirmare vocală "da" → deschidere verificată pe foreground | 19.09, log complet WAKE_DETECT→APP_MATCH→CONFIRM_LISTEN_RESULT=YES→EXEC_TRACE_FOREGROUND_VERIFY, calea live (JS activ) |
+| Wake „Benson" în fundal/ecran stins, inclusiv cu altă aplicație în prim-plan și BENSON omorât de OS — livrare live, ~9–15ms latență | 20.09, build 16:35:55, detalii în `docs/device-tests/2026-09-20-results.md` |
+| „Benson, deschide Calculatorul" din fundal, fără atingerea lui BENSON, inclusiv dezambiguizare pe două runde | 20.09, build 16:35:55 și 16:51:03, detalii în `docs/device-tests/2026-09-20-results.md` |
+| „Benson, sun-o pe mama pe WhatsApp" din fundal → confirmare vocală → apel verificat activ (`CALL_ACTIVE`, nameMatch=true) | 20.09, build 16:51:03, ~21s total, detalii în `docs/device-tests/2026-09-20-results.md`. Închiderea apelului prin voce e raportată de utilizator, NEconfirmată încă în log. |
 
 **Înainte de a declara o rundă încheiată, spune explicit care dintre acestea ar putea fi
 afectate de schimbare și de ce crezi că nu sunt.** Dacă nu ești sigur, nu declara încheiat.

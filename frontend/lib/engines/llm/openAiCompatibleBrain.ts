@@ -8,7 +8,21 @@ import { conversationFallbackLine } from '../../agents/fallbackLine';
 import { composeWireMessages, parseBrainOutput } from './messageChannels';
 import type { BrainOutput, ChatOpts, EngineConfig, LlmBrain, SystemTurn, Turn } from '../types';
 
-const REQUEST_TIMEOUT_MS = 30000;
+// PHASE_A_PROTOCOL_AND_TIMEOUT (2026-09-19, product-owner-directed) — was 30000 with one retry on
+// network failure (60s worst case — exactly what hung "intră în Netflix" for 60s on a Groq
+// outage, forensically proven in scratchpad/abba_netflix_dump.txt). Per the round's explicit
+// spec: a 3s hard ceiling, NO retry — a timeout must surface fast enough that BENSON can say "Nu
+// am înțeles" and re-listen inside the same active session, never a second 30-60s wait.
+//
+// Late-response safety (verified, not assumed, before this edit): fetchWithTimeout.ts already
+// races the real fetch() against a promise that rejects the INSTANT the native watchdog fires
+// (CLOUD_FETCH_RACE_1, 2026-09-18) — this function's own `await` therefore always settles at the
+// timeout, full stop, regardless of whether the underlying fetch ever notices the abort(). If the
+// underlying fetch DOES resolve later, nothing here ever awaits or reads it again — no shared
+// mutable state, no cache, no callback captures it — so a late response cannot retroactively
+// speak, change session state, or execute anything. No new invalidation plumbing was needed.
+const REQUEST_TIMEOUT_MS = 3000;
+const MAX_OUTPUT_TOKENS = 250;
 
 type WireMessage = { role: string; content: string };
 
@@ -24,21 +38,16 @@ async function postChatCompletion(config: EngineConfig, messages: WireMessage[],
     model: config.model,
     messages,
     temperature: opts?.temperature ?? 0.4,
+    max_tokens: MAX_OUTPUT_TOKENS,
   });
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` };
   const url = chatCompletionsUrl(config.baseUrl);
   // Diagnosis line (2026-08-28) — the resolved URL and model, never the key (it is only in the
   // Authorization header, never in the URL). Distinguishes an address 404 from a model 404.
   logAudioDiag('LLM_ENDPOINT', `url=${url} model=${config.model}`);
-  try {
-    return await fetchWithTimeout(url, { method: 'POST', headers, body }, REQUEST_TIMEOUT_MS);
-  } catch (e) {
-    // One retry, network-level failures only (includes the timeout fetchWithTimeout throws) —
-    // never a second attempt after a real HTTP response (4xx/5xx), which lands in the caller's
-    // res.ok check below instead of this catch.
-    logAudioDiag('LLM_RETRY', 'reason=network');
-    return fetchWithTimeout(url, { method: 'POST', headers, body }, REQUEST_TIMEOUT_MS);
-  }
+  // PHASE_A_PROTOCOL_AND_TIMEOUT — the automatic retry-on-network-failure that used to live here
+  // is REMOVED. One OpenAI/CREIER request per user turn, maximum — see the constant doc above.
+  return fetchWithTimeout(url, { method: 'POST', headers, body }, REQUEST_TIMEOUT_MS);
 }
 
 // Names the actual cause — key / connection / model / rate-limit — instead of a bare code, so the
@@ -140,14 +149,32 @@ export function createOpenAiCompatibleBrain(config: EngineConfig, lang: string =
   };
 }
 
-// Settings "TEST" button (Task 7) — a minimal real call, not a full BrainOutput round trip: just
-// confirms baseUrl/model/apiKey actually reach a working chat/completions endpoint.
-export async function testLlmConnection(config: EngineConfig): Promise<{ ok: true } | { ok: false; error: string }> {
+// Settings "TEST LLM" button — a minimal real call, not a full BrainOutput round trip: just
+// confirms baseUrl/model/apiKey actually reach a working chat/completions endpoint. Never reads
+// or returns the key/Authorization header — only status/errorCode/latency, for the button to
+// classify and display (SUCCESS/TIMEOUT/AUTH_ERROR/CREDIT_ERROR/NETWORK_ERROR/MODEL_ERROR).
+// PHASE_A_PROTOCOL_AND_TIMEOUT (2026-09-19) — extended return shape (was {ok:true}|{ok:false,
+// error:string}, zero existing callers, so widening it here is a safe no-op for anything else).
+export type LlmConnectionTestResult =
+  | { ok: true; status: number; latencyMs: number }
+  | { ok: false; status?: number; errorCode?: string; error: string; latencyMs: number; timedOut: boolean };
+
+export async function testLlmConnection(config: EngineConfig): Promise<LlmConnectionTestResult> {
+  const startedAt = Date.now();
   try {
     const res = await postChatCompletion(config, [{ role: 'user', content: 'ping' }]);
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
-    return { ok: true };
+    const latencyMs = Date.now() - startedAt;
+    if (!res.ok) {
+      // OpenAI-shaped error body: {"error":{"message":"...","type":"...","code":"insufficient_quota"}}
+      // — read only `code` (never the message, which could echo request content back).
+      const body = await res.json().catch(() => null);
+      const errorCode = typeof body?.error?.code === 'string' ? body.error.code : undefined;
+      return { ok: false, status: res.status, errorCode, error: `HTTP ${res.status}`, latencyMs, timedOut: false };
+    }
+    return { ok: true, status: res.status, latencyMs };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    const latencyMs = Date.now() - startedAt;
+    const message = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: message, latencyMs, timedOut: /timed out/i.test(message) };
   }
 }

@@ -1,4 +1,16 @@
 import * as Location from 'expo-location';
+import { fetchWithTimeout } from './agents/fetchWithTimeout';
+
+// BUG_INVESTIGATION_1 (2026-09-20, device-proven) — every network call below used to be a plain
+// `fetch()` with NO timeout at all. Device log: reverseGeocodePlace's fetch hung for 45+ seconds
+// with zero error, zero result — the ONLY thing that eventually ended the turn was the unrelated
+// 45s mic-owner-timeout watchdog force-recovering, 45s after the user asked "ce vreme va fi azi".
+// This is the exact "no timeout on a cloud fetch" defect class already found and fixed today for
+// Groq/Deepgram/the OpenAI brain (see lib/agents/fetchWithTimeout.ts's own history) — reusing that
+// SAME proven helper here instead of a second bespoke one. 10s: generous for a plain geocode/
+// weather JSON response, short enough that a genuine outage surfaces as an honest "can't reach it"
+// reply in seconds, not tens of seconds.
+const CONTEXT_FETCH_TIMEOUT_MS = 10000;
 
 export type RoadType = 'city' | 'national' | 'highway';
 
@@ -53,9 +65,16 @@ export type WeatherData = { tempC: number; description: string; precipitation: n
 // Free, no-key weather lookup.
 export async function fetchWeatherData(lat: number, lon: number): Promise<WeatherData | null> {
   try {
-    const res = await fetch(
-      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,precipitation`
+    const res = await fetchWithTimeout(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,precipitation`,
+      {}, CONTEXT_FETCH_TIMEOUT_MS,
     );
+    // FIX_ROUND_2 (2026-09-20, product-owner-directed) — an explicit HTTP-status check: a
+    // provider error must never silently fall through as an empty/successful result. `t ===
+    // undefined` below already caught this by accident for a JSON error body, but a non-2xx
+    // response is now rejected explicitly, before the shape check, so the distinction is real and
+    // not incidental.
+    if (!res.ok) return null;
     const data = await res.json();
     const t = data.current?.temperature_2m;
     const precip = data.current?.precipitation;
@@ -83,13 +102,57 @@ export async function fetchWeather(lat: number, lon: number): Promise<string | n
 // Usage policy: identify with a User-Agent, keep to on-demand single lookups (not bulk queries).
 export async function geocodePlace(query: string): Promise<{ latitude: number; longitude: number } | null> {
   try {
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`,
-      { headers: { 'User-Agent': 'BENSON-Android/1.0 (voice assistant)' } }
+      { headers: { 'User-Agent': 'BENSON-Android/1.0 (voice assistant)' } }, CONTEXT_FETCH_TIMEOUT_MS,
     );
+    if (!res.ok) return null;
     const results: { lat: string; lon: string }[] = await res.json();
     if (!results.length) return null;
     return { latitude: parseFloat(results[0].lat), longitude: parseFloat(results[0].lon) };
+  } catch {
+    return null;
+  }
+}
+
+// BENSON_GROUNDED_CONVERSATION_1 (2026-09-20) — symmetric reverse of geocodePlace above (same
+// provider, same no-key/no-permission Nominatim endpoint), needed so a device-location weather
+// answer can name the resolved city back to the user ("vremea la Cluj-Napoca") and so a
+// same-conversation follow-up ("și mâine?") has a city name to remember instead of raw coordinates.
+export async function reverseGeocodePlace(latitude: number, longitude: number): Promise<string | null> {
+  try {
+    const res = await fetchWithTimeout(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`,
+      { headers: { 'User-Agent': 'BENSON-Android/1.0 (voice assistant)' } }, CONTEXT_FETCH_TIMEOUT_MS,
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data?.address;
+    const name = a?.city || a?.town || a?.village || a?.municipality || a?.county;
+    return typeof name === 'string' && name.trim() ? name.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// BENSON_GROUNDED_CONVERSATION_1 — "și mâine?" needs a forecast, not the current-conditions
+// endpoint fetchWeatherData already covers. Same Open-Meteo base URL/no-key pattern, extended with
+// the `daily` param instead of `current` and forecast_days=2 (today + tomorrow), reading index 1.
+export type ForecastData = { tempMaxC: number; tempMinC: number; precipitationMm: number };
+export async function fetchTomorrowForecast(lat: number, lon: number): Promise<ForecastData | null> {
+  try {
+    const res = await fetchWithTimeout(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+      `&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&forecast_days=2&timezone=auto`,
+      {}, CONTEXT_FETCH_TIMEOUT_MS,
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const tMax = data.daily?.temperature_2m_max?.[1];
+    const tMin = data.daily?.temperature_2m_min?.[1];
+    const precip = data.daily?.precipitation_sum?.[1];
+    if (tMax === undefined || tMin === undefined) return null;
+    return { tempMaxC: tMax, tempMinC: tMin, precipitationMm: precip ?? 0 };
   } catch {
     return null;
   }

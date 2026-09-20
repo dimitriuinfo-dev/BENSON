@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -567,6 +568,11 @@ class BensonForegroundService : Service() {
     // JS is done (reply spoken, back to idle) — resume passive "Benson" listening.
     if (intent?.action == ACTION_RESUME_HOTWORD) {
       mainHandler.post { startHotwordLoop() }
+      return START_STICKY
+    }
+
+    if (intent?.action == ACTION_TEST_SIMULATE_HANDOFF_MISS) {
+      handleTestSimulateHandoffMiss(intent)
       return START_STICKY
     }
 
@@ -1296,7 +1302,7 @@ class BensonForegroundService : Service() {
     // initialized at all." takePendingWakeCommand() (atomic read+clear, below) is the ONE
     // consumption point for both the live-event path and the heartbeat-poll fallback in
     // app/index.tsx's wakePokeSub — the same command can never be processed twice.
-    pendingWakeCommand = commandTail
+    pendingWakeCommand.set(commandTail)
     pendingWakeCommandEpoch += 1
     armWakeHandoffWatchdog()
 
@@ -1342,8 +1348,52 @@ class BensonForegroundService : Service() {
         AudioDiag.logError("WAKE_HANDOFF_RECOVER", "reason=not_consumed timeoutMs=${WakeHandoffWatchdog.TIMEOUT_MS}")
         setMicOwner("NONE", "wake_handoff_recover")
         armNativeWake("wake_handoff_recover")
+        // NATIVE_JS_RELIABLE_HANDOFF_FIX_1 (2026-09-19, device-proven) — the two lines above don't
+        // clear pendingWakeCommand (only takePendingWakeCommand() does), so the command is still
+        // durably held. Start Headless JS so it still gets processed even though the live JS
+        // thread never woke up in time to consume it — the task calls the SAME
+        // takePendingWakeCommand() every other path uses, so it can never double-process.
+        try {
+          startService(Intent(this, BensonWakeHeadlessTaskService::class.java))
+          AudioDiag.log(this, "WAKE_HEADLESS_START", "reason=not_consumed")
+        } catch (e: Exception) {
+          AudioDiag.logError("WAKE_HEADLESS_START_FAILED", "error=\"${e.javaClass.simpleName}: ${e.message}\"")
+        }
       }
     }, WakeHandoffWatchdog.TIMEOUT_MS)
+  }
+
+  // HEADLESS_WIRING_TEST_1 (2026-09-19) — adb-only, debug-build-only. Sets the SAME durable
+  // pendingWakeCommand and arms the SAME WakeHandoffWatchdog a real "not consumed in time" wake
+  // event would, WITHOUT touching the wake-word engine, STT, or the mic pipeline — it does not
+  // call armNativeWake()/startHotwordLoop() or acquire any audio. This isolates one question only:
+  // does the pending->watchdog->BensonWakeHeadlessTaskService->takePendingWakeCommand->runMission
+  // wiring work, independent of whether the JS thread is actually suspended. It does NOT prove
+  // recovery from a genuinely inert React runtime — that still requires a real device freeze (see
+  // NATIVE_JS_RELIABLE_HANDOFF_FIX_1's own device-test notes). Result label: HEADLESS_WIRING_PASS,
+  // never BACKGROUND_RECOVERY_PASS — the two are not the same claim.
+  //
+  // Refused and logged (never a silent no-op) unless the running APK is itself debuggable
+  // (android:debuggable, read from the live ApplicationInfo — not a Gradle BuildConfig field,
+  // which this module does not currently generate) — this can never fire against the signed
+  // release build regardless of whether this code ships in it.
+  private fun handleTestSimulateHandoffMiss(intent: Intent) {
+    val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    if (!debuggable) {
+      AudioDiag.logError("HEADLESS_WIRING_TEST_REFUSED", "reason=not_debuggable")
+      return
+    }
+    val commandTail = intent.getStringExtra("commandTail") ?: "deschide Netflix"
+    AudioDiag.log(this, "HEADLESS_WIRING_TEST_SIMULATE", "commandTail=\"$commandTail\"")
+    setMicOwner("COMMAND_STT", "headless_wiring_test")
+    // HEADLESS_WIRING_TEST_ISOLATION_1 — writes to the TEST-ONLY field (pendingWakeCommand,
+    // above, is never touched here), so the live path structurally cannot see or consume this.
+    // armWakeHandoffWatchdog() itself is generic (only checks micOwner/epoch, never reads either
+    // command field directly) — reusing it unmodified still arms the same real 5s timer and, on
+    // expiry, starts the same BensonWakeHeadlessTaskService.
+    pendingHeadlessTestCommand.set(commandTail)
+    pendingWakeCommandEpoch += 1
+    armWakeHandoffWatchdog()
   }
 
   // Atomic read+clear — the single consumption point for BOTH the live onWakeWordDetected event
@@ -1351,10 +1401,25 @@ class BensonForegroundService : Service() {
   // nothing is pending (already consumed, or none fired). commandTail="" is a valid result (bare
   // "Benson"), distinct from null.
   fun takePendingWakeCommand(): String? {
-    val cmd = pendingWakeCommand ?: return null
-    pendingWakeCommand = null
+    // DATA_RACE_FIX_1 — getAndSet(null) is one indivisible operation: whichever caller (live JS
+    // event path or Headless recovery task) happens to call this first gets the non-null value
+    // and every other caller — no matter how close in time — gets null. Only log when a value was
+    // actually taken, never on the (now expected, harmless) null case.
+    val cmd = pendingWakeCommand.getAndSet(null) ?: return null
     pendingWakeCommandEpoch += 1
     AudioDiag.log(this, "WAKE_PENDING_TAKEN", "commandTail=\"$cmd\"")
+    return cmd
+  }
+
+  // HEADLESS_WIRING_TEST_ISOLATION_1 — the ONLY consumer of pendingHeadlessTestCommand. Called
+  // exclusively from the Headless JS task (wakeCommandTask.ts), never from the live event/
+  // heartbeat-fallback paths — see that field's own doc for why this makes the wiring test
+  // exercise exactly the Headless path with zero possibility of the live path racing it ahead.
+  // getAndSet(null) clears the marker atomically the instant it's taken, same discipline as
+  // takePendingWakeCommand() above.
+  fun takePendingHeadlessTestCommand(): String? {
+    val cmd = pendingHeadlessTestCommand.getAndSet(null) ?: return null
+    AudioDiag.log(this, "WAKE_PENDING_TAKEN", "commandTail=\"$cmd\" consumer=headless")
     return cmd
   }
 
@@ -1501,6 +1566,12 @@ class BensonForegroundService : Service() {
     const val ACTION_PAUSE_HOTWORD = "expo.modules.foregroundservice.ACTION_PAUSE_HOTWORD"
     const val ACTION_RESUME_HOTWORD = "expo.modules.foregroundservice.ACTION_RESUME_HOTWORD"
     const val ACTION_UPDATE_NOTIFICATION = "expo.modules.foregroundservice.ACTION_UPDATE_NOTIFICATION"
+    // HEADLESS_WIRING_TEST_1 (2026-09-19) — debug-build-only, adb-triggered. Tests the wiring
+    // (pendingWakeCommand -> WakeHandoffWatchdog -> BensonWakeHeadlessTaskService ->
+    // takePendingWakeCommand -> runMission) in isolation, without touching the wake-word engine,
+    // STT, or the mic pipeline at all. Refused and logged on a non-debuggable build — see
+    // handleTestSimulateHandoffMiss(). Never invoked by any production code path.
+    const val ACTION_TEST_SIMULATE_HANDOFF_MISS = "expo.modules.foregroundservice.TEST_SIMULATE_HANDOFF_MISS"
     const val EXTRA_TITLE = "title"
     const val EXTRA_BODY = "body"
     const val WATCHDOG_INTERVAL_MS = 60_000L
@@ -1559,7 +1630,31 @@ class BensonForegroundService : Service() {
     // BensonForegroundServiceModule's OnCreate flushes and clears this the moment a listener
     // becomes available again, so the wake word isn't lost outright just because JS wasn't ready
     // at the exact instant it was detected.
-    var pendingWakeCommand: String? = null
+    //
+    // DATA_RACE_FIX_1 (2026-09-20, code-confirmed) — was a plain `var` with no @Volatile and no
+    // atomicity: written on the Android main thread (onHotwordDetected /
+    // handleTestSimulateHandoffMiss), read on the JS thread (takePendingWakeCommand(), called
+    // from both the live onWakeWordDetected path and the Headless JS recovery task). Device log
+    // proved the visibility half of this — WAKE_PENDING_TAKEN never fired even though the write
+    // demonstrably happened — but a plain @Volatile alone only fixes visibility, not exclusivity:
+    // two near-simultaneous readers (live JS and Headless) could each observe the same non-null
+    // value before either cleared it, executing the same command twice. AtomicReference +
+    // getAndSet(null) makes read-and-clear a single indivisible operation, so exactly one caller
+    // ever gets a given command. Deliberately NOT solving consume-before-ACK here (see
+    // takePendingWakeCommand()'s own comment) — that is a separate, larger change (persist the
+    // command until the mission is actually accepted, not just until it's read).
+    val pendingWakeCommand = java.util.concurrent.atomic.AtomicReference<String?>(null)
+
+    // HEADLESS_WIRING_TEST_ISOLATION_1 (2026-09-20) — a SEPARATE field, deliberately never
+    // touched by the live onWakeWordDetected path or the JS heartbeat-poll fallback (both call
+    // ONLY takePendingWakeCommand() / pendingWakeCommand above). handleTestSimulateHandoffMiss()
+    // writes here instead of pendingWakeCommand, so an injected wiring-test command is
+    // structurally impossible for the live path to race — only the Headless recovery task
+    // (wakeCommandTask.ts, via takePendingHeadlessTestCommand() below) ever reads this field.
+    // Zero effect on real wake commands: nothing in the production wake path ever writes or reads
+    // this field. Written ONLY from a call already refused unless the running APK is debuggable
+    // (see handleTestSimulateHandoffMiss) — impossible to populate in a release build.
+    val pendingHeadlessTestCommand = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
     // STT mishearings of "Benson" across RO/DE/EN pronunciation — mirrors the variant list
     // used by the (foreground-only) JS wake-word gate this replaces, since the fuzzy matching

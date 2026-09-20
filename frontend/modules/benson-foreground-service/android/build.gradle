@@ -39,6 +39,13 @@ android {
 }
 
 dependencies {
+  // NATIVE_JS_RELIABLE_HANDOFF_FIX_1 (2026-09-19) — BensonWakeHeadlessTaskService extends RN's
+  // own com.facebook.react.HeadlessJsTaskService; useCoreDependencies() above only brings in
+  // expo-modules-core's own Promise/Function abstractions, not the raw RN bridge classes. Same
+  // unversioned coordinate android/app/build.gradle already uses — resolved by the React Native
+  // Gradle plugin's own version management, so no separate pin needed (or risked going stale).
+  implementation "com.facebook.react:react-android"
+
   // Guardian secondary revival layer (BensonHealthWorker) — periodic health check independent
   // of the AlarmManager watchdog and the AccessibilityService resurrection anchor.
   implementation "androidx.work:work-runtime-ktx:2.9.1"

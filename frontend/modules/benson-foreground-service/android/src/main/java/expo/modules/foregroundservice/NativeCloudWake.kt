@@ -123,22 +123,50 @@ class NativeCloudWake(
       return prev[n]
     }
 
+    // BENSON_GROUNDED_CONVERSATION_1 (2026-09-20, product-owner-directed) — a closed, exact-match
+    // set only. "Benson, bună dimineața" already worked before this round (the greeting is AFTER
+    // the wake word — ordinary commandTail, untouched). This adds the ONLY other explicitly
+    // authorized order: "Bună dimineața, Benson" (greeting BEFORE the wake word). Deliberately NOT
+    // "pass everything before Benson as the command" — that was explicitly forbidden (a user
+    // muttering unrelated words right before saying "Benson" must never be replayed as a command).
+    // Normalized (diacritics stripped, lowercased) so "Bună dimineața"/"Buna dimineata" both match.
+    private val GREETING_PHRASES_NORMALIZED = setOf(
+      "buna dimineata", "buna ziua", "buna seara", "salut", "buna", "servus", "salutare",
+      "guten morgen", "guten tag", "guten abend", "hallo",
+      "good morning", "good afternoon", "good evening", "hello", "hi",
+    )
+
     // Conservative port of app/index.tsx's detectWakeWord()/stripWakeWord(): normalize (lowercase
     // + strip diacritics), then an exact substring/whole-word check, then a Levenshtein<=1 fuzzy
     // fallback on individual tokens — generalized to whatever `wakeName` is configured (that
     // string is the ONE authoritative source; there is no second hardcoded name list here).
     // Returns (matched, isExactMatch, commandTail).
+    //
+    // BENSON_GROUNDED_CONVERSATION_1 — commandTail is now resolved via resolveTail() below instead
+    // of a bare `words.drop(i + 1)...`, so a recognized greeting spoken BEFORE the wake word (and
+    // nothing meaningful after it) still reaches the dispatcher as if it were said after — every
+    // other case (bare "Benson", "Benson <command>", unrecognized text before the name) is
+    // byte-for-byte the same tail this function already returned before this round.
     fun matchWake(transcriptRaw: String, wakeName: String): Triple<Boolean, Boolean, String> {
       val words = transcriptRaw.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
       val normName = normalize(wakeName)
       if (words.isEmpty() || normName.isBlank()) return Triple(false, false, "")
+
+      fun resolveTail(index: Int): String {
+        val after = words.drop(index + 1).joinToString(" ").trim()
+        if (after.isNotEmpty()) return after
+        val before = words.take(index).joinToString(" ") { normalize(it.trim(',', '.', '!', '?', ':', ';', '-')) }.trim()
+        return if (before.isNotEmpty() && GREETING_PHRASES_NORMALIZED.contains(before)) {
+          words.take(index).joinToString(" ").trim(',', '.', '!', '?', ':', ';', '-', ' ')
+        } else ""
+      }
       fun cleanWord(w: String) = w.trim(',', '.', '!', '?', ':', ';', '-')
 
       for (i in words.indices) {
         val normW = normalize(cleanWord(words[i]))
         if (normW.isEmpty()) continue
         if (normW == normName || normW.contains(normName) || normName.contains(normW)) {
-          return Triple(true, true, words.drop(i + 1).joinToString(" ").trim())
+          return Triple(true, true, resolveTail(i))
         }
       }
       // Fuzzy fallback — same tolerance rule as the JS gate. 2026-09-18, device-confirmed: real
@@ -157,7 +185,7 @@ class NativeCloudWake(
         val normW = normalize(cleanWord(words[i]))
         if (normW.length < 3) continue
         if (levenshtein(normW, normName) <= maxDist) {
-          return Triple(true, false, words.drop(i + 1).joinToString(" ").trim())
+          return Triple(true, false, resolveTail(i))
         }
       }
       return Triple(false, false, "")

@@ -1,6 +1,13 @@
 import type { AnthropicMsg, Character, FamilyMember } from './types';
 import type { ContentCard } from './contentTypes';
 import { askClaude } from './claudeAgent';
+import { fetchWithTimeout } from './fetchWithTimeout';
+
+// BUG_INVESTIGATION_1 (2026-09-20, device-proven) — same "no timeout on a cloud fetch" defect
+// class found live for a sibling call (lib/contextEngine.ts's Nominatim/Open-Meteo fetches hung
+// 45+ seconds with zero error) — this plain fetch had the identical exposure and is fixed the
+// same way, reusing the same proven helper.
+const TAVILY_FETCH_TIMEOUT_MS = 10000;
 
 export const SEARCH_PATTERN =
   /\b(?:search for|search|look up|what'?s the latest(?: on| about)?|what is the latest(?: on| about)?|caut[ăa](?: pe internet)?(?: despre)?|ce e nou(?: cu| despre| la)?|suche(?: nach)?|recherche(?: sur)?)\b\s+(.+)/i;
@@ -16,7 +23,7 @@ export async function tavilySearch(query: string, tavilyKey: string, isNews: boo
   results: TavilyResult[];
   images: string[];
 }> {
-  const searchRes = await fetch('https://api.tavily.com/search', {
+  const searchRes = await fetchWithTimeout('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -27,7 +34,7 @@ export async function tavilySearch(query: string, tavilyKey: string, isNews: boo
       topic:        isNews ? 'news' : 'general',
       include_images: isNews,
     }),
-  });
+  }, TAVILY_FETCH_TIMEOUT_MS);
   const searchData = await searchRes.json();
   return { results: searchData.results || [], images: searchData.images || [] };
 }

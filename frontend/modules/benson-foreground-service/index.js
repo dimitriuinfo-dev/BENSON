@@ -48,6 +48,12 @@ export function takePendingWakeCommand() {
   try { return NativeModule.takePendingWakeCommand() ?? null; } catch { return null; }
 }
 
+// HEADLESS_WIRING_TEST_ISOLATION_1 (2026-09-20) — debug-only wiring-test marker, a separate
+// native field never touched by the production wake path. Always null in a release build.
+export function takePendingHeadlessTestCommand() {
+  try { return NativeModule.takePendingHeadlessTestCommand() ?? null; } catch { return null; }
+}
+
 // ROUND_WAKE_STATE_BUG_1 — native heartbeat (every ~3 s from the foreground service, on a native
 // Handler that runs regardless of RN host state). Delivered as an EVENT, so the JS callback
 // executes even while the app is backgrounded — unlike setTimeout/setInterval, which RN suspends.

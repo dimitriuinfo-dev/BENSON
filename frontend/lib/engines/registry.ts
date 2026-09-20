@@ -9,7 +9,7 @@ import { getEngineConfig, getSelectedEngineId } from './settingsStore';
 import { createGroqSttEngine } from './stt/groqStt';
 import { createOpenAiCompatibleBrain } from './llm/openAiCompatibleBrain';
 import { createAndroidTtsVoice } from './tts/androidTts';
-import type { LlmBrain, SttEngine, TtsVoice } from './types';
+import type { EngineConfig, LlmBrain, SttEngine, TtsVoice } from './types';
 
 export const STT_ENGINE_IDS = ['groq', 'local'] as const;
 export const LLM_ENGINE_IDS = ['openai-compatible'] as const;
@@ -120,28 +120,36 @@ export async function resolveSttEngine(): Promise<SttEngine> {
   return createGroqSttEngine(config);
 }
 
+// PHASE_A_PROTOCOL_AND_TIMEOUT (2026-09-19) — extracted out of resolveLlmBrain() so the Settings
+// TEST LLM button (app/index.tsx) can show the resolved provider/endpoint/model and run
+// testLlmConnection() against the SAME resolution resolveLlmBrain() itself uses, instead of
+// re-implementing this fallback chain a second time. No behavior change to resolveLlmBrain() —
+// it now just calls this and wraps the result.
+export type ResolvedLlmConfigSource = 'creier' | 'groq_reuse';
+export async function resolveLlmConfig(): Promise<{ config: EngineConfig; source: ResolvedLlmConfigSource } | null> {
+  const id = await getSelectedEngineId('llm', DEFAULT_LLM_ENGINE_ID);
+  const dedicated = await getEngineConfig('llm', id);
+  if (dedicated) return { config: dedicated, source: 'creier' };
+  // No dedicated CREIER config — fall back to the Groq key (see the defaults above). The model is
+  // discovered from the live /models list rather than hardcoded, because known-good ids have
+  // 404'd on this account.
+  const groq = await getEngineConfig('stt', 'groq');
+  if (!groq?.apiKey) return null;
+  const baseUrl = groq.baseUrl || GROQ_BRAIN_DEFAULT_BASE_URL;
+  const disc = await discoverGroqBrainModel(baseUrl, groq.apiKey);
+  // Even on a discovery failure, still return a config (with the last-resort id) so the chat call
+  // runs and surfaces the real HTTP error — lastLlmDiscoveryCause() carries the reason for the
+  // conversation layer to phrase.
+  return { config: { apiKey: groq.apiKey, baseUrl, model: disc.model ?? GROQ_BRAIN_DEFAULT_MODEL }, source: 'groq_reuse' };
+}
+
 // Returns null when no LLM engine is configured yet (no apiKey saved) — callers decide what to do
 // with "no brain configured" (e.g. the Settings TEST button just reports it, rather than this
 // module inventing a fallback provider).
 export async function resolveLlmBrain(lang: string = 'ro'): Promise<LlmBrain | null> {
-  const id = await getSelectedEngineId('llm', DEFAULT_LLM_ENGINE_ID);
-  let config = await getEngineConfig('llm', id);
-  if (!config) {
-    // No dedicated CREIER config — fall back to the Groq key (see the defaults above). The model
-    // is discovered from the live /models list rather than hardcoded, because known-good ids have
-    // 404'd on this account.
-    const groq = await getEngineConfig('stt', 'groq');
-    if (groq?.apiKey) {
-      const baseUrl = groq.baseUrl || GROQ_BRAIN_DEFAULT_BASE_URL;
-      const disc = await discoverGroqBrainModel(baseUrl, groq.apiKey);
-      // Even on a discovery failure, still build a brain (with the last-resort id) so the chat
-      // call runs and surfaces the real HTTP error — lastLlmDiscoveryCause() carries the reason
-      // for the conversation layer to phrase.
-      config = { apiKey: groq.apiKey, baseUrl, model: disc.model ?? GROQ_BRAIN_DEFAULT_MODEL };
-    }
-  }
-  if (!config) return null;
-  return createOpenAiCompatibleBrain(config, lang);
+  const resolved = await resolveLlmConfig();
+  if (!resolved) return null;
+  return createOpenAiCompatibleBrain(resolved.config, lang);
 }
 
 export async function resolveTtsVoice(): Promise<TtsVoice> {

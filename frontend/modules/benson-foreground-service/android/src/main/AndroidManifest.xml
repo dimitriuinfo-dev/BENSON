@@ -17,6 +17,13 @@
       android:exported="false"
       android:foregroundServiceType="microphone" />
 
+    <!-- NATIVE_JS_RELIABLE_HANDOFF_FIX_1 — RN's HeadlessJsTaskService, started only from
+         BensonForegroundService's existing 5s WakeHandoffWatchdog when the live JS thread never
+         consumed the wake command. -->
+    <service
+      android:name=".BensonWakeHeadlessTaskService"
+      android:exported="false" />
+
     <receiver
       android:name=".BensonWatchdogReceiver"
       android:exported="false" />

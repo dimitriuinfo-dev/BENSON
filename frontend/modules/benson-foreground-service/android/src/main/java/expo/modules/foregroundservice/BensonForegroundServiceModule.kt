@@ -61,8 +61,10 @@ class BensonForegroundServiceModule : Module() {
       // Flush a wake command that arrived while no JS listener existed (the process had just been
       // killed and restarted, or this module hadn't finished OnCreate yet) — otherwise it's lost
       // forever, since the native loop has no other way to redeliver it once the moment passes.
-      BensonForegroundService.pendingWakeCommand?.let { commandTail ->
-        BensonForegroundService.pendingWakeCommand = null
+      // DATA_RACE_FIX_1 (2026-09-20) — was a non-atomic read-then-write (a fourth, previously
+      // unaudited access point to the same field); getAndSet(null) makes this consistent with
+      // takePendingWakeCommand()'s own single-consumer guarantee.
+      BensonForegroundService.pendingWakeCommand.getAndSet(null)?.let { commandTail ->
         sendEvent("onWakeWordDetected", mapOf("commandTail" to commandTail))
       }
     }
@@ -213,6 +215,14 @@ class BensonForegroundServiceModule : Module() {
     // delivered the next time JS actually runs — the one consumption point either path shares.
     Function("takePendingWakeCommand") {
       BensonForegroundService.instance?.takePendingWakeCommand()
+    }
+    // HEADLESS_WIRING_TEST_ISOLATION_1 (2026-09-20) — separate consumption point for the
+    // debug-only wiring-test marker (pendingHeadlessTestCommand); the live/heartbeat paths above
+    // call ONLY takePendingWakeCommand() and never this. Harmless in a release build: nothing
+    // ever populates the field this reads (see handleTestSimulateHandoffMiss's own debuggable
+    // gate), so it always returns null there.
+    Function("takePendingHeadlessTestCommand") {
+      BensonForegroundService.instance?.takePendingHeadlessTestCommand()
     }
     // { model, cloud, running } — model=false ⇒ benson.tflite not bundled; cloud=false ⇒ no STT
     // credentials pushed yet (setNativeWakeCredentials). JS treats "model || cloud" as "some

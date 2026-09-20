@@ -15,7 +15,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   startListeningService, stopListeningService, addStopRequestedListener,
-  addListenRequestedListener, addWakeWordDetectedListener, addWakePokeListener, bringToForeground,
+  addListenRequestedListener, addWakePokeListener, bringToForeground,
   isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations,
   pauseHotword, resumeHotword, setSystemSoundsMuted, consumeRecoveryFlag, logAudioDiag,
   setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
@@ -35,6 +35,7 @@ import {
   setMicLevel,
 } from 'benson-overlay';
 import { isServiceEnabled as isAccessibilityEnabled, getConnectionState as getA11yConnectionState, openAccessibilitySettings, openRecents, whatsAppCallMicHoldActive, clearWhatsAppCallMicHold, consumeCallEndedReturnPending, getWhatsAppCallEndedSignalAt } from 'benson-accessibility';
+import { setLiveWakeHandler } from '../lib/headless/liveWakeHandler';
 
 // WA-CALL-STAYS-LIVE — true while a WhatsApp voice call BENSON just placed is still live. Source of
 // truth is native (the executor that verified the call screen). Wrapped so a missing/old native
@@ -63,6 +64,9 @@ import { sanityCheckContactParam } from '../lib/engines/actionSanity';
 import {
   getSelectedEngineId, setSelectedEngineId, getEngineConfig, saveEngineConfig, maskApiKey,
 } from '../lib/engines/settingsStore';
+import { resolveLlmConfig } from '../lib/engines/registry';
+import { testLlmConnection } from '../lib/engines/llm/openAiCompatibleBrain';
+import { tryAnswerGrounded, type RememberedLocation } from '../lib/engines/groundedAnswer';
 import { testGroqConnection, GROQ_STT_DEFAULT_BASE_URL, GROQ_STT_DEFAULT_MODEL } from '../lib/engines/stt/groqStt';
 import {
   requestMicPermission, checkMicPermission, startRecognition, stopRecognition,
@@ -326,6 +330,10 @@ export default function BensonApp() {
   // Round 2 — Groq key + STT nucleus selector, both surfaced in the one Settings modal.
   const [groqKey, setGroqKey]         = useState('');
   const [savedGroqMasked, setSavedGroqMasked] = useState('(none)');
+  // PHASE_A_PROTOCOL_AND_TIMEOUT (2026-09-19) — TEST LLM button result, sanitized display only
+  // (never the key/Authorization header — see runLlmConnectionTest below).
+  const [llmTestBusy, setLlmTestBusy] = useState(false);
+  const [llmTestResult, setLlmTestResult] = useState<string>('');
   // DEV_STT_DEEPGRAM_1 (2026-09-16) — development-only main/confirmation STT key while Groq's
   // quota is exhausted (see memory project_groq_quota_blocker). Same secure-store/masked-field
   // pattern as the Groq key above.
@@ -545,6 +553,12 @@ export default function BensonApp() {
   const voiceIdRef      = useRef('');
   const apiKeyRef       = useRef('');
   const tavilyKeyRef    = useRef('');
+  // BENSON_GROUNDED_CONVERSATION_1 (2026-09-20) — session-local ONLY: the last place+coordinates a
+  // weather answer resolved to, so "și mâine?" can reuse them (zero re-geocoding — FIX_ROUND_2)
+  // without asking again. In memory for the lifetime of this running app instance only — never
+  // persisted, never written to disk, cleared on every app restart. Not a location history: it
+  // holds exactly one value, overwritten by the next weather query's own result.
+  const lastWeatherLocationRef = useRef<RememberedLocation | null>(null);
   const openaiKeyRef    = useRef('');
   const geminiKeyRef    = useRef('');
   const ttsProviderRef  = useRef<TtsProvider>('device');
@@ -916,8 +930,28 @@ export default function BensonApp() {
   // not silenced, overlay service active) — never on which mission/executor/app just ran.
   const POST_MISSION_WINDOW_MS = 10000;
   function postMissionWindowEligible(): boolean {
-    return !isForegroundRef.current && !silencedRef.current && serviceActiveRef.current
-      && bensonStateRef.current === 'DONE';
+    // FIX_POST_MISSION_FOREGROUND_GAP (2026-09-20, device-proven) — device log
+    // scratchpad/final_voice_session.txt: app backgrounded then returned to foreground 8s later
+    // (CONV_MODE_BACKGROUND_STOP set convModeRef=false on the way out; returning to foreground
+    // never restores it). A wake-triggered command answered afterward left BOTH re-listen paths
+    // dead: this window used to require `!isForegroundRef.current`, and the OTHER foreground
+    // re-listen path (expectingReply block, ~line 1457) requires convModeRef.current === true.
+    // Neither fired — POST_TTS_NEXT_STATE eligible=false, then the very next "cum va fi vremea
+    // astăzi" (said without repeating "Benson") was rejected as WAKE_NO_MATCH.
+    // Excluding only the foreground+convMode-ON case (the proven 29.08 free-conversation path,
+    // which already re-arms itself) leaves that behavior untouched, while closing this gap.
+    // Revert: restore `!isForegroundRef.current &&` in place of the line below.
+    //
+    // MIC_RELEASE_AFTER_ERROR_FIX_1 (2026-09-20, device-proven) — this only ever checked
+    // bensonStateRef.current === 'DONE', never 'ERROR', while the ONLY call site of this function
+    // (endTtsBlock()) already gates on `bensonStateRef.current === 'DONE' || 'ERROR'` before even
+    // asking. Device log: an ERROR reply (a mission the brain couldn't resolve) left mic ownership
+    // stuck at TTS for the full generic 45s OwnerWatchdog fallback instead of re-arming promptly,
+    // because armPostMissionWindow() was never reached for ERROR outcomes — only DONE ones. ERROR
+    // is exactly as terminal as DONE for "can BENSON listen again now" purposes.
+    const foregroundConvModeHandledSeparately = isForegroundRef.current && convModeRef.current;
+    return !foregroundConvModeHandledSeparately && !silencedRef.current && serviceActiveRef.current
+      && (bensonStateRef.current === 'DONE' || bensonStateRef.current === 'ERROR');
   }
   // Reuses doStartListening() verbatim (same permission/hotword-pause/single-session-gate/mic-
   // ownership sequencing as every real wake-triggered command) — setting wakeTriggeredRef mirrors
@@ -1462,6 +1496,16 @@ export default function BensonApp() {
           wakeTriggeredRef.current = false;
           try { hideWakeRing(); } catch {}
           logAudioDiag('MODE_TRANSITION', 'from=COMMAND to=PASSIVE_WAKE reason=command_empty_or_timeout');
+          // STUCK_LISTENING_STATE_FIX_1 (2026-09-20, device-proven) — without this, a bare wake
+          // word that captured nothing left bensonStateRef stuck at 'LISTENING' forever (nothing
+          // else in this branch ever resets it). setBensonState('LISTENING', ...)'s own call site
+          // only fires when the CURRENT state is IDLE/BLOCKED/DONE/ERROR, so the very NEXT wake
+          // word's LISTENING transition (and the pushBubbleBand/UI_STATE_JS update it drives) was
+          // silently skipped — device log: first bare "Benson" showed the ASCULT bubble
+          // correctly, a second one three minutes later produced zero visible reaction despite
+          // native detection and mic capture both working, because bensonState never left
+          // LISTENING from the first attempt.
+          if (bensonStateRef.current === 'LISTENING') setBensonState('IDLE', 'wake_no_speech');
         }
         if (missedExplicit) {
           logAudioDiag('STT_MISS_FEEDBACK', `session=${sid} trigger=${sttTriggerRef.current} engine=${sttEngineRef.current}`);
@@ -1533,12 +1577,18 @@ export default function BensonApp() {
     // overlay. Pause is a no-op safety net (already paused). If the user said the command in the
     // same breath ("Benson, deschide Waze"), native hands back the tail — process it immediately
     // instead of starting a second, empty listening session; otherwise capture the command now.
-    const wakeWordSub = addWakeWordDetectedListener((commandTail) => {
+    // PERSISTENT_WAKE_CONSUMER_1 (2026-09-20, device-proven) — this used to be its own
+    // addWakeWordDetectedListener subscription, torn down whenever this screen component
+    // unmounts. Device log proved that's exactly what OxygenOS does to BENSON's Activity while
+    // backgrounded (killed, not just stopped), silently losing this subscription while the
+    // foreground service/JS engine survive — the native hasListenerRegistered check couldn't
+    // detect it, since it only tests a Kotlin closure, not a real JS subscriber. index.js now
+    // holds the ONE persistent native listener (survives as long as the JS engine does) and
+    // forwards here via setLiveWakeHandler whenever this screen is actually mounted; the ack
+    // (takePendingWakeCommand) now lives in that single persistent listener, not here.
+    setLiveWakeHandler((commandTail) => {
       nativeWakeEventAtRef.current = Date.now(); // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — for WAKE_TO_COMMAND_LATENCY
-      logAudioDiag('WAKE_EVENT_RECEIVED_IN_JS', `commandTail="${commandTail}" source=native`);
-      // ROUND_WAKE_NATIVE_TO_JS_ACK_1 — clears the native durable pending-wake flag (this IS the
-      // ack) so the heartbeat-poll fallback below never re-delivers the same wake a second time.
-      try { takePendingWakeCommand(); } catch {}
+      logAudioDiag('WAKE_EVENT_RECEIVED_IN_JS', `commandTail="${commandTail}" source=native_live`);
       handleWakeDetected(commandTail || '');
     });
 
@@ -1746,7 +1796,7 @@ export default function BensonApp() {
         return;
       }
       // A wake-word-triggered session (native bringActivityToFront() also fires this same
-      // 'active' transition) already owns its own doStartListening() call via wakeWordSub —
+      // 'active' transition) already owns its own doStartListening() call via setLiveWakeHandler —
       // skip here so the two don't race for the mic (confirmed live 2026-07-14: this was firing
       // its own doStartListening() ~500ms after the wake-word flow's, overlapping/killing both).
       if (loadingRef.current || speakingRef.current || listeningRef.current || wakeTriggeredRef.current) return;
@@ -1855,7 +1905,7 @@ export default function BensonApp() {
       speechStartSub.remove(); speechEndSub.remove(); sttWatchdogSub.remove(); ttsWatchdogSub.remove(); micResumeWatchdogSub.remove(); fragmentAssemblySub.remove(); confirmResultSub.remove();
       if (pendingConfirmationIdRef.current) { try { cancelConfirmationListening(pendingConfirmationIdRef.current); } catch {} }
       stopReqSub.remove(); listenReqSub.remove(); bubbleTapSub.remove();
-      wakeWordSub.remove(); wakePokeSub.remove(); appStateSub.remove();
+      setLiveWakeHandler(null); wakePokeSub.remove(); appStateSub.remove();
     };
   }, []);
 
@@ -2417,7 +2467,7 @@ export default function BensonApp() {
   // accumulated text — one sentence, not a lone fragment — reach the parser. Called from the same
   // two places that used to call handleIncomingText(transcript) directly: resultSub's final-result
   // branch and endSub's partial-fallback branch (both below). Deliberately NOT wired into
-  // wakeWordSub's same-breath commandTail handoff further down — see the report for why.
+  // the live wake handler's same-breath commandTail handoff further down — see the report for why.
   function scheduleAssembledDispatch(chunk: string) {
     const trimmedChunk = chunk.trim();
     if (!trimmedChunk) return;
@@ -2911,6 +2961,22 @@ export default function BensonApp() {
         try { setNativeWakeCredentials(grq, GROQ_STT_DEFAULT_BASE_URL, GROQ_STT_DEFAULT_MODEL); } catch {}
       } catch {}
     }
+    // RUNDA_CREIER_OPENAI_1 (2026-09-19, product-owner-directed) — resolveLlmBrain() (registry.ts)
+    // already checks for a dedicated llm/openai-compatible config FIRST, before ever falling back
+    // to reusing the Groq key — that fallback is exactly what timed out 60s on Groq for "intră în
+    // Netflix" (forensic evidence, scratchpad/abba_netflix_dump.txt). This was never reachable
+    // before: nothing ever called saveEngineConfig('llm', ...) — the OpenAI key above only fed TTS
+    // and the separate free-conversation modelProvider path. Same non-destructive convention as
+    // the Groq branch: only written when the field is non-empty.
+    if (ok) {
+      try {
+        await saveEngineConfig('llm', 'openai-compatible', {
+          apiKey: ok,
+          baseUrl: 'https://api.openai.com/v1',
+          model: 'gpt-4o-mini',
+        });
+      } catch {}
+    }
     // DEV_STT_DEEPGRAM_1 — a SEPARATE credential push (own SharedPreferences key) from the Groq
     // one above, so the native confirmation listener switching to Deepgram never touches the
     // passive wake loop's (NativeCloudWake.kt) Groq credentials.
@@ -2925,6 +2991,51 @@ export default function BensonApp() {
       } catch {}
     }
     addMessage('benson', `API keys updated, ${getAddress()}.`);
+  }
+
+  // PHASE_A_PROTOCOL_AND_TIMEOUT (2026-09-19) — "TEST LLM" button. Reads whatever
+  // resolveLlmConfig() would actually use for a real command (dedicated CREIER config, else Groq
+  // reuse — the SAME resolution routeThroughBrain() uses, not a second implementation), runs ONE
+  // testLlmConnection() call, and displays only sanitized fields. Never starts a mission, never
+  // touches Accessibility, never speaks, never runs automatically (only on tap), never logs or
+  // displays the key/Authorization header.
+  async function runLlmConnectionTest() {
+    if (llmTestBusy) return;
+    setLlmTestBusy(true);
+    setLlmTestResult('');
+    try {
+      const resolved = await resolveLlmConfig();
+      if (!resolved) {
+        setLlmTestResult('NETWORK_ERROR — no CREIER/Groq key configured');
+        return;
+      }
+      const hostMatch = /^[a-z]+:\/\/([^/]+)/i.exec(resolved.config.baseUrl || '');
+      const host = hostMatch ? hostMatch[1] : '(unknown host)';
+      const r = await testLlmConnection(resolved.config);
+      let label: string;
+      if (r.ok) {
+        label = 'SUCCESS';
+      } else if (r.timedOut) {
+        label = 'TIMEOUT';
+      } else if (r.status === 401 || r.status === 403 || r.errorCode === 'invalid_api_key') {
+        label = 'AUTH_ERROR';
+      } else if (r.errorCode === 'insufficient_quota' || r.errorCode === 'credit_balance_exhausted' || /credit|quota/i.test(r.errorCode ?? '')) {
+        label = 'CREDIT_ERROR';
+      } else if (r.status === 404 || /model/i.test(r.errorCode ?? '')) {
+        label = 'MODEL_ERROR';
+      } else {
+        label = 'NETWORK_ERROR';
+      }
+      const statusPart = r.ok ? `http=${r.status}` : `http=${r.status ?? '-'}${r.errorCode ? ` code=${r.errorCode}` : ''}`;
+      setLlmTestResult(
+        `${label} · provider=${resolved.source === 'creier' ? 'openai-compatible' : 'groq_reuse'} ` +
+        `host=${host} model=${resolved.config.model} ${statusPart} latency=${r.latencyMs}ms`,
+      );
+    } catch (e) {
+      setLlmTestResult(`NETWORK_ERROR — ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLlmTestBusy(false);
+    }
   }
 
   async function toggleTtsProvider(p: TtsProvider) {
@@ -4703,6 +4814,64 @@ export default function BensonApp() {
       return;
     }
 
+    // BENSON_GROUNDED_CONVERSATION_1 (2026-09-20) — weather/news/current-info queries are
+    // intercepted HERE, before the free-form brain classifier ever sees them. A system-prompt
+    // instruction alone is not a sufficient anti-hallucination guarantee (product-owner
+    // directive) — these are answered from a real provider result (Open-Meteo/Tavily) or, on
+    // failure, an honest "can't reach it" reply. Reuses the SAME terminal-state + TTS +
+    // afterPromptRearm(false) pattern as the brain 'speak' branch below, so the existing 10s
+    // post-mission window (armed only after TTS actually finishes) chains identically — no new
+    // conversation-state machinery.
+    // BUG_INVESTIGATION_1 (2026-09-20) — explicitly guarded: this call sits BEFORE the try block
+    // below (line ~4979's routeCommand try/catch), so an uncaught throw here would previously
+    // skip that block's catch entirely and surface as either total silence (the outer catch just
+    // console.logs) or, if the stack unwound differently than expected, an unrelated fallback
+    // message — neither of which would tell the truth about what actually failed. Logged before
+    // rethrow-as-null so GROUNDED_ANSWER_EXCEPTION is now unmissable in the log for this exact
+    // failure mode.
+    // FIX_ROUND_2 (2026-09-20, product-owner-directed) — turn-staleness guard: captures the
+    // session id THIS utterance's STT capture produced, right before the (possibly slow, up to
+    // GROUNDED_ANSWER_TOTAL_TIMEOUT_MS) provider work starts. Reuses the EXACT same
+    // jsSttSessionIdRef staleness primitive userMicGate() already uses elsewhere (a NEW STT
+    // session — i.e. the user has already said something newer — changes this value) rather than
+    // inventing a second turn-id concept. If a newer turn has started by the time this would
+    // commit, the stale result is silently dropped instead of ever being spoken over/after it.
+    const myTurnSessionId = jsSttSessionIdRef.current;
+    let grounded: Awaited<ReturnType<typeof tryAnswerGrounded>>;
+    try {
+      grounded = await tryAnswerGrounded({
+        text: msg,
+        lang: replyLangRef.current,
+        address: getAddress(),
+        tavilyKey: tavilyKeyRef.current,
+        rememberedLocation: lastWeatherLocationRef.current,
+      });
+    } catch (e) {
+      logAudioDiag('GROUNDED_ANSWER_EXCEPTION', `error="${String(e)}"`);
+      grounded = { handled: false };
+    }
+    if (grounded.handled && jsSttSessionIdRef.current !== myTurnSessionId) {
+      logAudioDiag('GROUNDED_ANSWER_STALE_DROPPED', `mySession=${myTurnSessionId} currentSession=${jsSttSessionIdRef.current}`);
+      return;
+    }
+    if (grounded.handled) {
+      if (grounded.rememberedLocation) lastWeatherLocationRef.current = grounded.rememberedLocation;
+      logAudioDiag('ROUTE', 'decision=conversation reason=grounded_answer');
+      setBensonState('DONE', 'grounded_answer');
+      addMessage('benson', grounded.reply);
+      await appendHistory(msg, grounded.reply);
+      setLoading(false); loadingRef.current = false;
+      speakText(grounded.reply, () => {
+        if (noteSpokenAndCheckRepeatLoop(grounded.reply)) {
+          if (wakeTriggeredRef.current) { wakeTriggeredRef.current = false; try { hideWakeRing(); } catch {} }
+          try { resumePassiveWake(); } catch {}
+          return;
+        }
+        afterPromptRearm(false);
+      });
+      return;
+    }
+
     // ── Build B — brain as the conversation + intent route ────────────────────────────────────
     // Everything the fast path did not handle. The brain classifies the utterance against the
     // CLOSED KnownAction list and returns speak / clarify / action — it NEVER executes. Only active
@@ -5225,6 +5394,16 @@ export default function BensonApp() {
                 accessibilityLabel="Save API keys" accessibilityRole="button">
                 <Text style={s.btnText}>SAVE KEYS</Text>
               </TouchableOpacity>
+
+              {/* PHASE_A_PROTOCOL_AND_TIMEOUT — manual only (never runs on Settings open), one
+                  request, 3s hard timeout (openAiCompatibleBrain.ts), sanitized result only. */}
+              <TouchableOpacity style={[s.btn, { marginTop: 10 }]} onPress={() => { tap(); runLlmConnectionTest(); }}
+                disabled={llmTestBusy} accessibilityLabel="Test LLM connection" accessibilityRole="button">
+                <Text style={s.btnText}>{llmTestBusy ? 'TESTING…' : 'TEST LLM'}</Text>
+              </TouchableOpacity>
+              {!!llmTestResult && (
+                <Text style={[s.label, { marginTop: 6 }]} selectable>{llmTestResult}</Text>
+              )}
 
               {/* ROUND_WAKE_NATIVE_GENERIC_1 — the ONE authoritative wake-name config. Applied
                   live (no separate save button, not a secret): every change is persisted and

@@ -55,7 +55,7 @@ export function hasUsableMediaSession(packageName?: string): boolean {
 // button with no contentDescription at all is not reachable this way — that gap is disclosed in
 // the report rather than papered over with a coordinate tap.
 const ACCESSIBILITY_LABELS: Record<MediaAction, string[]> = {
-  play: ['play', 'reda', 'redare', 'abspielen', 'wiedergabe', 'fortsetzen', 'resume'],
+  play: ['play', 'reda', 'redare', 'continua', 'continuă', 'continuare', 'abspielen', 'wiedergabe', 'fortsetzen', 'resume'],
   pause: ['pause', 'pauza', 'pauză', 'anhalten'],
   stop: ['stop', 'opreste', 'oprește', 'beenden'],
   next: ['next', 'urmatoarea', 'următoarea', 'weiter', 'nächster', 'nächstes'],
@@ -79,7 +79,9 @@ async function accessibilityControl(action: MediaAction): Promise<boolean> {
 // The one place every transport action goes through. Tries MediaSession first (Priority 1); a
 // provider-specific deep link (Priority 2) is not implemented this round (see file header); falls
 // back to Accessibility (Priority 3) only if no MediaSession action worked.
-async function act(action: MediaAction, packageName?: string): Promise<boolean> {
+// ROUND_GENERIC_VISIBLE_ACTION_1 — exported so a generic "apasă <label>" command (missionOrchestrator.ts)
+// can reuse the exact same MediaSession-first/accessibility-fallback dispatch without duplicating it.
+export async function mediaAct(action: MediaAction, packageName?: string): Promise<boolean> {
   let ok = false;
   try {
     ok = mediaControl(packageName ?? '', action);
@@ -94,19 +96,19 @@ async function act(action: MediaAction, packageName?: string): Promise<boolean> 
 }
 
 export async function mediaPlay(packageName?: string): Promise<boolean> {
-  return act('play', packageName);
+  return mediaAct('play', packageName);
 }
 export async function mediaResume(packageName?: string): Promise<boolean> {
-  return act('play', packageName);
+  return mediaAct('play', packageName);
 }
 export async function mediaPause(packageName?: string): Promise<boolean> {
-  return act('pause', packageName);
+  return mediaAct('pause', packageName);
 }
 export async function mediaNext(packageName?: string): Promise<boolean> {
-  return act('next', packageName);
+  return mediaAct('next', packageName);
 }
 export async function mediaPrevious(packageName?: string): Promise<boolean> {
-  return act('previous', packageName);
+  return mediaAct('previous', packageName);
 }
 
 // android.media.session.PlaybackState.ACTION_STOP — a documented, stable public constant
@@ -177,7 +179,7 @@ export async function stopMedia(packageName?: string): Promise<MediaStopOutcome>
   }
   const canStop = (actionsBitmask & ACTION_STOP_BIT) !== 0;
   const mechanism: 'stop' | 'pause' = canStop ? 'stop' : 'pause';
-  await act(mechanism, packageName);
+  await mediaAct(mechanism, packageName);
   // "Media is no longer playing" (the round's own verification bar) means NOT PLAYING/BUFFERING —
   // a PAUSE fallback landing on STATE_PAUSED is a legitimate, honest outcome, not a failure. A
   // narrower "must reach STOPPED/NONE" check (verifyStopped()) would falsely fail every provider
@@ -190,7 +192,7 @@ export async function stopMedia(packageName?: string): Promise<MediaStopOutcome>
   }
   // Fall back the other way once before giving up honestly.
   const otherMechanism: 'stop' | 'pause' = mechanism === 'stop' ? 'pause' : 'stop';
-  await act(otherMechanism, packageName);
+  await mediaAct(otherMechanism, packageName);
   const stoppedAfterFallback = await verifyNotPlaying(packageName, 2500);
   return {
     ok: stoppedAfterFallback,

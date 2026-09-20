@@ -255,10 +255,16 @@ function matchMediaPlay(text: string): { mediaType: 'music' | 'radio'; stationNa
 // object (open this app), but "vreau să-i spun..."/"nu vreau să uit..." are verb clauses that
 // happen to contain "vreau", not app-open requests; without this exclusion they were falsely
 // caught here before Problem Solver's own broader patterns ever got a chance to run.
+// RUNDA_RO_COMMAND_GRAMMAR_1 (2026-09-19, forensic-proven) — "intră pe <app>" was covered but
+// "intră ÎN <app>" was not, so "intră în Netflix"/"intră în Spotify" fell through this entire
+// deterministic cascade and only reached CHAT, forcing an unnecessary Brain/LLM round-trip for a
+// plain named-app open (device log: 60s Groq timeout for what should be a same-frame OPEN_APP).
+// [îi]n covers both the diacritic ("în") and no-diacritic ("in") spelling, same idiom as the
+// [ăa]/[țt]/[șs] classes already used throughout this file.
 const OPEN_APP_PATTERN = new RegExp(
   // "(?:-\\w+)?" covers the attached clitic form "să-i"/"să-l" ("vreau să-i spun...") in
   // addition to the plain "vreau să " form — both mean "I want to VERB", not "open [app]".
-  `\\b(?:deschide|porne[șs]te|intr[ăa]\\s+pe|vreau(?!\\s+s[ăa](?:-\\w+)?(?:\\s|$))|pune|bag[ăa]|öffne|starte|open|start|launch|get me)\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`,
+  `\\b(?:deschide|porne[șs]te|intr[ăa]\\s+(?:pe|[îi]n)|vreau(?!\\s+s[ăa](?:-\\w+)?(?:\\s|$))|pune|bag[ăa]|öffne|starte|open|start|launch|get me)\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`,
   'i',
 );
 

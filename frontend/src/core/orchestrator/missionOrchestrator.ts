@@ -68,7 +68,12 @@ import { searchYouTube, selectYouTubeCandidate, type YtCandidate } from '../../e
 // pieces above without touching them. See mediaGovernor.ts / mediaSearchExecutor.ts file headers.
 import {
   mediaPause, mediaResume, mediaNext, mediaPrevious, stopMedia, returnToBensonFromMedia, verifyPlaying,
+  mediaAct, type MediaAction,
 } from '../../executors/mediaGovernor';
+// ROUND_CLICK_VISIBLE_NAMED_ELEMENT_1 — executeCommand/getScreenSnapshot are the SAME proven
+// primitives youtubeExecutor.ts/mediaSearchExecutor.ts/mediaGovernor.ts already use; no new
+// native tree-walk is added here.
+import { executeCommand, getScreenSnapshot } from 'benson-accessibility';
 import {
   searchMedia, selectMediaCandidate, findProviderByMention, type MediaProvider, type MediaCandidate,
 } from '../../executors/mediaSearchExecutor';
@@ -309,13 +314,34 @@ async function runGovernedTask(
   // DIFFERENT signal than "the target package is actually foreground" and does not require
   // Accessibility to be bound). Only meaningful for an actual OPEN_APP launch attempt, not
   // placeCall/prepareMessage/etc.
+  //
+  // ANTI_LYING_FOREGROUND_VERIFY_FIX_1 (2026-09-19, device-proven) — this check used to be purely
+  // observational: it computed `observed`, logged FOREGROUND_MISMATCH, then fell straight through
+  // to the unconditional task.status='DONE'/"Am deschis WhatsApp." below regardless. Device log:
+  // launchPackage success=true -> app_switch_observed=true (whatsappTool's own, weaker signal) ->
+  // 1200ms later observed="com.android.launcher", not com.whatsapp -> BENSON still reported
+  // COMPLETED. Only a CONFIRMED mismatch (observed is a real, different package) overrides the
+  // result — `observed === null` (ACCESSIBILITY_UNAVAILABLE_OR_NO_SIGNAL) is absence of evidence,
+  // not evidence of failure, and is deliberately left as before (still reports the tool's own
+  // outcome) rather than guessed at either way.
+  let foregroundMismatchConfirmed = false;
   if (expectedPackage && (outcome.mission.state === 'Completed' || outcome.mission.state === 'WaitingUser')) {
     await nativeDelay(1200);
     const observed = getForegroundPackage();
     logAudioDiag('EXEC_TRACE_FOREGROUND_VERIFY', `expected=${JSON.stringify(expectedPackage)} observed=${JSON.stringify(observed)} confirmedByEvent=false method=post_hoc_check`);
     if (observed !== expectedPackage) {
-      logAudioDiag('EXEC_TRACE_FAILURE', `stage=FOREGROUND_VERIFICATION package=${JSON.stringify(expectedPackage)} reason=${observed === null ? 'ACCESSIBILITY_UNAVAILABLE_OR_NO_SIGNAL' : 'FOREGROUND_MISMATCH'} observed=${JSON.stringify(observed)}`);
+      const reason = observed === null ? 'ACCESSIBILITY_UNAVAILABLE_OR_NO_SIGNAL' : 'FOREGROUND_MISMATCH';
+      logAudioDiag('EXEC_TRACE_FAILURE', `stage=FOREGROUND_VERIFICATION package=${JSON.stringify(expectedPackage)} reason=${reason} observed=${JSON.stringify(observed)}`);
+      if (observed !== null) foregroundMismatchConfirmed = true;
     }
+  }
+  if (foregroundMismatchConfirmed) {
+    const honestMessage = `Am încercat să deschid ${governed.tool === 'whatsapp' ? 'WhatsApp' : governed.tool}, dar nu pot confirma că s-a deschis.`;
+    task.status = 'FAILED';
+    task.errorMessage = 'FOREGROUND_MISMATCH';
+    task.resultMessage = honestMessage;
+    emitEvent('TaskFailed', { reason: 'FOREGROUND_MISMATCH' }, plan.id, task.id);
+    return { message: honestMessage, waiting: false };
   }
 
   if (outcome.mission.state === 'WaitingConfirmation') {
@@ -376,7 +402,12 @@ async function executeTask(
   rawText: string,
   contacts: TrustedContact[],
   confirmed: boolean,
-): Promise<{ message: string; waiting: boolean; disambiguation?: DisambiguationCandidate[] }> {
+): Promise<{
+  message: string;
+  waiting: boolean;
+  disambiguation?: DisambiguationCandidate[];
+  disambiguationKind?: 'app' | 'visible_element';
+}> {
   if (task.type === 'STUB_NOT_IMPLEMENTED') {
     task.status = 'SKIPPED';
     task.resultMessage = 'Nu pot face asta încă.';
@@ -451,6 +482,51 @@ async function executeTask(
 
   const result = await governAction(request, { confirmed: true });
 
+  // CLICK_VISIBLE_ROUTING_FIX_1 (2026-09-19, forensic-proven) — "deschide profilul Rareș Ioan"
+  // (or "deschide ABBA Radio") is not an installed app; AppLauncherExecutor's search above
+  // already ran (it always does — installed-app search takes no screen snapshot, so a CONFIDENT
+  // match above returns 'success' and this block never runs, preserving the fast launch path
+  // exactly as before). Only when that search came back weak — 'needs_disambiguation' (multiple
+  // unrelated app candidates) or 'not_found' (nothing installed matches) — do we look at the
+  // CURRENT SCREEN for a visible element with this exact name, via the SAME generic matching
+  // "apasă X" already uses (clickVisibleLabel, shared, no verb-specific regex, no per-app logic).
+  // An arbitrary fuzzy app candidate must never outrank an exact visible screen label.
+  if (task.type === 'OPEN_APP' && (result.status === 'needs_disambiguation' || result.status === 'not_found')) {
+    const target = typeof task.input.appName === 'string' ? task.input.appName.trim() : '';
+    if (target.length >= 2) {
+      const outcome = await clickVisibleLabel(target);
+      if (outcome.status === 'success' || outcome.status === 'no_change' || outcome.status === 'click_failed') {
+        logAudioDiag('OPEN_TARGET_ROUTE', `target=${JSON.stringify(target)} appConfidence=${result.status} visibleLookup=true selected=CLICK_VISIBLE_ELEMENT`);
+        task.status = outcome.status === 'success' ? 'DONE' : 'FAILED';
+        const message =
+          outcome.status === 'success' ? `Am apăsat pe „${target}".`
+          : outcome.status === 'no_change' ? 'Am apăsat, dar ecranul pare neschimbat.'
+          : `N-am reușit să apăs pe „${target}".`;
+        task.resultMessage = message;
+        if (task.status === 'FAILED') task.errorMessage = message;
+        emitEvent(task.status === 'DONE' ? 'TaskCompleted' : 'TaskFailed', { result: outcome.status }, plan.id, task.id);
+        return { message, waiting: false };
+      }
+      if (outcome.status === 'ambiguous') {
+        logAudioDiag('OPEN_TARGET_ROUTE', `target=${JSON.stringify(target)} appConfidence=${result.status} visibleLookup=true selected=CLARIFY`);
+        task.status = 'WAITING';
+        const message = `Am găsit mai multe pe ecran: ${outcome.candidateLabels.join(', ')}. Pe care?`;
+        task.resultMessage = message;
+        emitEvent('TaskCompleted', { result: 'ambiguous' }, plan.id, task.id);
+        return {
+          message,
+          waiting: false,
+          disambiguation: outcome.candidateLabels.map((name) => ({ name })),
+          disambiguationKind: 'visible_element',
+        };
+      }
+      // outcome.status === 'not_found' — neither a confident installed app nor a visible element
+      // exists for this target. Fall through to the existing app disambiguation/not-found
+      // handling below, unchanged (step 6 of the routing order).
+      logAudioDiag('OPEN_TARGET_ROUTE', `target=${JSON.stringify(target)} appConfidence=${result.status} visibleLookup=true selected=${result.status === 'needs_disambiguation' ? 'CLARIFY' : 'NOT_FOUND'}`);
+    }
+  }
+
   // 'needs_disambiguation' — the executor found several candidates and is asking the user to pick.
   // This is NOT a failure: the task pauses, the candidate list is handed up so runPlanFrom can
   // arm pendingDisambiguation, and the user's next utterance is routed to it (not re-parsed).
@@ -505,7 +581,7 @@ async function runPlanFrom(
     plan.updatedAt = Date.now();
 
     if (outcome.disambiguation && outcome.disambiguation.length > 0) {
-      pendingDisambiguation = { candidates: outcome.disambiguation };
+      pendingDisambiguation = { candidates: outcome.disambiguation, kind: outcome.disambiguationKind ?? 'app' };
       pendingDisambiguationSetAt = Date.now();
       resetActiveMission();
       return { handled: true, message: outcome.message, plan, disambiguation: { candidates: outcome.disambiguation } };
@@ -594,7 +670,7 @@ const PENDING_CLARIFICATION_TIMEOUT_MS = 60000;
 // it and launched directly, instead of being re-parsed as a fresh command (which previously hit
 // the repeat-cooldown and returned an empty message = silence). Self-expires so an unrelated
 // later command can't be hijacked.
-let pendingDisambiguation: { candidates: DisambiguationCandidate[] } | null = null;
+let pendingDisambiguation: { candidates: DisambiguationCandidate[]; kind: 'app' | 'visible_element' } | null = null;
 let pendingDisambiguationSetAt = 0;
 const PENDING_DISAMBIGUATION_TIMEOUT_MS = 60000;
 
@@ -725,6 +801,169 @@ const MEDIA_RESUME_PATTERN = /^\s*(continu[ăa]|reia)\s*\.?\s*$/i;
 const MEDIA_NEXT_PATTERN = /^\s*urm[ăa]toarea\s*\.?\s*$/i;
 const MEDIA_PREVIOUS_PATTERN = /^\s*anterioar[ăa]\s*\.?\s*$/i;
 const MEDIA_RETURN_PATTERN = /\b(revino|inapoi|înapoi)\s+la\s+benson\b/i;
+// ROUND_GENERIC_VISIBLE_ACTION_1 (2026-09-18, device-log-proven gap) — "apasă play"/"apasă pe
+// continuare" never matched MEDIA_RESUME_PATTERN above (anchored to the bare word only) AND
+// tryHandleActiveMediaCommand() below requires activeMediaSession, which is only set on a fully
+// verified successful select — a select whose playback verification failed (e.g. Netflix
+// MEDIA_SELECT_FAIL reason=playback_not_verified) never sets it, so a later "apasă play" had no
+// route at all (ORCHESTRATOR_HANDOFF_COMPLETED handled=false, four separate device attempts).
+// This is deliberately NOT tied to activeMediaSession — it presses whatever generic transport
+// label is visible in the CURRENT foreground app right now, via the same MediaSession-first/
+// accessibility-fallback mechanism mediaGovernor.ts already provides. Generic vocabulary only
+// (play/pause/stop/next/previous synonyms already in mediaGovernor's ACCESSIBILITY_LABELS) — no
+// Netflix-specific text, no fixed coordinates. Deictic targets ("cel de sus") are a separate round.
+// RUNDA_RO_COMMAND_GRAMMAR_1 (2026-09-19, forensic-proven) — \b right after [ăa] is broken: JS's
+// \b only knows [A-Za-z0-9_] as "word", so 'ă' (non-word) followed by a space (also non-word) is
+// never a boundary — "apasă ..."/"...pauză" (the diacritic spelling Deepgram actually produces)
+// silently failed to match while the no-diacritic "apasa"/"pauza" spelling matched fine. Device
+// log proved it: commandTail="apasă pe aba radio" never reached this pattern at all. Fixed with
+// a negative lookahead for an ASCII word char instead of \b — same protection against a longer
+// word ("apasat", "pauzare") without requiring both sides of the boundary to be ASCII "word".
+const APASA_ACTION_PATTERN =
+  /\bapas[ăa](?![a-zA-Z0-9_])\s*(pe\s+)?(play|red[ăa]|redare|continu[ăa]re?|reia|pauz[ăa]|opre[șs]te|stop|urm[ăa]toarea|anterioar[ăa])(?![a-zA-Z0-9_])/i;
+function classifyApasaAction(word: string): MediaAction | null {
+  const w = word.toLowerCase();
+  if (/^(play|red[ăa]|redare|continu[ăa]re?|reia)$/.test(w)) return 'play';
+  if (/^pauz[ăa]$/.test(w)) return 'pause';
+  if (/^(opre[șs]te|stop)$/.test(w)) return 'stop';
+  if (/^urm[ăa]toarea$/.test(w)) return 'next';
+  if (/^anterioar[ăa]$/.test(w)) return 'previous';
+  return null;
+}
+// Independent of activeMediaSession — always available while some non-BENSON app is foreground.
+// Returns null (not this utterance) if no visible-action phrase is present, same convention as
+// tryHandleActiveMediaCommand.
+async function tryHandleGenericVisibleAction(rawText: string): Promise<MissionRunResult | null> {
+  const t = cleanDiscourse(normalizeTranscript(rawText));
+  const m = APASA_ACTION_PATTERN.exec(t);
+  if (!m) return null;
+  const action = classifyApasaAction(m[2]);
+  if (!action) return null;
+  const pkg = getForegroundPackage() ?? undefined;
+  logAudioDiag('GENERIC_VISIBLE_ACTION', `action=${action} package=${JSON.stringify(pkg ?? '')} rawText=${JSON.stringify(rawText)}`);
+  const ok = await mediaAct(action, pkg);
+  if (!ok) return { handled: true, message: 'N-am găsit butonul acela vizibil.' };
+  if (action === 'play') {
+    const playing = await verifyPlaying(pkg, 3000);
+    return { handled: true, message: playing ? 'Redau.' : 'Am apăsat, dar nu pot confirma că redă.' };
+  }
+  return { handled: true, message: 'Gata.' };
+}
+
+// ROUND_CLICK_VISIBLE_NAMED_ELEMENT_1 (2026-09-18, device-confirmed) — "apasă pe Rares Ioan" was
+// NOT an STT mistranscription of "play": a live screenshot confirmed "Rares Ioan" is a real
+// Netflix profile name that was genuinely on screen — a correct, literal instruction with no
+// route to reach it. This is the missing generic primitive: "apasă pe <whatever's visible>",
+// independent of any known vocabulary (play/pause/profile name/contact name/anything). Checked
+// AFTER tryHandleGenericVisibleAction so known transport words keep their specific phrasing
+// (Redau./Am pus pauză.); this is the free-text fallback for everything else.
+//
+// Read (getScreenSnapshot) and click (executeCommand) both reuse the EXACT primitives already
+// proven in youtubeExecutor.ts/mediaSearchExecutor.ts/mediaGovernor.ts/ACC-1 — no new tree-walk,
+// no coordinates, no app-specific text. "Prefer exact normalized match" per spec: an exact
+// text/contentDescription match is looked for first; only if none exists does a substring match
+// count as "found" at all (a total miss returns null — not this utterance — rather than a wrong
+// click, so an unrelated command still falls through to normal dispatch untouched).
+function normalizeForMatch(s: string): string {
+  return (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+}
+// RUNDA_RO_COMMAND_GRAMMAR_1 — same \b-after-diacritic fix as APASA_ACTION_PATTERN above.
+const APASA_NAMED_PATTERN = /\bapas[ăa](?![a-zA-Z0-9_])\s*(pe\s+)?(.+?)\s*\.?\s*$/i;
+interface SnapshotNode { text?: string; contentDescription?: string; viewId?: string | null; className?: string; clickable?: boolean; bounds?: unknown }
+async function readSnapshotNodes(): Promise<SnapshotNode[]> {
+  try {
+    const json = await getScreenSnapshot();
+    const snap = JSON.parse(json) as { nodes?: SnapshotNode[] };
+    return snap.nodes ?? [];
+  } catch {
+    return [];
+  }
+}
+// CLICK_VISIBLE_ROUTING_FIX_1 (2026-09-19) — the generic find/click/verify core, extracted out of
+// tryHandleClickVisibleNamedElement (which only ever reached this via the "apasă X" verb) so the
+// OPEN_APP arbitration above (a weak/absent installed-app match for "deschide X") can reuse the
+// EXACT same matching/click/verify rules — no second implementation, no verb-specific or
+// app-specific logic. Matching priority, in order: exact normalized text -> exact normalized
+// contentDescription -> conservative substring/token match. Unlike the pre-fix version (which
+// took the first hit and never checked for a second one), each tier now collects every match and
+// reports 'ambiguous' when more than one node ties at the SAME tier — an arbitrary fuzzy pick is
+// never silently made.
+type VisibleClickOutcome =
+  | { status: 'success'; label: string }
+  | { status: 'no_change'; label: string }
+  | { status: 'click_failed'; label: string }
+  | { status: 'ambiguous'; label: string; candidateLabels: string[] }
+  | { status: 'not_found'; label: string };
+
+function findVisibleCandidates(nodes: SnapshotNode[], normLabel: string): { matches: SnapshotNode[]; source: string } | null {
+  const exactText = nodes.filter((n) => normalizeForMatch(n.text || '') === normLabel);
+  if (exactText.length > 0) return { matches: exactText, source: 'text' };
+  const exactDesc = nodes.filter((n) => normalizeForMatch(n.contentDescription || '') === normLabel);
+  if (exactDesc.length > 0) return { matches: exactDesc, source: 'contentDescription' };
+  const substring = nodes.filter(
+    (n) => normalizeForMatch(n.text || '').includes(normLabel) || normalizeForMatch(n.contentDescription || '').includes(normLabel),
+  );
+  if (substring.length > 0) return { matches: substring, source: 'clickableAncestor' };
+  return null;
+}
+
+async function clickVisibleLabel(label: string): Promise<VisibleClickOutcome> {
+  const normLabel = normalizeForMatch(label);
+  const before = await readSnapshotNodes();
+  const found = findVisibleCandidates(before, normLabel);
+  if (!found) {
+    logAudioDiag('VISIBLE_MATCH', `source=none confidence=0 label=${JSON.stringify(label)}`);
+    return { status: 'not_found', label };
+  }
+  if (found.matches.length > 1) {
+    const candidateLabels = [...new Set(found.matches.map((n) => n.text || n.contentDescription || '').filter(Boolean))].slice(0, 5);
+    logAudioDiag('VISIBLE_MATCH', `source=${found.source} confidence=ambiguous count=${found.matches.length} label=${JSON.stringify(label)}`);
+    if (candidateLabels.length > 1) return { status: 'ambiguous', label, candidateLabels };
+    // every match shared the same visible label (e.g. two nodes for one list row) — not a real
+    // choice for the user, proceed with the first as a single match.
+  }
+  const node = found.matches[0];
+  logAudioDiag('VISIBLE_MATCH',
+    `source=${found.source} confidence=single label=${JSON.stringify(label)} text=${JSON.stringify(node.text ?? '')} ` +
+    `contentDescription=${JSON.stringify(node.contentDescription ?? '')} clickable=${node.clickable ?? false} bounds=${JSON.stringify(node.bounds ?? null)}`);
+
+  const beforeSignature = before.slice(0, 8).map((n) => normalizeForMatch(n.text || n.contentDescription || '')).join('|');
+  let clickOk = false;
+  try {
+    const r = (await executeCommand({
+      steps: [{ action: 'click', match: { textContainsAny: [label], clickableAncestor: true }, timeoutMs: 3000 }],
+    } as any)) as { success?: boolean };
+    clickOk = r?.success === true;
+  } catch {
+    clickOk = false;
+  }
+  logAudioDiag('VISIBLE_ACTION', `performed=${clickOk} label=${JSON.stringify(label)}`);
+  if (!clickOk) return { status: 'click_failed', label };
+
+  await nativeDelay(600);
+  const after = await readSnapshotNodes();
+  const afterSignature = after.slice(0, 8).map((n) => normalizeForMatch(n.text || n.contentDescription || '')).join('|');
+  const changed = afterSignature !== beforeSignature;
+  logAudioDiag('VISIBLE_VERIFY', `success=${changed} label=${JSON.stringify(label)} observation=${changed ? 'ui_changed' : 'unchanged'}`);
+  return changed ? { status: 'success', label } : { status: 'no_change', label };
+}
+
+async function tryHandleClickVisibleNamedElement(rawText: string): Promise<MissionRunResult | null> {
+  const t = cleanDiscourse(normalizeTranscript(rawText));
+  const m = APASA_NAMED_PATTERN.exec(t);
+  if (!m) return null;
+  const label = (m[2] || '').trim();
+  if (label.length < 2) return null;
+
+  const outcome = await clickVisibleLabel(label);
+  if (outcome.status === 'not_found') return null; // not this utterance — fall through, unchanged
+  if (outcome.status === 'ambiguous') {
+    return { handled: true, message: `Am găsit mai multe pe ecran: ${outcome.candidateLabels.join(', ')}. Pe care?` };
+  }
+  if (outcome.status === 'click_failed') return { handled: true, message: `N-am reușit să apăs pe „${label}".` };
+  return { handled: true, message: outcome.status === 'success' ? `Am apăsat pe „${label}".` : 'Am apăsat, dar ecranul pare neschimbat.' };
+}
+
 // A bare "oprește" (no object) is the generic media-stop case; "oprește apelul"/"oprește
 // microfonul" etc. are handled by other, more specific patterns earlier in runMission() — this
 // one only fires when activeMediaSession is actually set, so it never shadows those.
@@ -877,6 +1116,21 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
   const mediaCommandResult = await tryHandleActiveMediaCommand(rawText);
   if (mediaCommandResult) return mediaCommandResult;
 
+  // ROUND_GENERIC_VISIBLE_ACTION_1 — deliberately checked AFTER tryHandleActiveMediaCommand (an
+  // active session's own anchored patterns take priority when both could match) but does NOT
+  // require activeMediaSession — "apasă play" must work even when the prior select's playback
+  // verification failed and no session was ever registered. See tryHandleGenericVisibleAction's
+  // own comment for the device evidence.
+  const visibleActionResult = await tryHandleGenericVisibleAction(rawText);
+  if (visibleActionResult) return visibleActionResult;
+
+  // ROUND_CLICK_VISIBLE_NAMED_ELEMENT_1 — free-text fallback: "apasă pe <anything currently
+  // visible>", checked after the known-vocabulary transport-control handler above so "play"/
+  // "pauză"/etc. keep their specific phrasing. Only claims the utterance (returns non-null) when
+  // something on screen actually matches the label — see its own comment for the device evidence.
+  const namedClickResult = await tryHandleClickVisibleNamedElement(rawText);
+  if (namedClickResult) return namedClickResult;
+
   // Round D — a pending "which one?" proposal takes priority: route this utterance as the answer.
   if (pendingDisambiguation && Date.now() - pendingDisambiguationSetAt < PENDING_DISAMBIGUATION_TIMEOUT_MS) {
     const pd = pendingDisambiguation;
@@ -893,6 +1147,19 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
       const pick = isPlainYes ? pd.candidates[0] : matchDisambiguationPick(normalizedText, pd.candidates);
       if (pick) {
         devLog('disambiguation resolved ->', pick.name);
+        // CLICK_VISIBLE_ROUTING_FIX_1 — a visible-element disambiguation resolves by clicking the
+        // picked label on screen, not by trying to open an "app" named after it (that was always
+        // wrong for this kind, and never exercised before this round — the pending state used to
+        // only ever come from an app-open disambiguation).
+        if (pd.kind === 'visible_element') {
+          const outcome = await clickVisibleLabel(pick.name);
+          const message =
+            outcome.status === 'success' ? `Am apăsat pe „${pick.name}".`
+            : outcome.status === 'no_change' ? 'Am apăsat, dar ecranul pare neschimbat.'
+            : outcome.status === 'click_failed' ? `N-am reușit să apăs pe „${pick.name}".`
+            : `Nu mai găsesc „${pick.name}" pe ecran.`;
+          return { handled: true, message };
+        }
         const request = createActionRequest({
           source: options.source ?? 'voice',
           rawText,

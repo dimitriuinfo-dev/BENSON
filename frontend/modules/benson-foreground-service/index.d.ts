@@ -14,6 +14,7 @@ export declare function addWakeWordDetectedListener(
 ): { remove: () => void };
 /** ROUND_WAKE_NATIVE_TO_JS_ACK_1 — atomic take of a durable pending wake command; null = none pending. */
 export declare function takePendingWakeCommand(): string | null;
+export declare function takePendingHeadlessTestCommand(): string | null;
 /** ROUND_WAKE_STATE_BUG_1 — native heartbeat event (~3 s), executes while backgrounded; re-arm hook. */
 export declare function addWakePokeListener(
   listener: () => void

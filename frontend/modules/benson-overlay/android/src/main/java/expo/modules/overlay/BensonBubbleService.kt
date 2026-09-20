@@ -481,7 +481,17 @@ class BensonBubbleService : Service() {
     // (self_app_foreground/!visible), so applyForegroundState(false) can redraw it later. Only
     // non-terminal pushes: a finished/terminal result should not be resurrectable by an unrelated
     // later foreground toggle.
-    if (visible && !terminal) {
+    // RUNDA_BUBBLE_TEXT_TRANSPARENCY_1 (2026-09-19, device-test-failed review) — a terminal push
+    // used to leave the PRIOR non-terminal snapshot sitting in lastActiveStatus untouched (a
+    // terminal result never wrote to it). dismissNow("self_app_foreground") explicitly spares
+    // lastActiveStatus (by design, for the genuinely-active-mission case below) and also cancels
+    // the pending 10s terminal dismiss timer — so opening BENSON during that 10s window, then
+    // returning Home, resurrected the stale pre-terminal state with a fresh 65s safety net.
+    // Invalidate the cache the INSTANT a turn goes terminal, not just on the two paths that
+    // happened to clear it before (a natural terminal dismiss, or a later stale-turn push).
+    if (terminal) {
+      lastActiveStatus = null
+    } else if (visible) {
       lastActiveStatus = PendingStatus(state, transcript, terminal, turnId, dismissDelayMs)
     }
 
@@ -552,11 +562,15 @@ class BensonBubbleService : Service() {
         val padH = (16 * density).toInt()
         val padV = (12 * density).toInt()
         setPadding(padH, padV, padH, padV)
+        // RUNDA_BUBBLE_TEXT_TRANSPARENCY_1 (2026-09-19, product-owner-directed, device-test-failed
+        // review) — was ~96% opaque with a 1.5dp gold stroke, a SEPARATE GradientDrawable from the
+        // small round bubble's (addBubble()'s), never touched by that round's border removal.
+        // Now ~20% opacity, no stroke — text legibility (E3) still comes from setShadowLayer on
+        // stateTv/transcriptTv below, unchanged.
         background = GradientDrawable().apply {
           shape = GradientDrawable.RECTANGLE
           cornerRadius = 20 * density
-          setColor(Color.parseColor("#F51E2B38")) // ~96% opac
-          setStroke((1.5f * density).toInt(), Color.parseColor("#99D4AF37"))
+          setColor(Color.parseColor("#8C1E2B38")) // ~55% opac
         }
         addView(stateTv)
         addView(transcriptTv)
