@@ -7,7 +7,7 @@ import { transcribeLocally } from './localWhisperEngine';
 import { transcribeWithOpenAI } from './openaiSTT';
 import { transcribeWithGemini } from './geminiSTT';
 import { transcribeWithGroq } from '../engines/stt/groqStt';
-import { transcribeWithDeepgram } from '../engines/stt/deepgramStt';
+import { transcribeWithDeepgramDetailed } from '../engines/stt/deepgramStt';
 import { getEngineConfig } from '../engines/settingsStore';
 
 // Set by app/index.tsx whenever the user's OpenAI/Gemini keys change (same ref-sync pattern
@@ -114,6 +114,15 @@ const EXPERIMENTAL_STT_FALLBACK_CHAIN = false;
 // local-Whisper fallback on a Deepgram failure — STT_PROVIDER_UNAVAILABLE only, per product-owner
 // instruction, matching DECISION_GROQ_PRIMARY_1's no-silent-fallback discipline above.
 const USE_DEEPGRAM_DEV_STT = true;
+
+// Product-owner request (2026-09-18, "Hannah" mis-transcribed live, spoken command silently
+// failed) — "dacă rezultatul nu e bun, trebuie să găsim ceva mai bun": below this confidence,
+// Deepgram's own non-empty transcript is treated as unreliable enough to also try OpenAI (already
+// paid for, previously configured but never actually used for STT — EXPERIMENTAL_STT_FALLBACK_CHAIN
+// above kept it off entirely) before accepting it. Deepgram itself doesn't reject low-confidence
+// text (unlike Groq's own confidence gate, see groqStt.ts) — it returns whatever it has.
+const DEEPGRAM_LOW_CONFIDENCE_THRESHOLD = 0.5;
+
 async function transcribeAudio(filePath: string, lang: string, captureEndAt?: number): Promise<string> {
   if (USE_DEEPGRAM_DEV_STT) {
     const deepgramConfig = await getEngineConfig('stt', 'deepgram').catch(() => null);
@@ -121,12 +130,32 @@ async function transcribeAudio(filePath: string, lang: string, captureEndAt?: nu
       logAudioDiag('STT_PROVIDER_UNAVAILABLE', 'primary=deepgram reason="not configured"');
       return '';
     }
+    let deepgram: { text: string; confidence: number | null } | null = null;
     try {
-      return await transcribeWithDeepgram(filePath, lang, deepgramConfig, captureEndAt);
+      deepgram = await transcribeWithDeepgramDetailed(filePath, lang, deepgramConfig, captureEndAt);
     } catch (e) {
       logAudioDiag('STT_PROVIDER_UNAVAILABLE', `primary=deepgram reason="${String(e)}"`);
-      return '';
     }
+    const lowConfidence = !!deepgram && deepgram.confidence !== null && deepgram.confidence < DEEPGRAM_LOW_CONFIDENCE_THRESHOLD;
+    if (deepgram?.text && !lowConfidence) {
+      return deepgram.text;
+    }
+    // Second attempt only — never a silent no-op change for anyone without an OpenAI STT key
+    // already saved, and never touches Groq/Gemini/local (EXPERIMENTAL_STT_FALLBACK_CHAIN's own
+    // no-silent-fallback discipline is unaffected, this is an explicit, logged, opt-in-by-key extra
+    // try for Deepgram specifically).
+    if (openaiSttKey) {
+      logAudioDiag('STT_SECOND_ATTEMPT', `reason=${deepgram?.text ? 'low_confidence' : 'empty_or_failed'} provider=openai`);
+      try {
+        const openaiText = await transcribeWithOpenAI(filePath, openaiSttKey, lang);
+        if (openaiText) return openaiText;
+      } catch (e) {
+        logAudioDiag('STT_PROVIDER_UNAVAILABLE', `secondary=openai reason="${String(e)}"`);
+      }
+    }
+    // OpenAI unavailable, unconfigured, or also failed — a low-confidence-but-non-empty Deepgram
+    // guess is still better odds for the contact resolver's fuzzy match than returning nothing.
+    return deepgram?.text ?? '';
   }
   const now = Date.now();
   if (now >= groqRateLimitedUntil) {

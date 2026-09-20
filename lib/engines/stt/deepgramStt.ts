@@ -33,12 +33,19 @@ interface DeepgramAlternative {
   confidence?: number;
 }
 
-export async function transcribeWithDeepgram(
+export type DeepgramTranscriptResult = { text: string; confidence: number | null };
+
+// Product-owner request (2026-09-18, "Hannah" mis-transcribed live) — exposes confidence so a
+// caller can decide whether to retry with a different provider on a LOW-confidence but non-empty
+// result (a wrong-but-confident-looking guess), not just on an empty/failed one. transcribeWithDeepgram
+// below stays a thin string-only wrapper for its existing callers (createDeepgramSttEngine's
+// SttEngine interface expects Promise<string>).
+export async function transcribeWithDeepgramDetailed(
   wavFilePath: string,
   lang: string,
   config: EngineConfig,
   captureEndAt?: number,
-): Promise<string> {
+): Promise<DeepgramTranscriptResult> {
   const langCode = lang.split('-')[0].toLowerCase();
   const uri = toFileUri(wavFilePath);
   const baseUrl = resolvedBaseUrl(config);
@@ -88,7 +95,16 @@ export async function transcribeWithDeepgram(
 
   const accepted = rawText.length > 0;
   logAudioDiag('MISSION_INPUT_ALLOWED', `value=${accepted}`);
-  return rawText;
+  return { text: rawText, confidence };
+}
+
+export async function transcribeWithDeepgram(
+  wavFilePath: string,
+  lang: string,
+  config: EngineConfig,
+  captureEndAt?: number,
+): Promise<string> {
+  return (await transcribeWithDeepgramDetailed(wavFilePath, lang, config, captureEndAt)).text;
 }
 
 export function createDeepgramSttEngine(config: EngineConfig): SttEngine {
