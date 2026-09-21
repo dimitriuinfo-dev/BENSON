@@ -576,6 +576,11 @@ class BensonForegroundService : Service() {
       return START_STICKY
     }
 
+    if (intent?.action == ACTION_TEST_SIMULATE_NO_JS_LISTENER) {
+      handleTestSimulateNoJsListener(intent)
+      return START_STICKY
+    }
+
     // WAKE HEALTH DIAGNOSIS — JS pushes the honest notification text (the ongoing notification
     // must not keep claiming "listening" when the recognizer is actually stopped / mic-held).
     // Only re-issues the SAME notification id via NotificationManager — no startForeground(), so
@@ -1330,6 +1335,24 @@ class BensonForegroundService : Service() {
     // refuses while micOwner is still COMMAND_STT, set above by the caller before this fires).
     setMicOwner("NONE", "no_js_listener_recover")
     armNativeWake("no_js_listener_recover")
+    // NO_JS_LISTENER_HEADLESS_FIX_1 (2026-09-21, device-proven) — armWakeHandoffWatchdog() (below)
+    // was the ONLY thing that ever started the Headless recovery task, and its own condition
+    // (`micOwner == "COMMAND_STT"`) can never be true by the time it fires here: the two lines
+    // just above already moved micOwner to NONE then WAKE, synchronously, before that 5s timer
+    // could ever check it. Device-confirmed: a process whose native service/wake loop resumed
+    // after a restart (WAKE_POKE ticking, speech correctly detected and transcribed) but whose JS
+    // engine never initialized at all (zero mqt_v_js log lines for the process's entire lifetime)
+    // queued every single heard command here, forever, with nothing ever consuming them — the
+    // durable pendingWakeCommand above just sat until a human manually reopened the app. Starting
+    // the SAME Headless service used by the watchdog, immediately and unconditionally on this
+    // branch, closes that gap without touching the watchdog itself (still useful for the OTHER
+    // case it targets: hasListenerRegistered=true but the live callback never actually fires).
+    try {
+      startService(Intent(this, BensonWakeHeadlessTaskService::class.java))
+      AudioDiag.log(this, "WAKE_HEADLESS_START", "reason=no_js_listener")
+    } catch (e: Exception) {
+      AudioDiag.logError("WAKE_HEADLESS_START_FAILED", "error=\"${e.javaClass.simpleName}: ${e.message}\" reason=no_js_listener")
+    }
   }
 
   // ROUND_WAKE_NATIVE_TO_JS_ACK_1 — much shorter than OwnerWatchdog's general 45s (that one covers
@@ -1394,6 +1417,31 @@ class BensonForegroundService : Service() {
     pendingHeadlessTestCommand.set(commandTail)
     pendingWakeCommandEpoch += 1
     armWakeHandoffWatchdog()
+  }
+
+  // NO_JS_LISTENER_HEADLESS_FIX_1 (2026-09-21) — reproduces the OTHER miss path in isolation:
+  // hasListenerRegistered=false at the exact instant of detection (as opposed to
+  // handleTestSimulateHandoffMiss above, which simulates hasListenerRegistered=true with the live
+  // callback never firing). Mirrors the fixed branch's own two lines directly instead of routing
+  // through onHotwordDetected(), so this test never touches the wake-word engine, screen-wake, or
+  // bubble overlay — delivery only. Default command deliberately matches nothing runMission()
+  // recognizes (handled=false), so a full run of this test opens nothing and sends nothing.
+  private fun handleTestSimulateNoJsListener(intent: Intent) {
+    val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    if (!debuggable) {
+      AudioDiag.logError("HEADLESS_WIRING_TEST_REFUSED", "reason=not_debuggable")
+      return
+    }
+    val commandTail = intent.getStringExtra("commandTail") ?: "test benson recovery ping no match"
+    AudioDiag.log(this, "NO_JS_LISTENER_TEST_SIMULATE", "commandTail=\"$commandTail\"")
+    pendingHeadlessTestCommand.set(commandTail)
+    AudioDiag.log(this, "WAKE_COMMAND_QUEUED", "commandTail=\"$commandTail\" reason=no_js_listener_test")
+    try {
+      startService(Intent(this, BensonWakeHeadlessTaskService::class.java))
+      AudioDiag.log(this, "WAKE_HEADLESS_START", "reason=no_js_listener_test")
+    } catch (e: Exception) {
+      AudioDiag.logError("WAKE_HEADLESS_START_FAILED", "error=\"${e.javaClass.simpleName}: ${e.message}\" reason=no_js_listener_test")
+    }
   }
 
   // Atomic read+clear — the single consumption point for BOTH the live onWakeWordDetected event
@@ -1572,6 +1620,11 @@ class BensonForegroundService : Service() {
     // STT, or the mic pipeline at all. Refused and logged on a non-debuggable build — see
     // handleTestSimulateHandoffMiss(). Never invoked by any production code path.
     const val ACTION_TEST_SIMULATE_HANDOFF_MISS = "expo.modules.foregroundservice.TEST_SIMULATE_HANDOFF_MISS"
+    // NO_JS_LISTENER_HEADLESS_FIX_1 (2026-09-21) — reproduces "native wake loop active, JS engine
+    // never initialized" (device-confirmed 2026-09-21) automatically, in isolation, without a real
+    // OS-triggered process restart. Refused and logged on a non-debuggable build — see
+    // handleTestSimulateNoJsListener(). Never invoked by any production code path.
+    const val ACTION_TEST_SIMULATE_NO_JS_LISTENER = "expo.modules.foregroundservice.TEST_SIMULATE_NO_JS_LISTENER"
     const val EXTRA_TITLE = "title"
     const val EXTRA_BODY = "body"
     const val WATCHDOG_INTERVAL_MS = 60_000L
