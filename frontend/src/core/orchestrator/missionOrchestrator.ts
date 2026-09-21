@@ -86,6 +86,11 @@ function devLog(...args: unknown[]): void {
 export interface RunMissionOptions {
   source?: ActionSource;
   contacts?: TrustedContact[];
+  // STALE_RESULT_DISPLAY_FIX_1 — the caller's per-dispatch turn id, stamped onto the plan and onto
+  // pendingDisambiguation when armed, so a delayed resolution can be checked against the CURRENT
+  // turn before it updates the conversation. Optional: a caller that never resumes a pending
+  // disambiguation across turns has no reason to pass one.
+  turnId?: string;
   // E1-5 (2026-09-07, product-owner-directed) — fired the moment the intent is resolved to an
   // executable task, BEFORE the Android side effect runs. The caller speaks a short ACK ("Deschid.",
   // "Pornesc traseul.") in parallel with execution instead of a long confirmation after it. NOT
@@ -102,7 +107,18 @@ const E1_ACK_IMMEDIATE = true;
 function e1AckText(task: MissionTask): string | null {
   switch (task.type) {
     case 'NAVIGATE': return 'Pornesc traseul.';
-    case 'OPEN_APP': return 'Deschid.';
+    // TTS_COLLISION_FIX_1 (2026-09-21, device-proven) — OPEN_APP never acks immediately anymore.
+    // Device log: task.requiresConfirmation is decided at plan time, before app-name resolution
+    // runs — for "deschide calculatorul" it was false, so this ack ("Deschid.") fired in parallel
+    // with AppLauncherExecutor separately discovering a fuzzy single-match and asking "Am găsit
+    // Rechner. O deschid?". Two speakOnDevice() calls landed within the same tick; each calls
+    // stopSpeaking() immediately before its own speakNow() — back-to-back stop+speak+stop+speak
+    // left Android's TextToSpeech engine in a state where NEITHER utterance's onDone/onStopped/
+    // onError ever fired (both watchdogs timed out at reason=error: wordCount=1 and wordCount=5,
+    // same turn, ~40ms apart). OPEN_APP is exactly the task type where confirmation need can only
+    // be known once the executor runs (fuzzy app matching) — every other acked type below commits
+    // to running the instant this fires, no risk of a second utterance racing it.
+    case 'OPEN_APP': return null;
     case 'PLAY_MEDIA': return 'Pornesc.';
     case 'PREPARE_MESSAGE': return task.input.mode === 'voice_call' ? 'O sun.' : 'Trimit mesajul.';
     case 'PREPARE_CALL': return 'Sun acum.';
@@ -119,6 +135,12 @@ export interface MissionRunResult {
   // the candidate list internally (pendingDisambiguation) and routes the NEXT utterance to it;
   // the caller uses this only to render the reply as a CONFIRMING state (no auto-clear).
   disambiguation?: { candidates: DisambiguationCandidate[] };
+  // STALE_RESULT_DISPLAY_FIX_1 — present only when this result came through a resumed
+  // pendingDisambiguation. The caller compares this against its OWN current turn id; a mismatch
+  // means a newer, unrelated turn started before this delayed resolution came back, and the
+  // result's text/voice/state must not overwrite what the user is looking at now. Does not affect
+  // whether the underlying action ran — that already happened before this field is read.
+  armedTurnId?: string;
 }
 
 type DisambiguationCandidate = { name: string; packageName?: string };
@@ -581,7 +603,7 @@ async function runPlanFrom(
     plan.updatedAt = Date.now();
 
     if (outcome.disambiguation && outcome.disambiguation.length > 0) {
-      pendingDisambiguation = { candidates: outcome.disambiguation, kind: outcome.disambiguationKind ?? 'app' };
+      pendingDisambiguation = { candidates: outcome.disambiguation, kind: outcome.disambiguationKind ?? 'app', armedTurnId: plan.turnId };
       pendingDisambiguationSetAt = Date.now();
       resetActiveMission();
       return { handled: true, message: outcome.message, plan, disambiguation: { candidates: outcome.disambiguation } };
@@ -670,7 +692,7 @@ const PENDING_CLARIFICATION_TIMEOUT_MS = 60000;
 // it and launched directly, instead of being re-parsed as a fresh command (which previously hit
 // the repeat-cooldown and returned an empty message = silence). Self-expires so an unrelated
 // later command can't be hijacked.
-let pendingDisambiguation: { candidates: DisambiguationCandidate[]; kind: 'app' | 'visible_element' } | null = null;
+let pendingDisambiguation: { candidates: DisambiguationCandidate[]; kind: 'app' | 'visible_element'; armedTurnId?: string } | null = null;
 let pendingDisambiguationSetAt = 0;
 const PENDING_DISAMBIGUATION_TIMEOUT_MS = 60000;
 
@@ -1074,6 +1096,17 @@ async function resolveMediaSelection(
   return { handled: true, message: outcome.message };
 }
 
+// BENSON_SENTINEL_TTS_1 (2026-09-21) — called by app/index.tsx's endTtsBlock() when the TTS
+// carrying a disambiguation question ends WITHOUT actually finishing (error/interrupt/watchdog),
+// so a later "da" is never treated as an answer to a question the user never heard. Deliberately
+// narrow: only the disambiguation slot, not the whole module's pending-state family.
+export function clearPendingDisambiguation(): void {
+  if (pendingDisambiguation) {
+    logAudioDiag('DISAMBIGUATION_CLEARED', 'reason=question_not_spoken');
+    pendingDisambiguation = null;
+  }
+}
+
 // WhatsApp in-call controls (product-owner requested 2026-07-14) — narrow, self-contained
 // control commands over an ALREADY-active call, not a new communication request, so these are
 // checked and dispatched directly here rather than threaded through the full goal/task pipeline
@@ -1158,7 +1191,7 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
             : outcome.status === 'no_change' ? 'Am apăsat, dar ecranul pare neschimbat.'
             : outcome.status === 'click_failed' ? `N-am reușit să apăs pe „${pick.name}".`
             : `Nu mai găsesc „${pick.name}" pe ecran.`;
-          return { handled: true, message };
+          return { handled: true, message, armedTurnId: pd.armedTurnId };
         }
         const request = createActionRequest({
           source: options.source ?? 'voice',
@@ -1169,7 +1202,7 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
           requiresConfirmation: false,
         });
         const result = await governAction(request, { confirmed: true });
-        return { handled: true, message: result.message || `Deschid ${pick.name}.` };
+        return { handled: true, message: result.message || `Deschid ${pick.name}.`, armedTurnId: pd.armedTurnId };
       }
     }
     // No usable pick — fall through and handle this utterance as a fresh command.
@@ -1314,6 +1347,7 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
   lastExecutedGoalAt = now;
 
   const plan = planMission(problem.inferredGoals);
+  plan.turnId = options.turnId;
   lastMissionPlan = plan;
   emitEvent('MissionPlanned', { taskCount: plan.tasks.length }, plan.id);
   setActiveMission(plan.id);

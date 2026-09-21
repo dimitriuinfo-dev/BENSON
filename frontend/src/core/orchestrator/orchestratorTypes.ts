@@ -99,6 +99,11 @@ export interface MissionPlan {
   tasks: MissionTask[];
   createdAt: number;
   updatedAt: number;
+  // STALE_RESULT_DISPLAY_FIX_1 — the caller's per-dispatch turn id (app/index.tsx's
+  // latestTurnIdRef), stamped once at plan creation. Lets a delayed pendingDisambiguation
+  // resolution (armed under this plan, resolved by a LATER, unrelated utterance) be recognized
+  // as no longer belonging to the current conversation turn before its text/voice/state update.
+  turnId?: string;
 }
 
 export interface DefaultApps {

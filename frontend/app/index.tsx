@@ -86,7 +86,7 @@ import { speakWithGemini, stopGeminiTTS } from '../lib/agents/geminiTTS';
 import { buildVoiceInstructions, currentTimeOfDay } from '../lib/agents/voiceInstructions';
 import { startCarAutoDetection, type CarAutoDetectHandle } from '../lib/carAutoDetect';
 import { startScreenBridge, getLastScreenSnapshot } from '../lib/screenBridge';
-import { runMission, resumePendingTask } from '../src/core/orchestrator';
+import { runMission, resumePendingTask, clearPendingDisambiguation } from '../src/core/orchestrator';
 import type { MissionPlan } from '../src/core/orchestrator';
 import type { TrustedContact } from '../src/core/contacts';
 import { loadDeviceContacts as loadRealDeviceContacts, getContactsPermissionState, requestContactsPermission } from '../src/core/contacts';
@@ -800,6 +800,18 @@ export default function BensonApp() {
   // this long is stale (BENSON was deaf in between, the user has moved on) and is cleared.
   const PENDING_STALE_MS = 45000;
   const gateArmedAtRef = useRef(0);
+  // STALE_RESULT_DISPLAY_FIX_1 (2026-09-21, device-proven) — a monotonic counter, incremented once
+  // per handleIncomingText() dispatch regardless of source (same-breath wake tail, separate STT
+  // capture, or a confirmation reply). Distinct from jsSttSessionIdRef (only refreshed when a NEW
+  // JS STT session actually opens — a same-breath command never opens one, so that id alone can't
+  // tell two same-breath dispatches apart). Device log: a stale, already-answered app-open
+  // disambiguation ("Am găsit Rechner. O deschid?") resolved 6 minutes later — mid an unrelated
+  // WhatsApp call's own confirmation exchange — via missionOrchestrator.ts's module-level
+  // pendingDisambiguation, which has only a blunt 60s timeout and no per-turn identity check. The
+  // action already executed by the time this is checked (that right is not revoked — see
+  // finishHandledMission); this ref only gates whether the RESULT is allowed to update the
+  // CURRENT conversation's text/voice/state.
+  const latestTurnIdRef = useRef(0);
 
   // ── Runda E1 (2026-09-07) — BENSON acționează EXCLUSIV la comanda/atingerea utilizatorului ────
   // E1_USER_ONLY: nicio rostire, niciun salut, nicio întrebare de inițiere care nu urmează unei
@@ -2582,12 +2594,27 @@ export default function BensonApp() {
     pendingDisambigReplyRef.current = false;
     const wasGovernedReply = pendingGovernedReplyRef.current;
     pendingGovernedReplyRef.current = false;
-    if (wasBlocking && (pendingMissionTaskRef.current || wasDisambigReply || wasGovernedReply)) {
+    const hadPendingQuestion = pendingMissionTaskRef.current || wasDisambigReply || wasGovernedReply;
+    // BENSON_SENTINEL_TTS_1 (2026-09-21) — this used to arm confirmation-listening on ANY exit
+    // reason, including 'error'/'interrupt'/'watchdog' — so a TTS that never actually spoke the
+    // question (device-proven: the OPEN_APP ack/question collision left BOTH utterances stuck,
+    // reason=error) still opened an 8s window for "da", as if the user had heard "Am găsit
+    // Rechner. O deschid?" when they hadn't. Only a genuinely completed ('success') TTS may arm
+    // it now. Any other reason recovers instead: the stale pending question is explicitly
+    // cleared (both the local ref and missionOrchestrator's own pendingDisambiguation) so a later,
+    // unrelated "da" can never be misread as answering something never spoken — and nothing is
+    // auto-repeated or re-executed here.
+    if (wasBlocking && hadPendingQuestion && reason === 'success') {
       const confirmationId = `confirm-${Date.now()}`;
       pendingConfirmationIdRef.current = confirmationId;
       logAudioDiag('CONFIRM_LISTEN_ARM', `confirmationId=${confirmationId} timeoutMs=${CONFIRMATION_LISTEN_TIMEOUT_MS} source=${wasDisambigReply ? 'disambiguation' : (wasGovernedReply ? 'governed_waiting_user' : 'mission_gate')}`);
       try { setMicLevel(0.3, true); } catch {}
       try { startConfirmationListening(confirmationId, CONFIRMATION_LISTEN_TIMEOUT_MS); } catch {}
+    } else if (wasBlocking && hadPendingQuestion) {
+      logAudioDiag('CONFIRM_QUESTION_UNSPOKEN_RECOVERED', `reason=${reason} hadDisambig=${wasDisambigReply} hadGoverned=${wasGovernedReply} hadPendingTask=${!!pendingMissionTaskRef.current}`);
+      pendingMissionTaskRef.current = null;
+      try { clearPendingDisambiguation(); } catch {}
+      setBensonState('ERROR', 'question_not_spoken');
     }
   }
 
@@ -4206,6 +4233,17 @@ export default function BensonApp() {
   // ── Central message handler — routes through the Benson Core Orchestrator ──
   async function handleIncomingText(msg: string, opts?: { viaVoice?: boolean; utteranceBytes?: number }) {
     if (!msg) return;
+    // STALE_RESULT_DISPLAY_FIX_1 (2026-09-21) — REVISED after a device-caught false positive: this
+    // used to increment latestTurnIdRef HERE, on every dispatch — which also fired for a reply
+    // THAT ITSELF answers the still-open question ("da" resolving "Am gasit Rechner, o deschid?"),
+    // so the reply's own turn id was always one higher than the question's, and every confirmation
+    // in the app got wrongly suppressed as "stale" (device-caught: "Deschid Rechner." never shown,
+    // even though the calculator genuinely opened). latestTurnIdRef now advances ONLY when
+    // finishHandledMission() renders a genuinely TERMINAL result (DONE/ERROR, not CONFIRMING) — see
+    // there. A read here (no increment) captures "how many terminal missions had concluded before
+    // THIS dispatch began," which is what a freshly-armed pendingDisambiguation should be stamped
+    // with: an answer to it is safe exactly when NO OTHER terminal mission concluded in between.
+    const dispatchTurnId = String(latestTurnIdRef.current);
     // LOADING_DEADLOCK_GUARD_1 — the existing try/finally around this whole function (below)
     // guarantees loadingRef resets on any exception, but it structurally cannot help if the
     // awaited call inside it never resolves OR rejects (device-confirmed 2026-09-17: exactly what
@@ -4331,7 +4369,7 @@ export default function BensonApp() {
         if (canonical) {
           const contacts2 = await getLiveContacts();
           setBensonState('EXECUTING', `brain:${pending.action}`);
-          const bridged = await runMission(canonical, { source: 'voice', contacts: contacts2, onAck: onMissionAck });
+          const bridged = await runMission(canonical, { source: 'voice', contacts: contacts2, onAck: onMissionAck, turnId: dispatchTurnId });
           logAudioDiag('ROUTE', `decision=command reason=person_choice_resolved handled=${bridged.handled}`);
           // finishHandledMission() isn't declared until later in this function (TDZ) — this
           // gate sits at the same early tier as the other pending-* gates above/below it, none of
@@ -4731,8 +4769,24 @@ export default function BensonApp() {
     const finishHandledMission = (mr: Awaited<ReturnType<typeof runMission>>) => {
       console.log('[MissionOrchestrator] mission=', mr.plan?.id, 'status=', mr.plan?.status, 'message=', mr.message);
 
+      // STALE_RESULT_DISPLAY_FIX_1 (2026-09-21, device-proven) — a delayed resolution of a
+      // module-level pending state (missionOrchestrator.ts's pendingDisambiguation, armed by an
+      // EARLIER dispatch and resolved by a LATER, unrelated utterance within its 60s window) must
+      // not render as the answer to whatever is on screen NOW. The action this result reports on
+      // has ALREADY happened (governAction ran before this function was ever called — that right
+      // is not revoked here); this only gates whether ITS TEXT is allowed to update the current
+      // conversation. mr.armedTurnId is only present on results that came through that specific
+      // resume path — a normal fresh dispatch has no armed turn to compare against and is never
+      // suppressed here.
+      if (mr.armedTurnId && mr.armedTurnId !== String(latestTurnIdRef.current)) {
+        logAudioDiag('RESULT_STALE_SUPPRESSED', `armedTurnId=${mr.armedTurnId} currentTurnId=${latestTurnIdRef.current} message=${JSON.stringify(mr.message ?? '')}`);
+        setLoading(false); loadingRef.current = false;
+        return;
+      }
+
       // Round D — a handled mission with NO message must never leave BENSON silent.
       if (!mr.message || !mr.message.trim()) {
+        latestTurnIdRef.current += 1; // STALE_RESULT_DISPLAY_FIX_1 — also a terminal conclusion.
         const nf = replyLangRef.current.toLowerCase().startsWith('ro')
           ? `N-am înțeles, ${getAddress()}. Spune din nou.`
           : replyLangRef.current.toLowerCase().startsWith('de')
@@ -4756,6 +4810,13 @@ export default function BensonApp() {
       const isWaitingUserReply = getActiveMission()?.state === 'WaitingUser';
       pendingGovernedReplyRef.current = isWaitingUserReply;
       const isConfirming = isDisambig || !!mr.pendingTask || isWaitingUserReply || getActiveMission()?.state === 'WaitingConfirmation';
+      // STALE_RESULT_DISPLAY_FIX_1 — advance ONLY on a genuine terminal conclusion (DONE/ERROR),
+      // never while still CONFIRMING (a disambiguation question, or one of its own retries, is not
+      // "something else finishing" — it's the same exchange still in progress). This is what lets
+      // a same-exchange "da" pass its own staleness check above while a truly unrelated mission
+      // that completes in between (the original bug: a WhatsApp call finishing while an old
+      // Calculator disambiguation sat unanswered) still advances the count and marks it stale.
+      if (!isConfirming) latestTurnIdRef.current += 1;
       setBensonState(
         isConfirming ? 'CONFIRMING' : (isFailureReply(mr.message) ? 'ERROR' : 'DONE'),
         isConfirming ? (isDisambig ? 'disambiguation' : 'mission_gate') : 'mission_result',
@@ -4800,7 +4861,7 @@ export default function BensonApp() {
       }
     };
 
-    const missionResult = await runMission(msg, { source: 'voice', contacts: contactsForMission, onAck: onMissionAck });
+    const missionResult = await runMission(msg, { source: 'voice', contacts: contactsForMission, onAck: onMissionAck, turnId: dispatchTurnId });
     logAudioDiag('ORCHESTRATOR_HANDOFF_COMPLETED', `handled=${missionResult.handled} missionId=${missionResult.plan?.id ?? 'none'}`);
     // ROUND_WAKE_COMMAND_HANDOFF_FIX_1 — EXECUTION-stage outcome for a wake-originated command
     // (CASE 3/4). Deliberately scoped to this one call site (the mission/orchestrator action
@@ -4943,7 +5004,7 @@ export default function BensonApp() {
           } catch { logAudioDiag('PARSE_RESULT', 'problemType=parse_error params={}'); }
           const contacts2 = MAY_NEED_CONTACTS_PATTERN.test(canonical) ? await getLiveContacts() : contactsForMission;
           setBensonState('EXECUTING', `brain:${brainOut.action}`);
-          const bridged = await runMission(canonical, { source: 'voice', contacts: contacts2, onAck: onMissionAck });
+          const bridged = await runMission(canonical, { source: 'voice', contacts: contacts2, onAck: onMissionAck, turnId: dispatchTurnId });
           logAudioDiag('ROUTE', `decision=command reason=brain_intent handled=${bridged.handled}`);
           if (bridged.handled) { finishHandledMission(bridged); return; }
           // Brain classified a command the deterministic executor could not run — ask, don't guess.
