@@ -15,6 +15,7 @@ import { getLastActionLogs, type GovernanceLogEntry } from '../src/core/action-e
 import { runMission, resumePendingTask, getLastMissionPlan, getRecentEvents, type MissionPlan, type OrchestratorEvent } from '../src/core/orchestrator';
 import { getActiveMission, confirmActiveMission, cancelActiveMission, resolveActiveMissionFromUtterance, type Mission } from '../src/core/mission';
 import type { TrustedContact } from '../src/core/contacts';
+import { submitTypedText, isChatSubmitReady, onBensonReply } from '../lib/bensonChatBridge';
 
 // Same stand-in contact BENSON's live voice pipeline uses (app/index.tsx's TEST_CONTACTS) until
 // real contact memory is wired in — duplicated here rather than exported from a screen component
@@ -192,6 +193,53 @@ function TestCommandBox({ onResult }: { onResult: () => void }) {
   );
 }
 
+// ROUND_BENSON_CHAT_1 — routes through the bridge (lib/bensonChatBridge.ts) into the REAL
+// conversation pipeline (app/index.tsx's handleIncomingText: brain routing, history, existing
+// Confirmation Gate, TTS) — unlike TestCommandBox above, which calls the orchestrator directly
+// and never speaks. Diagnostic screen only, same discipline as the rest of this file: no styling,
+// no touch to BensonMainScreen or any product design file.
+function BensonChatBox() {
+  const [text, setText] = useState('');
+  const [transcript, setTranscript] = useState<string[]>([]);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    const id = setInterval(() => setReady(isChatSubmitReady()), 500);
+    const unsub = onBensonReply((reply) => setTranscript((prev) => [...prev.slice(-9), `BENSON: ${reply}`]));
+    return () => { clearInterval(id); unsub(); };
+  }, []);
+
+  function send() {
+    const msg = text.trim();
+    if (!msg) return;
+    setTranscript((prev) => [...prev.slice(-9), `YOU: ${msg}`]);
+    const ok = submitTypedText(msg);
+    if (!ok) setTranscript((prev) => [...prev.slice(-9), '(chat pipeline not mounted yet — open the main screen first)']);
+    setText('');
+  }
+
+  return (
+    <View style={{ borderBottomWidth: 2, borderColor: '#8ec97a', paddingVertical: 8, marginBottom: 8 }}>
+      <Text style={{ color: '#8ec97a', fontSize: 16, marginBottom: 4 }}>BENSON CHAT (real pipeline — {ready ? 'ready' : 'not mounted'})</Text>
+      <TextInput
+        value={text}
+        onChangeText={setText}
+        onSubmitEditing={send}
+        placeholder="type what you'd say to BENSON"
+        placeholderTextColor="#888"
+        style={{ color: '#fff', borderWidth: 1, borderColor: '#444', padding: 8, marginBottom: 6 }}
+      />
+      <TouchableOpacity onPress={send} style={{ paddingVertical: 6 }}
+        accessibilityLabel="Send to BENSON CHAT" accessibilityRole="button">
+        <Text style={{ color: '#8ec97a' }}>Send</Text>
+      </TouchableOpacity>
+      {transcript.map((line, i) => (
+        <Text key={i} style={{ color: line.startsWith('YOU:') ? '#fff' : '#8ec97a', marginTop: 2 }}>{line}</Text>
+      ))}
+    </View>
+  );
+}
+
 // BENSON_AUDIO diagnostics toggle + Guardian recovery-events readout — native-backed (see
 // AudioDiag.kt / BensonWatchdogReceiver.kt), not a duplicate JS-only flag.
 function AudioDiagnosticsPanel() {
@@ -260,6 +308,7 @@ export default function DebugScreen() {
       </TouchableOpacity>
       <ScrollView>
         <AudioDiagnosticsPanel />
+        <BensonChatBox />
         <TestCommandBox onResult={refresh} />
         <GovernedMissionPanel mission={governedMission} />
         <MissionPanel plan={missionPlan} events={events} />

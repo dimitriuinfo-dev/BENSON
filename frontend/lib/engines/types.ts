@@ -35,16 +35,24 @@ export type ChatOpts = { temperature?: number };
 // to the live mission system (lib/agents/missionValidator.ts / missionExecutor.ts are out of this
 // round's allowed-file scope — see GO_REPORT.md). Extend this enum — never accept a raw string —
 // when real actions are wired in.
+// ROUND_BENSON_CHAT_1 — media control added to the closed vocabulary (still an enum, never a raw
+// string) so BENSON CHAT can propose play/pause/stop. Canonical phrasing (brainRouter.ts) routes
+// these through the EXISTING generic transport handlers (missionOrchestrator.ts's
+// tryHandleGenericVisibleAction / tryHandleActiveMediaCommand) — no new execution mechanism.
 export type KnownAction =
   | 'open_app'
   | 'call_contact'
   | 'send_whatsapp_message'
   | 'navigate'
   | 'search_web'
-  | 'set_reminder';
+  | 'set_reminder'
+  | 'media_play'
+  | 'media_pause'
+  | 'media_stop';
 
 export const KNOWN_ACTIONS: readonly KnownAction[] = [
   'open_app', 'call_contact', 'send_whatsapp_message', 'navigate', 'search_web', 'set_reminder',
+  'media_play', 'media_pause', 'media_stop',
 ];
 
 // ROUND_CONTACT_IDENTITY_CONTINUITY_1 — the LLM's structured read of a PERSON REFERENCE in the

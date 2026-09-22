@@ -13,6 +13,7 @@ import * as Location from 'expo-location';
 import * as Clipboard from 'expo-clipboard';
 import * as SplashScreen from 'expo-splash-screen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { setChatSubmit, notifyBensonReply } from '../lib/bensonChatBridge';
 import {
   startListeningService, stopListeningService, addStopRequestedListener,
   addListenRequestedListener, addWakePokeListener, bringToForeground,
@@ -1046,6 +1047,7 @@ export default function BensonApp() {
           execWatchdogRef.current = null;
           if (bensonStateRef.current !== 'EXECUTING') return;
           logAudioDiag('EXEC_WATCHDOG', `phase=${execPhaseRef.current || 'unknown'} timeoutMs=${EXEC_WATCHDOG_MS}`);
+          invalidateStaleBrainCall('exec_watchdog');
           setLoading(false); loadingRef.current = false;
           // ── C1 TASK 4 — a stuck resume_task is NOT a "Am rămas blocat" dead end. Clean IDLE
           // recovery + restart listening. A butler frozen mid-handoff must not be a resting state.
@@ -1174,6 +1176,45 @@ export default function BensonApp() {
   // Set immediately after a successful RESOLVED/NEEDS_CONFIRMATION-then-picked person resolution,
   // for logging/diagnostics only — the actual value used by execution is params.contact itself.
   const lastResolvedPersonRef = useRef<ResolvedPerson | null>(null);
+  // ROUND_BENSON_CHAT_1 — deterministic cancellation backstop for the brain's own kind:'clarify'
+  // loop. Set true right after speaking a clarify question, cleared on ANY subsequent utterance.
+  // Checked BEFORE the next utterance reaches routeThroughBrain so "renunță"/"las-o"/"nu contează"
+  // always ends the pending question cleanly even if the model itself doesn't recognize it as
+  // cancellation — the brain's own conversational understanding remains the primary path (history
+  // already carries the clarify question), this only guarantees a deterministic floor under it.
+  const pendingBrainClarifyRef = useRef(false);
+  const BRAIN_CANCEL_PATTERN = /\b(renunț[ăa]|renunt[ăa]|las-o|las-o balt[ăa]|lasă a[șs]a|nu conteaz[ăa]|nu mai vreau|anuleaz[ăa])\b/i;
+  // ROUND_BENSON_CHAT_1_STALE_FIX (2026-09-22) — identifies each routeThroughBrain() round trip.
+  // Incremented (a) right before a new brain call starts, (b) when a cancel word supersedes one
+  // still in flight. A response is valid only if brainCallIdRef.current still equals the id
+  // captured at dispatch time — covers BOTH "cancelled" and "superseded by a newer request" with
+  // one counter, deliberately separate from latestTurnIdRef (that one's "only advance on a
+  // terminal conclusion" semantics stay exactly as proven — this guards a different thing: the
+  // brain's OWN network round trip, not mission-result staleness).
+  const brainCallIdRef = useRef(0);
+  const brainCallInFlightRef = useRef(false);
+  // ROUND_BENSON_CHAT_1_STALE_FIX_2 (2026-09-22) — acceptance of a REPLACING request must
+  // invalidate the old operation regardless of whether the new one is brain-routed or handled by
+  // the deterministic executor (per explicit instruction — this was previously only true for the
+  // in-loadingRef-guard cancel-word branch below). Called from every site that releases loadingRef
+  // OUTSIDE handleIncomingText's own normal single-flight completion — i.e. every place a NEW,
+  // unrelated dispatch can start while the OLD one's brain call might still be genuinely pending.
+  // No-op (and harmless) if no brain call is in flight, so it is safe to call defensively.
+  function invalidateStaleBrainCall(reason: string) {
+    if (brainCallInFlightRef.current) {
+      brainCallIdRef.current += 1;
+      brainCallInFlightRef.current = false;
+      logAudioDiag('BRAIN_CALL_INVALIDATED', `reason=${reason} newCallId=${brainCallIdRef.current}`);
+    }
+  }
+  // ROUND_BENSON_CHAT_1 — registers the REAL conversation entry point (function declaration,
+  // hoisted within this component) with the non-visual bridge (lib/bensonChatBridge.ts) so a
+  // diagnostic screen can submit typed text into the exact same pipeline voice uses — brain
+  // routing, history, confirmations, TTS — instead of a second, lower-level path.
+  useEffect(() => {
+    setChatSubmit((text: string) => { handleIncomingText(text, { viaVoice: false }); });
+    return () => setChatSubmit(null);
+  }, []);
   // ROUND_EMERGENCY_CORE_1 — a generic "ajutor" / "urgență" awaiting a spoken "Sun la 112?" reply.
   // Checked before every other gate so a stale mission/confirmation can never intercept it, and
   // one reprompt on UNKNOWN then a clean cancel.
@@ -1735,6 +1776,7 @@ export default function BensonApp() {
         try { hideWakeRing(); } catch {}
         if (speakingRef.current || ttsHardTimerRef.current) { try { stopSpeaking(); } catch {} try { stopOpenAITTS().catch(() => {}); } catch {} endTtsBlock('interrupt'); }
         if (sttSessionActiveRef.current) { try { stopRecognition(); } catch {} setListening(false); listeningRef.current = false; closeSttSession('background'); }
+        invalidateStaleBrainCall('call_ended_return');
         setLoading(false); loadingRef.current = false;
         setBensonState('IDLE', 'call_ended_return');
         setTimeout(() => { if (!silencedRef.current) { try { resumePassiveWake(); } catch {} } }, 400);
@@ -1781,6 +1823,7 @@ export default function BensonApp() {
       // TASK 4's watchdog recovers it — never "Am rămas blocat".
       if (C1_RESUME_DECOUPLED && (resumeInFlightRef.current || (bensonStateRef.current === 'EXECUTING' && execPhaseRef.current === 'resume_task'))) {
         logAudioDiag('RESUME', `source=foreground_return state=${bensonStateRef.current}`);
+        invalidateStaleBrainCall('resume_task_foreground_return');
         setLoading(false); loadingRef.current = false;
         setTimeout(() => { try { resumeListeningAfterUnblock(); } catch {} }, 250);
       }
@@ -2369,6 +2412,9 @@ export default function BensonApp() {
     }
     if (role === 'benson') {
       setLastReply(text);
+      // ROUND_BENSON_CHAT_1 — the ONE place a final BENSON reply is produced regardless of turn
+      // source (voice or typed) — see bensonChatBridge.ts's own comment.
+      try { notifyBensonReply(text); } catch {}
       // Only auto-classify the terminal state from a plain conversational reply (state still
       // THINKING). Mission/confirm paths set CONFIRMING / EXECUTING / DONE / ERROR explicitly and
       // must not be overridden here.
@@ -4233,6 +4279,11 @@ export default function BensonApp() {
   // ── Central message handler — routes through the Benson Core Orchestrator ──
   async function handleIncomingText(msg: string, opts?: { viaVoice?: boolean; utteranceBytes?: number }) {
     if (!msg) return;
+    // ROUND_BENSON_CHAT_1_STALE_FIX — declared at function scope (not inside the try below) so the
+    // outer finally (this function's very last block) can see it too: a stale dispatch's own
+    // finally must skip the loadingRef/state reset entirely rather than releasing a lock a NEWER
+    // dispatch now owns. null until (if) this dispatch actually calls routeThroughBrain().
+    let dispatchBrainCallId: number | null = null;
     // STALE_RESULT_DISPLAY_FIX_1 (2026-09-21) — REVISED after a device-caught false positive: this
     // used to increment latestTurnIdRef HERE, on every dispatch — which also fired for a reply
     // THAT ITSELF answers the still-open question ("da" resolving "Am gasit Rechner, o deschid?"),
@@ -4252,12 +4303,34 @@ export default function BensonApp() {
     // forever in that case, treat a loading flag that's been set far longer than any real cloud
     // call could take as stale and recover deterministically instead of staying blocked.
     if (loadingRef.current) {
+      // ROUND_BENSON_CHAT_1_STALE_FIX — a cancel word arriving WHILE routeThroughBrain() is mid-
+      // request must actually interrupt it, not be silently dropped by the busy-guard below (which
+      // would otherwise let the eventual late response act unopposed — the exact bug this round
+      // fixes). Scoped strictly to the brain's own in-flight window, per instruction — no other
+      // busy state (TTS speaking, mission executing) is affected.
+      if (brainCallInFlightRef.current && BRAIN_CANCEL_PATTERN.test(msg)) {
+        brainCallIdRef.current += 1; // supersedes the in-flight call — its late resolution goes stale
+        brainCallInFlightRef.current = false;
+        logAudioDiag('ROUTE', 'decision=cancel reason=brain_call_cancelled_midflight');
+        const nf = replyLangRef.current.toLowerCase().startsWith('ro') ? 'Am renunțat.' : 'Cancelled.';
+        addMessage('benson', nf);
+        await appendHistory(msg, nf);
+        setBensonState('DONE', 'brain_call_cancelled_midflight');
+        loadingRef.current = false; setLoading(false);
+        speakText(nf, () => afterPromptRearm(false));
+        return;
+      }
       const ageMs = Date.now() - loadingSetAtRef.current;
       if (ageMs < LOADING_MAX_AGE_MS) {
         logAudioDiag('COMMAND_REJECTED_LOADING_BUSY', `ageMs=${ageMs} text=${JSON.stringify(msg.slice(0, 60))}`);
         return;
       }
       logAudioDiag('LOADING_STALE_RECOVERED', `ageMs=${ageMs}`);
+      // ROUND_BENSON_CHAT_1_STALE_FIX_2 — this dispatch is about to be ACCEPTED (execution
+      // continues below, deterministic or brain-routed), superseding whatever the stuck previous
+      // call was doing. Invalidate its brain-call identity here too, not just on the cancel-word
+      // branch above — see invalidateStaleBrainCall's own comment.
+      invalidateStaleBrainCall('loading_stale_recovered');
       loadingRef.current = false; setLoading(false);
     }
     // ROUND_WAKE_COMMAND_HANDOFF_FIX_1 — captured ONCE at entry: whether this turn originated from
@@ -4933,11 +5006,34 @@ export default function BensonApp() {
       return;
     }
 
+    // ROUND_BENSON_CHAT_1 — deterministic cancel backstop, checked before the brain sees this
+    // utterance at all (see pendingBrainClarifyRef's own comment above).
+    if (pendingBrainClarifyRef.current) {
+      pendingBrainClarifyRef.current = false;
+      if (BRAIN_CANCEL_PATTERN.test(msg)) {
+        logAudioDiag('ROUTE', 'decision=cancel reason=brain_clarify_cancelled');
+        const nf = replyLangRef.current.toLowerCase().startsWith('ro') ? 'Am renunțat.' : 'Cancelled.';
+        addMessage('benson', nf);
+        await appendHistory(msg, nf);
+        setBensonState('DONE', 'brain_clarify_cancelled');
+        setLoading(false); loadingRef.current = false;
+        speakText(nf, () => afterPromptRearm(false));
+        return;
+      }
+    }
+
     // ── Build B — brain as the conversation + intent route ────────────────────────────────────
     // Everything the fast path did not handle. The brain classifies the utterance against the
     // CLOSED KnownAction list and returns speak / clarify / action — it NEVER executes. Only active
     // when a CREIER/Groq key is configured; otherwise brainOut is null and the existing
     // claude/openai/gemini routeCommand path runs unchanged.
+    // ROUND_BENSON_CHAT_1_STALE_FIX — id captured BEFORE the await; brainCallInFlightRef only true
+    // during the window the cancel-bypass above can act on. Any dispatch that starts while this is
+    // in flight (the cancel bypass, or a fresh dispatch once loadingRef later frees up) advances
+    // brainCallIdRef, which is what the check right after the await compares against.
+    const myBrainCallId = ++brainCallIdRef.current;
+    dispatchBrainCallId = myBrainCallId;
+    brainCallInFlightRef.current = true;
     const brainOut = await routeThroughBrain({
       utterance: msg,
       lang: replyLangRef.current,
@@ -4947,6 +5043,14 @@ export default function BensonApp() {
         ? (() => { try { const s = getLastScreenSnapshot(); return s ? JSON.stringify(s).slice(0, 4000) : undefined; } catch { return undefined; } })()
         : undefined,
     });
+    brainCallInFlightRef.current = false;
+    if (myBrainCallId !== brainCallIdRef.current) {
+      // A cancellation or a newer dispatch already superseded this exact request — zero text,
+      // zero voice, zero action, and — per instruction — this stale completion must NOT touch
+      // loadingRef/state; whatever superseded it already owns (or already released) that.
+      logAudioDiag('BRAIN_RESPONSE_STALE_DISCARDED', `callId=${myBrainCallId} currentCallId=${brainCallIdRef.current} raw="${msg.slice(0, 60)}"`);
+      return;
+    }
     if (brainOut) {
       if (brainOut.kind === 'action') {
         logAudioDiag('BRAIN_INTENT', `raw="${msg}" kind=action action=${brainOut.action} params=${JSON.stringify(brainOut.params)} confidence=${brainOut.confidence ?? '-'}`);
@@ -5026,6 +5130,7 @@ export default function BensonApp() {
       } else if (brainOut.kind === 'clarify') {
         logAudioDiag('BRAIN_INTENT', `raw="${msg}" kind=clarify action=- params=- confidence=${brainOut.confidence ?? '-'}`);
         logAudioDiag('ROUTE', 'decision=conversation reason=brain_clarify');
+        pendingBrainClarifyRef.current = true;
         setBensonState('CONFIRMING', 'brain_clarify');
         addMessage('benson', brainOut.question);
         await appendHistory(msg, brainOut.question);
@@ -5179,9 +5284,16 @@ export default function BensonApp() {
       // this just avoids a silent, unlogged crash of the whole handler.
       console.log('[handleIncomingText] uncaught error', err);
     } finally {
-      setLoading(false);
-      loadingRef.current = false;
-      logAudioDiag('LOADING_REF_SET', 'value=false source=finally');
+      // ROUND_BENSON_CHAT_1_STALE_FIX — a stale dispatch (its own brain call got superseded/
+      // cancelled and already returned early above) must NOT release a lock or reset state that a
+      // NEWER dispatch now owns — see dispatchBrainCallId's own comment at the top of this function.
+      if (dispatchBrainCallId !== null && dispatchBrainCallId !== brainCallIdRef.current) {
+        logAudioDiag('LOADING_REF_STALE_SKIP', `dispatchBrainCallId=${dispatchBrainCallId} currentBrainCallId=${brainCallIdRef.current}`);
+      } else {
+        setLoading(false);
+        loadingRef.current = false;
+        logAudioDiag('LOADING_REF_SET', 'value=false source=finally');
+      }
     }
   }
 

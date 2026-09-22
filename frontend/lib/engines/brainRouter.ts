@@ -178,6 +178,12 @@ export function buildCanonicalCommand(
       const dest = p('destination', 'destinationLabel', 'place', 'to', 'address');
       return dest ? `navighează la ${dest}` : '';
     }
+    // ROUND_BENSON_CHAT_1 — phrased to match missionOrchestrator.ts's existing generic transport
+    // patterns (APASA_ACTION_PATTERN / MEDIA_*_PATTERN) exactly, so this reuses those handlers
+    // unchanged rather than adding a third way to trigger play/pause/stop.
+    case 'media_play': return 'apasă play';
+    case 'media_pause': return 'pauză';
+    case 'media_stop': return 'oprește';
     case 'search_web':
     case 'set_reminder':
       return ''; // not owned by the deterministic executor — caller delegates to routeCommand()
