@@ -170,6 +170,12 @@ export function executeCommand(command) {
   return NativeModule.executeCommand(JSON.stringify(command));
 }
 
+// CALC1 (2026-09-22) — symbols already parsed by JS (lib/tools/toolRegistry.ts), e.g.
+// ["√","9","="]. Native presses each button and reads the real result display back.
+export function runCalculatorRecipe(symbols) {
+  return NativeModule.runCalculatorRecipe(JSON.stringify(symbols));
+}
+
 // Tells the native Guardian watchdog whether a WhatsApp automation is currently in progress, so
 // it skips stealing focus back to BENSON mid-flow. Always pair a `true` call with a `false` in a
 // finally block — never leave this stuck on.

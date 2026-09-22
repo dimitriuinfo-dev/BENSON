@@ -77,6 +77,12 @@ import { executeCommand, getScreenSnapshot } from 'benson-accessibility';
 import {
   searchMedia, selectMediaCandidate, findProviderByMention, type MediaProvider, type MediaCandidate,
 } from '../../executors/mediaSearchExecutor';
+// CALC1 (2026-09-22) — deterministic Calculator recognition, same shape/placement as
+// extractYouTubeQuery/extractGenericMediaSearch above: checked before extractGoals/planMission
+// so a calculator-shaped utterance never collapses into a generic OPEN_APP or falls through to
+// the LLM. Parsing (Task 1) and native execution (Task 2/3) both live in toolRegistry.ts —
+// this file only recognizes the shape and dispatches.
+import { looksLikeCalculatorRequest, runCalculatorOperation } from '../../../lib/tools/toolRegistry';
 
 const LOG_TAG = '[MissionOrchestrator]';
 function devLog(...args: unknown[]): void {
@@ -1303,6 +1309,16 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
       message: `Am găsit: ${names}. Ce vrei să asculți?`,
       disambiguation: { candidates: outcome.candidates.map((c) => ({ name: c.title })) },
     };
+  }
+
+  // CALC1 — Task 4 routing: a calculator-shaped utterance must be recognized as `decision=command`
+  // here, never sent to general conversation. looksLikeCalculatorRequest is deliberately broader
+  // than what's actually executable (catches "sinus" etc. too), so an unsupported operation still
+  // gets an honest "not supported" answer instead of silently falling through to the LLM/brain.
+  if (looksLikeCalculatorRequest(cleanedForRepairCheck) || looksLikeCalculatorRequest(normalizedText)) {
+    logAudioDiag('EXEC_TRACE_MISSION', 'missionId=calculator_operation taskCount=1');
+    const outcome = await runCalculatorOperation(cleanedForRepairCheck || normalizedText);
+    return { handled: true, message: outcome.spoken };
   }
 
   const goals = extractGoals(rawText, normalizedText);

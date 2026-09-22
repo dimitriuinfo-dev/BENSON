@@ -968,7 +968,11 @@ class BensonAccessibilityService : AccessibilityService() {
     // execution path — every step of the call recipe below is gated on one of these instead.
     // `anchor` is a human label for the log line only. Default pollMs=100.
     // Log: WAIT_NODE predicate=<anchor> foundAfterMs=<ms> result=found|timeout
-    private suspend fun waitForNode(
+    // CALC1 (2026-09-22) — visibility widened private->internal, same module (package
+    // expo.modules.accessibility), so CalculatorRecipe.kt can call it on the EXISTING service
+    // instance (BensonAccessibilityService.instance) instead of duplicating this primitive.
+    // Behavior unchanged — same body, same signature, same callers.
+    internal suspend fun waitForNode(
         timeoutMs: Long = 3000,
         pollMs: Long = 100,
         requirePackage: String? = null,

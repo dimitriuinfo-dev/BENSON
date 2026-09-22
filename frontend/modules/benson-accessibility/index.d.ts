@@ -155,6 +155,18 @@ export interface CommandResult {
 }
 export function executeCommand(command: { steps: CommandStep[] }): Promise<CommandResult>;
 
+// CALC1 (2026-09-22) — symbols already parsed by JS (lib/tools/toolRegistry.ts), e.g.
+// ["√","9","="] for "radacina din 9". Native presses each button (real IDs discovered on
+// device, see CalculatorRecipe.kt) and reads the real result display back.
+export interface CalculatorRecipeOutcome {
+  success: boolean;
+  resultText: string | null;
+  changed: boolean;
+  failedStep: string | null;
+  error: string | null;
+}
+export function runCalculatorRecipe(symbols: string[]): Promise<CalculatorRecipeOutcome>;
+
 export function setWhatsAppAutomationActive(active: boolean): void;
 
 /** WA-CALL-STAYS-LIVE — true while a WhatsApp call runWhatsAppCallNative just placed is still live

@@ -3,6 +3,7 @@ package expo.modules.accessibility
 import android.content.Intent
 import android.provider.Settings
 import android.text.TextUtils
+import org.json.JSONArray
 import org.json.JSONObject
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
@@ -342,6 +343,35 @@ class BensonAccessibilityModule : Module() {
           "detail" to result.detail,
           // ROUND_YOUTUBE_GOVERNANCE_1 — generic extract_list payload; "[]" for every other action.
           "itemsJson" to result.itemsJson,
+        ))
+      }
+    }
+
+    // CALC1 (2026-09-22) — symbolsJson is a JSON array of already-parsed button symbols (e.g.
+    // ["√","9","="]) built by JS (lib/tools/toolRegistry.ts's text->symbol translation).
+    // CalculatorRecipe presses each one natively (waitForNode + ACTION_CLICK, reused, never
+    // duplicated) and reads the real result display back — mirrors executeCommand's own shape.
+    AsyncFunction("runCalculatorRecipe") { symbolsJson: String, promise: Promise ->
+      val svc = BensonAccessibilityService.instance
+      if (svc == null) {
+        promise.resolve(mapOf("success" to false, "resultText" to null, "changed" to false, "failedStep" to "SERVICE", "error" to "Accessibility Service is not running."))
+        return@AsyncFunction
+      }
+      val symbols = try {
+        val arr = JSONArray(symbolsJson)
+        (0 until arr.length()).map { arr.getString(it) }
+      } catch (_: Exception) {
+        promise.resolve(mapOf("success" to false, "resultText" to null, "changed" to false, "failedStep" to "PARSE", "error" to "symbolsJson is invalid."))
+        return@AsyncFunction
+      }
+      svc.runOnServiceScope {
+        val outcome = CalculatorRecipe(svc).run(symbols)
+        promise.resolve(mapOf(
+          "success" to outcome.success,
+          "resultText" to outcome.resultText,
+          "changed" to outcome.changed,
+          "failedStep" to outcome.failedStep,
+          "error" to outcome.error,
         ))
       }
     }
