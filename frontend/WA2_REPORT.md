@@ -243,3 +243,88 @@ construit aici rămâne testabil doar din panoul de debug.
 
 TASK 1 (notificări) și TASK 3 (formatare vocală) rămân neschimbate față de raportul inițial —
 TASK 1 tot NEEXECUTAT cu conținut real (o notificare WhatsApp reală nu a fost testată live).
+
+---
+
+## 9. UPDATE 2026-09-24 (b) — mesaj primit real, bug găsit+reparat, limite, investigație Accessibility
+
+**Mesaj primit real, verificat pe dispozitiv** (conversația „Mona"), după ce apelul WhatsApp
+primit de la „Baby" aflat în desfășurare s-a încheiat de la sine (neatins, per instrucțiune
+explicită): text și expeditor corecte, fără duplicate.
+
+```
+WA_CHAT_VERIFIED header="Mona" nameMatch=true
+WA_CHAT_READ contact="Mona" messageCount=4 lastSender=them
+```
+Panou: `Mona (4 msgs): [me] Which is better? [me] Sag mal.....lebst Du noch? [them] No 1
+[them] In my face….` — identic cu screenshot-ul real al conversației.
+
+**Bug real găsit live, reparat**: primul test pe „Mona" a scos `messageCount=5`, incluzând
+`[me] Du hast diese Nachricht gelöscht.` — placeholder-ul de sistem al WhatsApp pentru „ai șters
+acest mesaj", NU conținut real. WhatsApp reutilizează același `/message_text` pentru acest
+placeholder ca și pentru mesajele reale, deci filtrarea pe resource-id singură nu ajungea.
+Cauza a fost confirmată live (nu presupusă): am inspectat arborele Accessibility live cu un log
+temporar și am constatat că părintele imediat al unui `/message_text` REAL e
+`.../conversation_row_text`, în timp ce părintele placeholder-ului de sistem nu are resource-id
+deloc. Notă tehnică: un dump static (`uiautomator dump`) a arătat inițial un nume diferit
+(`conversation_text_row`, un nivel mai sus) — prima încercare de fix pe baza acelui nume a scos
+`messageCount=0` (a exclus totul), deci am adăugat logging temporar, am văzut valoarea reală din
+arborele live, am corectat numele, am scos logging-ul, și am reverificat — `messageCount=4`,
+corect. Fix în `BensonAccessibilityService.kt`, verificare `parentVid.endsWith("/conversation_row_text")`
+înainte de a accepta un nod `/message_text` ca mesaj real.
+
+**Limita extractorului — raportată explicit, NU presupusă suportată**:
+- **Imagini**: verificat live — mesajul cu 2 fotografii forward-uite din conversația Mona (12:14,
+  fără caption) NU apare deloc în rezultat (`messageCount=4`, nu 5) — omis corect, nu inventat.
+  Filtrarea strict pe `/message_text` nu prinde niciun conținut non-text.
+- **Mesaje vocale (voice notes)**: NEVERIFICAT live — nu a existat un mesaj vocal real disponibil
+  în conversațiile de pe acest telefon în timpul testării. Pe baza acelorași arhitecturi WhatsApp
+  (un voice note se randează ca player/waveform, fără un nod `/message_text` cu conținut), extractorul
+  ar trebui să-l omită la fel ca imaginile — dar asta e o **inferență din arhitectură, nu un test
+  confirmat**. Nu se consideră suportat.
+- **Alte tipuri** (video, documente, locații, contacte partajate, sticker-e, reacții): din același
+  motiv arhitectural, NEVERIFICATE, NU considerate suportate.
+- Concluzie: `readWhatsAppConversation` citește STRICT text simplu din bule reale. Orice conversație
+  cu conținut non-text va avea „găuri" tăcute în istoricul citit — corect din perspectiva „nu inventa
+  conținut lipsă", dar utilizatorul nu trebuie să presupună o transcriere completă a conversației.
+
+**Investigație separată — dezactivările Accessibility Service, NU tratate ca reparate prin
+reactivare manuală**: `benson-accessibility` are deja `getConnectionState()` (`isServiceEnabled`/
+`getConnectionState` în `BensonAccessibilityModule.kt`), care distinge exact cele trei stări cerute:
+- `disabled` — serviciul NU apare deloc în `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` (userul
+  nu l-a activat, sau activarea a fost revocată de sistem).
+- `enabled_disconnected` — apare în Settings (userul l-a activat), dar
+  `BensonAccessibilityService.instance == null` — procesul a fost omorât, serviciul nu rulează acum.
+- `enabled_connected` — apare în Settings ȘI instanța e vie.
+
+Verificarea directă din această rundă (`adb shell settings get secure enabled_accessibility_services`
+→ literal `null`, de ambele dăți când citirea a eșuat) confirmă că starea reală a fost **`disabled`**,
+nu `enabled_disconnected` — serviciul a fost efectiv scos din lista Settings, nu doar deconectat ca
+proces. Coincide temporal cu un `adb install -r` (reinstalare) — consistent cu protecția Android
+„Restricted Settings" pentru aplicații instalate prin sideload (acest dispozitiv rulează Android 16 /
+SDK 36, în intervalul unde funcția există), care poate revoca automat permisiuni de tip Accessibility
+Service după o reinstalare a unui APK ne-provenit din Play Store. **Nu s-a repetat la fiecare
+reinstalare din această fereastră** (2 din 3 reinstalări ulterioare au păstrat serviciul activat),
+deci nu pot afirma cu certitudine declanșatorul exact — doar starea reală, confirmată prin Settings,
+nu prin ghicit.
+
+**Gol real, nu rezolvat aici**: `readChatMessages` din `whatsappTool.ts` folosește deja
+`ensureAccessibilityReady()`, care întoarce `guard.state` cu toate cele trei valori — dar la eșec
+întoarce mereu același `reason: 'accessibility_disconnected'`, indiferent dacă starea reală era
+`disabled` sau `enabled_disconnected`. Distincția există la nivel nativ și în guard, dar se pierde
+în raportarea din TASK 2. Nu am atins asta în această rundă (ar fi o a doua schimbare, în afara
+fix-ului de clasificare mesaje) — semnalat pentru o rundă viitoare dacă precizia asta contează
+pentru diagnosticare.
+
+**Build**:
+```
+npx tsc --noEmit          → 0 erori
+gradlew assembleRelease   → BUILD SUCCESSFUL in 33s
+apksigner verify          → CN=BENSON, OU=Dev, O=TOKKO, L=Unknown, ST=Unknown, C=RO
+sha256                    → d5af55c8b19aef391167e2fb69f9ca788b16b1727d938c664723494d25e98c07
+adb install -r            → Success
+```
+
+**TASK 2 este acum verificată pentru mesaje trimise ȘI primite, text simplu, o singură
+conversație testată explicit fiecare (K RO pentru trimise, Mona pentru primite).** Nu extinde
+concluzia la alte conversații/contacte netestate, nici la conținut non-text.

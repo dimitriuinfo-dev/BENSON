@@ -2751,8 +2751,24 @@ class BensonAccessibilityService : AccessibilityService() {
                             val vid = n.viewIdResourceName ?: ""
                             val text = n.text?.toString()?.trim().orEmpty()
                             if (text.isNotEmpty() && vid.endsWith("/message_text")) {
-                                val b = Rect(); n.getBoundsInScreen(b)
-                                collected.add(text to b)
+                                // ROUND_WA2_MESSAGE_READING_1 — device-proven fix, found live with
+                                // a real deleted message in the Mona conversation: WhatsApp reuses
+                                // the SAME /message_text id for the "Du hast diese Nachricht
+                                // gelöscht." (you deleted this message) system placeholder — it
+                                // was being read as a real "[me]" message. A real message's
+                                // /message_text has an immediate parent .../conversation_row_text
+                                // (confirmed live via AccessibilityNodeInfo.parent — NOT the same as
+                                // what a static uiautomator dump shows as the nearest named ancestor,
+                                // .../conversation_text_row, one level further up); the deleted-
+                                // message placeholder's immediate parent has no resource-id at all.
+                                // Require the real container.
+                                val parent = n.parent
+                                val parentVid = parent?.viewIdResourceName ?: ""
+                                parent?.recycle()
+                                if (parentVid.endsWith("/conversation_row_text")) {
+                                    val b = Rect(); n.getBoundsInScreen(b)
+                                    collected.add(text to b)
+                                }
                             }
                             for (i in 0 until n.childCount) {
                                 val c = n.getChild(i) ?: continue
