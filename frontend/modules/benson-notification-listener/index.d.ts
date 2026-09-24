@@ -1,5 +1,11 @@
 export declare function isEnabled(): boolean;
 export declare function openNotificationListenerSettings(): void;
+/** ROUND_WA2_MESSAGE_READING_1 — JSON string of {sender, text, whenMs}[], oldest first, WhatsApp
+ *  only, group-summary notifications excluded. "SECURITY_EXCEPTION" if the listener isn't
+ *  actually connected right now (isEnabled() can be true while this is still momentarily
+ *  false — the OS binder connection lags the Settings toggle). On-demand only — never call this
+ *  except in direct response to an explicit user request to be read messages. */
+export declare function getWhatsAppNotifications(): string;
 
 /** ROUND_MEDIA_GOVERNANCE_1 — one entry per active OS media session. */
 export interface MediaSessionInfo {

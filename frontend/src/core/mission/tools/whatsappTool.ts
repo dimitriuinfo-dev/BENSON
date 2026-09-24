@@ -5,7 +5,7 @@
 // reimplementing matching — per instruction, extend what exists, don't parallel-build it.
 
 import * as Contacts from 'expo-contacts';
-import { endWhatsAppCall, muteWhatsAppCall, executeCommand, setWhatsAppAutomationActive, getForegroundPackage, runWhatsAppCallNative, runWhatsAppOpenConversationCall, runWhatsAppOpenConversationType, pressWhatsAppSendVerified, getWhatsAppWriteState } from 'benson-accessibility';
+import { endWhatsAppCall, muteWhatsAppCall, executeCommand, setWhatsAppAutomationActive, getForegroundPackage, runWhatsAppCallNative, runWhatsAppOpenConversationCall, runWhatsAppOpenConversationType, pressWhatsAppSendVerified, getWhatsAppWriteState, readWhatsAppConversation as readWhatsAppConversationNative } from 'benson-accessibility';
 import type { CommandStep, CommandResult, CommandMatch, BensonNode } from 'benson-accessibility';
 import { logAudioDiag } from 'benson-foreground-service';
 import { getLastScreenSnapshot, getScreenSnapshot } from '../../../../lib/screenBridge';
@@ -1123,6 +1123,66 @@ export async function confirmSendMessageDirect(missionId: string, message: strin
     devLog('pressWhatsAppSendVerified threw', e);
     return { outcome: 'opened_manual_action_required', error: mapWriteFailure('SEND_ON_YES', displayName) };
   }
+}
+
+// ── ROUND_WA2_MESSAGE_READING_1 — TASK 2: read the last N messages of a specific chat ─────────
+// Reuses WA1's exact contact resolution (resolveWaNumber, same as prepareMessageDirect) and the
+// exact same deep-link chat-open mechanism (whatsapp://send?phone=) — no new opening mechanism.
+//
+// Device-proven revision: the FIRST version of this function opened the chat, then polled for
+// the compose field from JS (waitForNode + getScreenSnapshot). That never completed on-device —
+// opening the chat backgrounds BENSON (WhatsApp takes the foreground), and BENSON's JS timers
+// stall while backgrounded, the same class of bug already fixed elsewhere in this app for
+// setTimeout-based retries. Reading is now ONE native call (readWhatsAppConversation, benson-
+// accessibility) that opens + verifies + reads the bubbles without ever handing control back to
+// JS mid-flow — mirroring exactly how prepareMessageDirect's native Phase A avoids the same trap.
+// Never types anything, never touches Send.
+export type ChatMessage = { sender: 'me' | 'them'; text: string };
+export type ReadChatResult =
+  | { ok: true; displayName: string; messages: ChatMessage[] }
+  | { ok: false; reason: string; result?: ToolCallResult };
+
+export async function readChatMessages(searchString: string, maxMessages = 10): Promise<ReadChatResult> {
+  const name = searchString.trim();
+  if (!name) return { ok: false, reason: 'no_name' };
+
+  const guard = await ensureAccessibilityReady();
+  if (!guard.ready) return { ok: false, reason: 'accessibility_disconnected' };
+
+  const resolved = await resolveWaNumber(name);
+  if (!resolved.ok) {
+    logAudioDiag('WA_CHAT_READ_FAIL', `stage=RESOLVE_CONTACT reason=${resolved.reason}`);
+    return resolved;
+  }
+  logAudioDiag('CONTACT_RESOLVE_SELECTED', `value=${JSON.stringify(resolved.displayName)} status=resolved method=WA2_READ`);
+
+  let raw: string;
+  try {
+    raw = await readWhatsAppConversationNative(resolved.phone, resolved.displayName, maxMessages);
+  } catch (e) {
+    devLog('readWhatsAppConversation threw', e);
+    return { ok: false, reason: 'native_exception',
+      result: { outcome: 'opened_manual_action_required', error: `Nu am reușit să citesc conversația cu „${resolved.displayName}”.` } };
+  }
+
+  let parsed: { ok: boolean; header?: string; messages?: ChatMessage[]; reason?: string };
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: 'parse_error' };
+  }
+
+  if (!parsed.ok) {
+    const reason = parsed.reason ?? 'unknown';
+    const friendly = reason === 'OPEN_CHAT'
+      ? `Nu am reușit să deschid conversația cu „${resolved.displayName}”.`
+      : reason === 'VERIFY_CHAT'
+        ? `Am deschis WhatsApp dar nu am putut confirma conversația cu „${resolved.displayName}”.`
+        : `Nu am reușit să citesc conversația cu „${resolved.displayName}” (${reason}).`;
+    return { ok: false, reason: reason.toLowerCase(), result: { outcome: 'opened_manual_action_required', error: friendly } };
+  }
+
+  return { ok: true, displayName: resolved.displayName, messages: parsed.messages ?? [] };
 }
 
 export async function placeCall(searchString: string, uiLang: string = DEFAULT_WHATSAPP_UI_LANG): Promise<ToolCallResult> {

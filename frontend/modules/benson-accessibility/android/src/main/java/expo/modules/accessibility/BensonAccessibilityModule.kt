@@ -223,6 +223,22 @@ class BensonAccessibilityModule : Module() {
       }
     }
 
+    // ── ROUND_WA2_MESSAGE_READING_1 ─────────────────────────────────────────────────────────────
+    // Opens the exact conversation (same deep link as above), verifies identity, reads the last
+    // `maxMessages` message bubbles — one native call, never types, never touches Send. Resolves a
+    // JSON string: {"ok":true,"header":"...","messages":[{"sender":"me"|"them","text":"..."}]} or
+    // {"ok":false,"reason":"..."}.
+    AsyncFunction("readWhatsAppConversation") { phone: String, expectedName: String, maxMessages: Int, promise: Promise ->
+      val svc = BensonAccessibilityService.instance
+      if (svc == null) {
+        promise.resolve("""{"ok":false,"reason":"SERVICE"}""")
+        return@AsyncFunction
+      }
+      svc.runOnServiceScope {
+        promise.resolve(svc.readWhatsAppConversation(phone, expectedName, maxMessages))
+      }
+    }
+
     // PHASE B: called ONLY after an explicit YES. Presses Send at most once for `missionId`, then
     // verifies the exact outgoing message appears in the conversation. Idempotent: a mission already
     // at SEND_ATTEMPTED/SENT_VERIFIED re-verifies, never re-presses.

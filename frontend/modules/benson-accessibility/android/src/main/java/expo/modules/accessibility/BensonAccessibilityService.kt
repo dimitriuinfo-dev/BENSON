@@ -2672,6 +2672,132 @@ class BensonAccessibilityService : AccessibilityService() {
         }
     }
 
+    // ── ROUND_WA2_MESSAGE_READING_1 — read-only chat history ─────────────────────────────────────
+    // Mirrors runWhatsAppOpenConversationType's OPEN_CHAT + VERIFY_CHAT steps exactly (same deep
+    // link, same wait/verify primitives) but NEVER types anything and NEVER touches Send.
+    // Device-proven reason this exists as ONE native call instead of "open natively, then poll
+    // from JS": a JS-side waitForNode loop issued right after the chat opens never progressed —
+    // WhatsApp takes the foreground, BENSON backgrounds, and its JS timers stall, the same class
+    // of bug already fixed elsewhere in this app for setTimeout-based retries while backgrounded.
+    // Reading the bubbles here, in the same native call that opens the chat, avoids that gap
+    // entirely. Returns a JSON string:
+    // {"ok":true,"header":"...","messages":[{"sender":"me"|"them","text":"..."}]} or
+    // {"ok":false,"reason":"..."}.
+    suspend fun readWhatsAppConversation(phoneRaw: String, expectedNameRaw: String, maxMessages: Int): String =
+        withContext(Dispatchers.Default) {
+            val phone = phoneRaw.filter { it.isDigit() }
+            val contact = expectedNameRaw.trim()
+            fun waLog(m: String) = Log.i("BENSON_AUDIO", m)
+            fun jsonFail(reason: String): String {
+                waLog("WA_CHAT_READ_FAIL stage=$reason")
+                return JSONObject().apply { put("ok", false); put("reason", reason) }.toString()
+            }
+
+            if (phone.length < 6) return@withContext jsonFail("RESOLVE_CONTACT")
+
+            whatsappAutomationActive = true
+            try {
+                val launched = try {
+                    val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("whatsapp://send?phone=$phone")).apply {
+                        setPackage(WA_PKG); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(i); true
+                } catch (e: Exception) {
+                    waLog("WA_CHAT_READ_EXC ${e.javaClass.simpleName}: ${e.message}"); false
+                }
+                if (!launched) return@withContext jsonFail("OPEN_CHAT")
+
+                val pkgOk = foregroundIsPackage(WA_PKG).first || awaitTargetReacquired(WA_PKG, 8000L)
+                if (!pkgOk) return@withContext jsonFail("OPEN_CHAT")
+                val entry0 = waitForNode(9000, 200, WA_PKG, "wa_read_entry") { (it.viewIdResourceName ?: "").endsWith("/entry") }
+                if (entry0 == null) return@withContext jsonFail("OPEN_CHAT")
+
+                // VERIFY_CHAT — identical logic to runWhatsAppOpenConversationType's own step.
+                var h = ""; var nameMatch = false; var digitsMatch = false
+                val vStart = System.currentTimeMillis()
+                run {
+                    val deadline = vStart + 6000
+                    while (System.currentTimeMillis() < deadline) {
+                        val cur = conversationTitleText()?.trim().orEmpty()
+                        if (cur.isNotBlank()) {
+                            h = cur
+                            nameMatch = contact.isNotEmpty() && (
+                                normPhon(h) == normPhon(contact) ||
+                                    wholeLabelPhoneticEquals(h, contact) ||
+                                    phoneticNameMatch(h, contact))
+                            val hd = h.filter { it.isDigit() }
+                            digitsMatch = hd.length >= 6 &&
+                                (phone.endsWith(hd.takeLast(9)) || hd.endsWith(phone.takeLast(9)))
+                            if (nameMatch || digitsMatch) break
+                        }
+                        delay(150)
+                    }
+                }
+                if (!nameMatch && !digitsMatch) {
+                    waLog("WA_CHAT_READ_FAIL stage=VERIFY_CHAT header=\"${h.take(40)}\"")
+                    return@withContext jsonFail("VERIFY_CHAT")
+                }
+                waLog("WA_CHAT_VERIFIED header=\"${h.take(40)}\" nameMatch=$nameMatch")
+
+                // Message bubbles — sent-by-me right-aligned, received left-aligned (the one
+                // WhatsApp-version-agnostic signal available from bounds alone). One tree walk,
+                // capped like every other walk here.
+                val root = rootInActiveWindow
+                val collected = mutableListOf<Pair<String, Rect>>()
+                if (root != null) {
+                    try {
+                        fun walk(n: AccessibilityNodeInfo, depth: Int) {
+                            if (collected.size >= 400 || depth >= MAX_DEPTH) return
+                            val vid = n.viewIdResourceName ?: ""
+                            val text = n.text?.toString()?.trim().orEmpty()
+                            if (text.isNotEmpty() && vid.endsWith("/message_text")) {
+                                val b = Rect(); n.getBoundsInScreen(b)
+                                collected.add(text to b)
+                            }
+                            for (i in 0 until n.childCount) {
+                                val c = n.getChild(i) ?: continue
+                                walk(c, depth + 1)
+                                c.recycle()
+                            }
+                        }
+                        walk(root, 0)
+                    } finally {
+                        root.recycle()
+                    }
+                }
+                // ROUND_WA2_MESSAGE_READING_1 — device-proven fix, found live with a real chat
+                // (K RO): the earlier generic "any text node" walk also captured toolbar chrome
+                // ("Unternehmenskonto" badge) and per-message metadata rows (date/time stamps
+                // "10:04", day dividers "Gestern"/"Heute") as pseudo-messages, confirmed via
+                // WA_CHAT_READ output showing them interleaved with real bubbles. WhatsApp's real
+                // message text always carries resource-id ".../message_text" — none of that chrome
+                // does — so restricting the walk to that id is the direct fix, not a blocklist of
+                // chrome types that would need updating every time a new one is found.
+                // Classification (left margin vs. right margin, smaller wins) was checked against a
+                // real screenshot of this same chat (2026-09-24) — all three visible bubbles, incl.
+                // a long paragraph, are genuinely "me" (right-aligned/green) and were labelled "me";
+                // left/right alignment logic is unchanged.
+                val maxRight = collected.maxOfOrNull { it.second.right } ?: 0
+                val tail = collected.takeLast(maxMessages.coerceAtLeast(1))
+                val arr = JSONArray()
+                for ((text, b) in tail) {
+                    val leftMargin = b.left
+                    val rightMargin = maxRight - b.right
+                    val isLeftAligned = leftMargin <= rightMargin
+                    arr.put(JSONObject().apply {
+                        put("sender", if (isLeftAligned) "them" else "me")
+                        put("text", text)
+                    })
+                }
+                waLog("WA_CHAT_READ contact=${JSONObject.quote(contact)} messageCount=${arr.length()} lastSender=${if (arr.length() > 0) (arr.get(arr.length() - 1) as JSONObject).getString("sender") else "-"}")
+                return@withContext JSONObject().apply { put("ok", true); put("header", h); put("messages", arr) }.toString()
+            } catch (e: Exception) {
+                return@withContext jsonFail("EXCEPTION_${e.javaClass.simpleName}")
+            } finally {
+                whatsappAutomationActive = false
+            }
+        }
+
     // ── ROUND_WA_GOVERNANCE_WRITE_1 — PHASE B ────────────────────────────────────────────────────
     // Called ONLY after an explicit YES. Presses Send at most once per missionId, then verifies
     // the exact outgoing message appears in the transcript. SEND_ATTEMPTED is persisted before the

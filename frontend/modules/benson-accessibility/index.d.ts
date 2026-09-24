@@ -80,6 +80,14 @@ export function runWhatsAppOpenConversationType(
 export function pressWhatsAppSendVerified(missionId: string, message: string): Promise<WhatsAppCallNativeResult>;
 /** "<missionId>|<state>" of the pending WhatsApp write, or "|NOT_TYPED". */
 export function getWhatsAppWriteState(): string;
+/** ROUND_WA2_MESSAGE_READING_1 — opens the exact conversation for `phone` (same deep link as
+ * runWhatsAppOpenConversationType), verifies identity, reads the last `maxMessages` message
+ * bubbles. Never types, never touches Send. JSON string:
+ * {"ok":true,"header":string,"messages":{sender:'me'|'them',text:string}[]} or
+ * {"ok":false,"reason":string}. */
+export function readWhatsAppConversation(
+  phone: string, expectedName: string, maxMessages: number,
+): Promise<string>;
 
 export function endWhatsAppCall(): Promise<WhatsAppCallResult>;
 export function muteWhatsAppCall(): Promise<WhatsAppCallResult>;

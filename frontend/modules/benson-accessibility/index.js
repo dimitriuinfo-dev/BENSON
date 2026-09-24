@@ -131,6 +131,14 @@ export function getWhatsAppWriteState() {
   try { return NativeModule.getWhatsAppWriteState() || '|NOT_TYPED'; } catch { return '|NOT_TYPED'; }
 }
 
+// ROUND_WA2_MESSAGE_READING_1 — opens the exact conversation for `phone` (same deep link as
+// runWhatsAppOpenConversationType), verifies identity, reads the last `maxMessages` message
+// bubbles. Never types, never touches Send. JSON string: {"ok":true,"header":...,"messages":[...]}
+// or {"ok":false,"reason":...}.
+export function readWhatsAppConversation(phone, expectedName, maxMessages) {
+  return NativeModule.readWhatsAppConversation(phone, expectedName, maxMessages);
+}
+
 // Ends / mutes an in-progress WhatsApp call — same native, non-JS-timer execution model as
 // placeWhatsAppCall. Assumes a call is currently active; reports honestly if no end/mute button
 // is found rather than assuming one was ended/muted.

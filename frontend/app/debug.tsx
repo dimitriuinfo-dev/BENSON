@@ -9,13 +9,15 @@ import { View, Text, ScrollView, TouchableOpacity, TextInput } from 'react-nativ
 import { useFocusEffect, useRouter } from 'expo-router';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
-  isAudioDiagnosticsEnabled, setAudioDiagnosticsEnabled, getRecoveryEventsLog,
+  isAudioDiagnosticsEnabled, setAudioDiagnosticsEnabled, getRecoveryEventsLog, logAudioDiag,
 } from 'benson-foreground-service';
 import { getLastActionLogs, type GovernanceLogEntry } from '../src/core/action-engine';
 import { runMission, resumePendingTask, getLastMissionPlan, getRecentEvents, type MissionPlan, type OrchestratorEvent } from '../src/core/orchestrator';
 import { getActiveMission, confirmActiveMission, cancelActiveMission, resolveActiveMissionFromUtterance, type Mission } from '../src/core/mission';
 import type { TrustedContact } from '../src/core/contacts';
 import { submitTypedText, isChatSubmitReady, onBensonReply } from '../lib/bensonChatBridge';
+import { getWhatsAppNotifications } from 'benson-notification-listener';
+import { readChatMessages } from '../src/core/mission/tools/whatsappTool';
 
 // Same stand-in contact BENSON's live voice pipeline uses (app/index.tsx's TEST_CONTACTS) until
 // real contact memory is wired in — duplicated here rather than exported from a screen component
@@ -210,10 +212,16 @@ function BensonChatBox() {
   }, []);
 
   function send() {
+    // ROUND_INPUT_ROUTING_1 (2026-09-23) — trace point 1: the RAW `text` state value at the exact
+    // moment of submit, BEFORE trim() and before it crosses the bridge, tagged with a requestId
+    // that also appears in MISSION_INPUT (app/index.tsx) — so a submitted-vs-received mismatch can
+    // be proven from logs instead of guessed at.
+    const requestId = `dbg-${Date.now()}`;
+    logAudioDiag('DEBUG_FIELD_AT_SUBMIT', `requestId=${requestId} raw=${JSON.stringify(text)} length=${text.length}`);
     const msg = text.trim();
     if (!msg) return;
     setTranscript((prev) => [...prev.slice(-9), `YOU: ${msg}`]);
-    const ok = submitTypedText(msg);
+    const ok = submitTypedText(msg, requestId);
     if (!ok) setTranscript((prev) => [...prev.slice(-9), '(chat pipeline not mounted yet — open the main screen first)']);
     setText('');
   }
@@ -236,6 +244,73 @@ function BensonChatBox() {
       {transcript.map((line, i) => (
         <Text key={i} style={{ color: line.startsWith('YOU:') ? '#fff' : '#8ec97a', marginTop: 2 }}>{line}</Text>
       ))}
+    </View>
+  );
+}
+
+// ROUND_WA2_MESSAGE_READING_1 (2026-09-23) — isolated test box for TASK 1/2's new functions.
+// "citește-mi mesajele" isn't wired to any voice/text command yet (app/index.tsx and
+// commandParser.ts, the only places that could wire it, are both outside WA2's scope lock — see
+// WA2_REPORT.md) — this calls the tool-layer functions DIRECTLY, so they can be verified in
+// isolation without that wiring existing. Diagnostic screen only, same discipline as the rest of
+// this file: no styling, no touch to any product design file. Full detail goes to logcat
+// (WA_NOTIFICATIONS_READ / WA_CHAT_READ, already emitted by the functions themselves) — this
+// on-screen text is only a short human-readable echo, never the source of truth for the report.
+function Wa2TestBox() {
+  const [contactName, setContactName] = useState('');
+  const [result, setResult] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function testNotifications() {
+    setBusy(true);
+    try {
+      const raw = getWhatsAppNotifications();
+      if (raw === 'SECURITY_EXCEPTION') { setResult('SECURITY_EXCEPTION — listener not connected'); return; }
+      const items = JSON.parse(raw) as { sender: string; text: string; whenMs: number }[];
+      setResult(items.length === 0 ? '(no active WhatsApp notifications)'
+        : items.map((m) => `${m.sender}: ${m.text}`).join('\n'));
+    } catch (e) {
+      setResult(`threw: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function testChatRead() {
+    const name = contactName.trim();
+    if (!name) { setResult('(type a contact name first)'); return; }
+    setBusy(true);
+    try {
+      const r = await readChatMessages(name, 10);
+      setResult(r.ok
+        ? `${r.displayName} (${r.messages.length} msgs):\n` + r.messages.map((m) => `[${m.sender}] ${m.text}`).join('\n')
+        : `FAILED reason=${r.reason}${r.result?.error ? ` error=${r.result.error}` : ''}`);
+    } catch (e) {
+      setResult(`threw: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={{ borderBottomWidth: 2, borderColor: '#e0a030', paddingVertical: 8, marginBottom: 8 }}>
+      <Text style={{ color: '#e0a030', fontSize: 16, marginBottom: 4 }}>WA2 — MESSAGE READING (isolated)</Text>
+      <TouchableOpacity onPress={testNotifications} disabled={busy} style={{ paddingVertical: 6, opacity: busy ? 0.4 : 1 }}
+        accessibilityLabel="Test WhatsApp notification reading" accessibilityRole="button">
+        <Text style={{ color: '#e0a030' }}>Read WhatsApp notifications</Text>
+      </TouchableOpacity>
+      <TextInput
+        value={contactName}
+        onChangeText={setContactName}
+        placeholder="contact name for chat read"
+        placeholderTextColor="#888"
+        style={{ color: '#fff', borderWidth: 1, borderColor: '#444', padding: 8, marginVertical: 6 }}
+      />
+      <TouchableOpacity onPress={testChatRead} disabled={busy} style={{ paddingVertical: 6, opacity: busy ? 0.4 : 1 }}
+        accessibilityLabel="Test WhatsApp chat reading" accessibilityRole="button">
+        <Text style={{ color: '#e0a030' }}>Read chat history</Text>
+      </TouchableOpacity>
+      <Text style={{ color: '#fff', marginTop: 6 }}>{busy ? 'working…' : (result || '—')}</Text>
     </View>
   );
 }
@@ -309,6 +384,7 @@ export default function DebugScreen() {
       <ScrollView>
         <AudioDiagnosticsPanel />
         <BensonChatBox />
+        <Wa2TestBox />
         <TestCommandBox onResult={refresh} />
         <GovernedMissionPanel mission={governedMission} />
         <MissionPanel plan={missionPlan} events={events} />

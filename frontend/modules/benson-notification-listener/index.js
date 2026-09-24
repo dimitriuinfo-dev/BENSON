@@ -16,6 +16,13 @@ export function openNotificationListenerSettings() {
   return NativeModule.openNotificationListenerSettings();
 }
 
+// ROUND_WA2_MESSAGE_READING_1 — on-demand pull of currently-active WhatsApp notifications (JSON
+// string of {sender, text, whenMs}[]) or "SECURITY_EXCEPTION". Call ONLY in direct response to an
+// explicit user request to be read messages — never from a background/notification-arrival path.
+export function getWhatsAppNotifications() {
+  return NativeModule.getWhatsAppNotifications();
+}
+
 // ROUND_MEDIA_GOVERNANCE_1 — Priority-1 media control via Android's own MediaSession framework.
 // JSON string of [{packageName, state, actions}], "SECURITY_EXCEPTION" if the notification
 // listener isn't actually enabled right now, or "[]".
