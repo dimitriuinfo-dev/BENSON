@@ -1,0 +1,50 @@
+diff --git a/node_modules/expo-speech/android/src/main/java/expo/modules/speech/SpeechModule.kt b/node_modules/expo-speech/android/src/main/java/expo/modules/speech/SpeechModule.kt
+index 33b9587..2277721 100644
+--- a/node_modules/expo-speech/android/src/main/java/expo/modules/speech/SpeechModule.kt
++++ b/node_modules/expo-speech/android/src/main/java/expo/modules/speech/SpeechModule.kt
+@@ -37,7 +37,16 @@ class SpeechModule : Module() {
+     }
+ 
+     OnActivityDestroys {
+-      textToSpeech.shutdown()
++      // BENSON fix (2026-09-23): the original code called `textToSpeech.shutdown()` here but never
++      // reset `_ttsReady`/`_textToSpeech` — every later speak()/stop()/getVoices() call still saw
++      // isTextToSpeechReady=true and reused the now-shutdown, unbound instance, failing silently at
++      // the native layer ("not bound to TTS engine") with no JS-visible error. Resetting both here
++      // makes the NEXT call correctly detect "not ready" and go through the exact same queued-
++      // until-onInit recreation path `getOrCreateTextToSpeech()` already uses for the cold-start
++      // case — no second recovery mechanism, just fixing this gap in the existing one.
++      _textToSpeech?.shutdown()
++      _textToSpeech = null
++      _ttsReady = false
+     }
+ 
+     AsyncFunction<Boolean>("isSpeaking") {
+@@ -136,7 +145,17 @@ class SpeechModule : Module() {
+   private val isTextToSpeechReady
+     get() = _ttsReady
+ 
+-  private val textToSpeech: TextToSpeech by lazy {
++  // BENSON fix (2026-09-23): was `by lazy` — computed ONCE per delegate and cached forever
++  // regardless of what `_textToSpeech`/`_ttsReady` were set to afterward, so nulling them on
++  // Activity destroy (above) had no effect: the lazy delegate kept handing back its original,
++  // now-shut-down instance. A plain getter that checks `_textToSpeech` itself (synchronized, same
++  // as the original onInit block already was) lets OnActivityDestroys' reset actually cause a
++  // fresh TextToSpeech() + onInit on the next call, reusing the SAME queued-utterance/queued-
++  // getVoices recovery the cold-start path already had — not a new mechanism.
++  private val textToSpeech: TextToSpeech
++    get() = synchronized(this) { _textToSpeech ?: createTextToSpeech() }
++
++  private fun createTextToSpeech(): TextToSpeech {
+     val newTtsInstance = TextToSpeech(appContext.reactContext) { status: Int ->
+       if (status == TextToSpeech.SUCCESS) {
+         // synchronize because in some cases this runs on another thread and _textToSpeech is null
+@@ -179,7 +198,7 @@ class SpeechModule : Module() {
+       }
+     }
+     _textToSpeech = newTtsInstance
+-    newTtsInstance
++    return newTtsInstance
+   }
+ 
+   // Helpers

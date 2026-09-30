@@ -29,9 +29,20 @@ if (useManagedAndroidSdkVersions) {
 
 android {
   namespace "expo.modules.foregroundservice"
+  buildFeatures { buildConfig true }
   defaultConfig {
     versionCode 1
     versionName "1.0.0"
+    buildConfigField "String", "WAKE_MODEL_PROFILE", "\"${project.findProperty('wakeWordProfile') ?: 'benson'}\""
+    externalNativeBuild {
+      cmake { cppFlags "-std=c++17" }
+    }
+  }
+  externalNativeBuild {
+    cmake {
+      path file("src/main/cpp/CMakeLists.txt")
+      version "3.22.1"
+    }
   }
   lintOptions {
     abortOnError false
@@ -61,6 +72,10 @@ dependencies {
   // core runtime only, no select-TF-ops. Apache-2.0. Runs on a plain Context inside the
   // foreground service (no RN bridge) — the whole point: wake detection survives JS suspension.
   implementation "org.tensorflow:tensorflow-lite:2.16.1"
+
+  // Heed local custom-word detector. CPU inference in the foreground service; no JS-bridge mic
+  // loop. Keep in sync with the pinned ONNX Runtime Java API and app R8 keep rule.
+  implementation "com.microsoft.onnxruntime:onnxruntime-android:1.24.3@aar"
 
   // ROUND_WAKE_NATIVE_GENERIC_1 — NOT a new library: OkHttp 4.9.2 is already resolved on this
   // module's own release dependency graph transitively via React Native's networking stack

@@ -88,14 +88,12 @@ function openResultFromMatch(
 ): Promise<ActionResult> | ActionResult {
   if (m.kind === 'exact') return launch(m.app.appName, m.app.packageName);
   if (m.kind === 'single') {
-    // ROUND_EXECUTION_PIPELINE_DIAG_1 — a real, on-device-confirmed stop point: a 'single' (not
-    // 'exact') match never reaches LAUNCH_REQUEST at all this turn — it stops here and waits for
-    // a yes/no reply. See missionOrchestrator.ts's matchDisambiguationPick() for whether that
-    // reply is actually recognized (traced separately — this file only knows it asked).
-    logAudioDiag('EXEC_TRACE_FAILURE', `stage=APP_RESOLUTION package=${JSON.stringify(m.app.packageName)} reason=SINGLE_MATCH_NEEDS_CONFIRMATION query=${JSON.stringify(query)}`);
-    return needsDisambiguationResult(requestId, `Am găsit ${m.app.appName}. O deschid?`, {
-      candidates: toCandidates([m.app]),
-    });
+    // A unique installed-app candidate is a resolvable target. Opening an app has no external
+    // side effect, so asking for confirmation here only stalls ordinary commands (for example
+    // Romanian "calculatorul" -> the sole installed Calculator, labelled "Rechner"). Reserve
+    // clarification for genuinely multiple candidates and for governed external actions.
+    logAudioDiag('APP_RESOLUTION', `query=${JSON.stringify(query)} package=${JSON.stringify(m.app.packageName)} decision=launch_unique_candidate`);
+    return launch(m.app.appName, m.app.packageName);
   }
   if (m.kind === 'multiple') {
     return needsDisambiguationResult(

@@ -8,12 +8,12 @@
 // silently died until the 5s WakeHandoffWatchdog forced a lesser Headless recovery. Two module-
 // scope functions instead of an event emitter: exactly one live handler can ever be registered at
 // a time (the mounted screen), so there is no ambiguity about who owns it.
-let liveHandler: ((commandTail: string) => void) | null = null;
+let liveHandler: ((commandTail: string, audioFilePath?: string | null) => void) | null = null;
 
-export function setLiveWakeHandler(fn: ((commandTail: string) => void) | null): void {
+export function setLiveWakeHandler(fn: ((commandTail: string, audioFilePath?: string | null) => void) | null): void {
   liveHandler = fn;
 }
 
-export function getLiveWakeHandler(): ((commandTail: string) => void) | null {
+export function getLiveWakeHandler(): ((commandTail: string, audioFilePath?: string | null) => void) | null {
   return liveHandler;
 }

@@ -68,12 +68,27 @@ async function buildIdentityContext(input: BrainRouteInput): Promise<SystemPromp
   };
 }
 
-// null = no brain configured (caller keeps the existing claude/openai/gemini routeCommand path),
-// or the brain call itself failed (caller falls back the same way). A configured-but-unhelpful
-// brain still returns a BrainOutput (usually kind:'speak').
-export async function routeThroughBrain(input: BrainRouteInput): Promise<BrainOutput | null> {
+// ROUND_INPUT_ROUTING_1 (2026-09-23, product-owner-directed) — this used to return bare `null` on
+// EITHER "no brain configured" or "the brain call itself failed", and the caller (app/index.tsx)
+// treated null as "fall through to the legacy claude/openai/gemini routeCommand() path". Device-
+// proven bug: an OpenAI timeout fell all the way through to that legacy path, which silently
+// called Anthropic (api.anthropic.com, HTTP 400) — a hidden second provider, directly violating
+// the standing "OpenAI is the only active Brain provider, no automatic fallback" decision. OpenAI
+// is now the ONLY brain BENSON has; a failure of it is not a signal to try a different provider,
+// it's the answer. Both failure cases now return a real BrainOutput (kind:'speak', the honest
+// reason) instead of null, so the caller's existing 'speak' handling — display + TTS + normal
+// re-listen, already returns immediately — is what runs, and routeCommand()'s legacy fallback
+// chain is never reached for either case. null is no longer a possible return value.
+export async function routeThroughBrain(input: BrainRouteInput): Promise<BrainOutput> {
   const brain = await resolveLlmBrain(input.lang).catch(() => null);
-  if (!brain) return null;
+  if (!brain) {
+    return {
+      kind: 'speak',
+      text: input.lang.toLowerCase().startsWith('ro')
+        ? 'Nu am o cheie OpenAI configurată — adaug-o în Setări ca să te pot înțelege.'
+        : "I don't have an OpenAI key configured — add one in Settings so I can understand you.",
+    };
+  }
 
   const identityCtx = await buildIdentityContext(input);
   logAudioDiag(
@@ -104,8 +119,12 @@ export async function routeThroughBrain(input: BrainRouteInput): Promise<BrainOu
   try {
     return await brain.chat(turns);
   } catch (e) {
-    logAudioDiag('BRAIN_INTENT', `raw="${input.utterance.slice(0, 120)}" error="${String(e)}"`);
-    return null;
+    const message = e instanceof Error ? e.message : String(e);
+    logAudioDiag('BRAIN_INTENT', `raw="${input.utterance.slice(0, 120)}" error="${message}"`);
+    // `message` is already the honest, user-facing Romanian/English reason chatOpenAiCompatible's
+    // errorMessage() built (network / 401 / 404 / 429 / generic HTTP) — reused as-is, not a second
+    // generic line, so the user hears the real cause instead of "couldn't understand that".
+    return { kind: 'speak', text: message };
   }
 }
 
@@ -162,7 +181,18 @@ export function buildCanonicalCommand(
   switch (action) {
     case 'call_contact': {
       const who = p('contact', 'contactName', 'name', 'person');
-      return who ? `sună pe ${who} pe WhatsApp` : '';
+      if (!who) return '';
+      // BENSON CONTACT+CALL round (2026-09-23) — channel now threaded through from resolution
+      // (app/index.tsx's detectChannelCue / stored contact preference) instead of always forcing
+      // WhatsApp. Plain "sună pe X" re-parses through commandParser.ts's CALL_CONTACT_PATTERNS ->
+      // real telephony (phoneCallExecutor); "pe WhatsApp" keeps the existing, proven WhatsApp-call
+      // governance unchanged. Absent channel = unchanged default behavior (WhatsApp), so a call
+      // classified before this round's channel detection existed behaves exactly as before.
+      return params.channel === 'phone' ? `sună pe ${who}` : `sună pe ${who} pe WhatsApp`;
+    }
+    case 'read_whatsapp_messages': {
+      const who = p('contact', 'contactName', 'name', 'person');
+      return who ? `citește-mi mesajele de la ${who} pe WhatsApp` : 'citește-mi mesajele pe WhatsApp';
     }
     case 'send_whatsapp_message': {
       const who = p('contact', 'contactName', 'name', 'person');

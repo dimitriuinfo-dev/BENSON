@@ -3,7 +3,7 @@
 // BensonApp component in app/index.tsx) instead of a second, lower-level entry point. Per the
 // standing "user owns all visual/UI design" boundary, this file touches no component, no style —
 // it is only a call-through + a reply subscription, wired up from inside app/index.tsx itself.
-type SubmitFn = (text: string) => void;
+type SubmitFn = (text: string, requestId?: string) => void;
 type ReplyListener = (text: string) => void;
 
 let submitFn: SubmitFn | null = null;
@@ -14,12 +14,15 @@ export function setChatSubmit(fn: SubmitFn | null): void {
   submitFn = fn;
 }
 
-// Returns false if BENSON's conversation pipeline isn't mounted/ready yet — callers should treat
-// that as "not available", not silently swallow the text.
-export function submitTypedText(text: string): boolean {
+// ROUND_INPUT_ROUTING_1 (2026-09-23) — requestId is optional and purely a trace correlator: the
+// caller (app/debug.tsx) logs the raw field value under this id BEFORE this function's own
+// trim(), and handleIncomingText logs the same id at MISSION_INPUT — so the exact same submission
+// can be compared field-value-at-submit vs. what reached mission parsing, instead of guessing
+// where a discrepancy was introduced. Never required; omitting it changes no behavior.
+export function submitTypedText(text: string, requestId?: string): boolean {
   const t = text.trim();
   if (!t || !submitFn) return false;
-  submitFn(t);
+  submitFn(t, requestId);
   return true;
 }
 

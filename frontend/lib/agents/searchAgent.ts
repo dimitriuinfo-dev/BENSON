@@ -1,6 +1,6 @@
 import type { AnthropicMsg, Character, FamilyMember } from './types';
 import type { ContentCard } from './contentTypes';
-import { askClaude } from './claudeAgent';
+import { askOpenAI } from './openaiAgent';
 import { fetchWithTimeout } from './fetchWithTimeout';
 
 // BUG_INVESTIGATION_1 (2026-09-20, device-proven) — same "no timeout on a cloud fetch" defect
@@ -39,8 +39,10 @@ export async function tavilySearch(query: string, tavilyKey: string, isNews: boo
   return { results: searchData.results || [], images: searchData.images || [] };
 }
 
-// Search Agent — fetches live results from Tavily, then hands them to the Claude Agent to
-// synthesize a spoken reply. News queries also get a structured card of articles.
+// Search Agent — fetches live results from Tavily, then hands them to the Brain to synthesize a
+// spoken reply. News queries also get a structured card of articles. ROUND_INPUT_ROUTING_1
+// (2026-09-23) — was Claude/Anthropic (askClaude); switched to OpenAI, same as every other
+// synthesis path in the app, per the OpenAI-exclusive-Brain decision.
 export async function runSearchAgent(params: {
   text: string;
   query: string;
@@ -70,7 +72,7 @@ export async function runSearchAgent(params: {
     },
   ];
 
-  const reply = await askClaude({
+  const reply = await askOpenAI({
     apiKey:    params.apiKey,
     character: params.character,
     address:   params.address,

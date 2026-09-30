@@ -16,11 +16,22 @@ export interface ResolvedPerson {
   verifiedDisplayName: string;
   resolutionSource: 'recent_verified' | 'verified_alias' | 'learned_relation' | 'exact_contact' | 'fuzzy_contact';
   confidence: number;
+  // BENSON CONTACT+CALL round (2026-09-23) — looked up from localContacts by stableContactId when
+  // available (VerifiedIdentity itself doesn't store a photo); undefined when there's no local
+  // contact link or the OS has no photo for it.
+  imageUri?: string;
 }
 
 export interface ResolutionCandidate {
   verifiedDisplayName: string;
   source: string;
+  // BENSON CONTACT+CALL round (2026-09-23) — added so a pending "Te referi la X?" can show a real
+  // number/photo, not just a name, and so a chosen candidate carries its opaque contact id through
+  // (never invented — undefined when the candidate came from a VerifiedIdentity with no local
+  // contact link, e.g. 'verified_alias'/'learned_relation' sources).
+  contactId?: string;
+  phoneNumber?: string;
+  imageUri?: string;
 }
 
 export interface ResolutionResult {
@@ -35,13 +46,17 @@ export interface ResolveContext {
   localContacts: TrustedContact[];
 }
 
-function toResolved(v: VerifiedIdentity, source: ResolvedPerson['resolutionSource'], confidence: number): ResolvedPerson {
+function toResolved(
+  v: VerifiedIdentity, source: ResolvedPerson['resolutionSource'], confidence: number, localContacts: TrustedContact[] = [],
+): ResolvedPerson {
+  const linked = v.stableContactId ? localContacts.find((c) => c.id === v.stableContactId) : undefined;
   return {
     stableContactId: v.stableContactId,
     normalizedPhoneNumber: v.normalizedPhoneNumber,
     verifiedDisplayName: v.verifiedDisplayName,
     resolutionSource: source,
     confidence,
+    imageUri: linked?.imageUri,
   };
 }
 
@@ -91,7 +106,7 @@ export function resolvePerson(ctx: ResolveContext): ResolutionResult {
   // recently used verified identity applies. Never falls back to guessing a local contact.
   if (personRef.referenceType === 'RECENT_PERSON' || personRef.referenceType === 'PRONOUN') {
     const mostRecent = [...verifiedIdentities].sort((a, b) => b.lastUsedAt - a.lastUsedAt)[0];
-    if (mostRecent) return { status: 'RESOLVED', resolved: toResolved(mostRecent, 'recent_verified', 0.9) };
+    if (mostRecent) return { status: 'RESOLVED', resolved: toResolved(mostRecent, 'recent_verified', 0.9, localContacts) };
     return { status: 'UNRESOLVED' };
   }
 
@@ -104,11 +119,11 @@ export function resolvePerson(ctx: ResolveContext): ResolutionResult {
     if (relMatches.length === 1) {
       const verified = verifiedIdentities.find((v) =>
         v.stableContactId === relMatches[0].id || v.verifiedDisplayName === relMatches[0].displayName);
-      if (verified) return { status: 'RESOLVED', resolved: toResolved(verified, 'learned_relation', 0.85) };
-      return { status: 'NEEDS_CONFIRMATION', candidates: [{ verifiedDisplayName: relMatches[0].displayName, source: 'relation_unverified' }] };
+      if (verified) return { status: 'RESOLVED', resolved: toResolved(verified, 'learned_relation', 0.85, localContacts) };
+      return { status: 'NEEDS_CONFIRMATION', candidates: [{ verifiedDisplayName: relMatches[0].displayName, source: 'relation_unverified', contactId: relMatches[0].id, phoneNumber: relMatches[0].phoneNumbers?.[0], imageUri: relMatches[0].imageUri }] };
     }
     if (relMatches.length > 1) {
-      return { status: 'NEEDS_CONFIRMATION', candidates: relMatches.slice(0, 3).map((c) => ({ verifiedDisplayName: c.displayName, source: 'relation' })) };
+      return { status: 'NEEDS_CONFIRMATION', candidates: relMatches.slice(0, 3).map((c) => ({ verifiedDisplayName: c.displayName, source: 'relation', contactId: c.id, phoneNumber: c.phoneNumbers?.[0], imageUri: c.imageUri })) };
     }
     return { status: 'UNRESOLVED' };
   }
@@ -123,9 +138,9 @@ export function resolvePerson(ctx: ResolveContext): ResolutionResult {
   // alias) — that is a real ambiguity, never silently resolved to "whichever came first".
   const exactAlias = verifiedIdentities.filter((v) =>
     normalizeName(v.verifiedDisplayName) === normSurface || v.observedAliases.some((a) => normalizeName(a) === normSurface));
-  if (exactAlias.length === 1) return { status: 'RESOLVED', resolved: toResolved(exactAlias[0], 'verified_alias', 0.95) };
+  if (exactAlias.length === 1) return { status: 'RESOLVED', resolved: toResolved(exactAlias[0], 'verified_alias', 0.95, localContacts) };
   if (exactAlias.length > 1) {
-    return { status: 'NEEDS_CONFIRMATION', candidates: exactAlias.slice(0, 3).map((v) => ({ verifiedDisplayName: v.verifiedDisplayName, source: 'verified_alias' })) };
+    return { status: 'NEEDS_CONFIRMATION', candidates: exactAlias.slice(0, 3).map((v) => ({ verifiedDisplayName: v.verifiedDisplayName, source: 'verified_alias', contactId: v.stableContactId, phoneNumber: v.normalizedPhoneNumber })) };
   }
 
   // 3b. verified alias — phonetic ("Hana"/"Luhana" -> "Hannah"). Unique match resolves; more than
@@ -133,23 +148,23 @@ export function resolvePerson(ctx: ResolveContext): ResolutionResult {
   const fuzzyAlias = verifiedIdentities.filter((v) =>
     phoneticallyClose(normSurface, normalizeName(v.verifiedDisplayName)) ||
     v.observedAliases.some((a) => phoneticallyClose(normSurface, normalizeName(a))));
-  if (fuzzyAlias.length === 1) return { status: 'RESOLVED', resolved: toResolved(fuzzyAlias[0], 'verified_alias', 0.8) };
+  if (fuzzyAlias.length === 1) return { status: 'RESOLVED', resolved: toResolved(fuzzyAlias[0], 'verified_alias', 0.8, localContacts) };
   if (fuzzyAlias.length > 1) {
-    return { status: 'NEEDS_CONFIRMATION', candidates: fuzzyAlias.slice(0, 3).map((v) => ({ verifiedDisplayName: v.verifiedDisplayName, source: 'verified_alias' })) };
+    return { status: 'NEEDS_CONFIRMATION', candidates: fuzzyAlias.slice(0, 3).map((v) => ({ verifiedDisplayName: v.verifiedDisplayName, source: 'verified_alias', contactId: v.stableContactId, phoneNumber: v.normalizedPhoneNumber })) };
   }
 
   // 4. exact local contact match — known, but never verified on-screen by BENSON itself yet.
   const exactContacts = searchContacts(surface, localContacts, 5).filter((c) => normalizeName(c.displayName) === normSurface);
-  if (exactContacts.length === 1) return { status: 'NEEDS_CONFIRMATION', candidates: [{ verifiedDisplayName: exactContacts[0].displayName, source: 'exact_contact' }] };
+  if (exactContacts.length === 1) return { status: 'NEEDS_CONFIRMATION', candidates: [{ verifiedDisplayName: exactContacts[0].displayName, source: 'exact_contact', contactId: exactContacts[0].id, phoneNumber: exactContacts[0].phoneNumbers?.[0], imageUri: exactContacts[0].imageUri }] };
   if (exactContacts.length > 1) {
-    return { status: 'NEEDS_CONFIRMATION', candidates: exactContacts.slice(0, 3).map((c) => ({ verifiedDisplayName: c.displayName, source: 'exact_contact' })) };
+    return { status: 'NEEDS_CONFIRMATION', candidates: exactContacts.slice(0, 3).map((c) => ({ verifiedDisplayName: c.displayName, source: 'exact_contact', contactId: c.id, phoneNumber: c.phoneNumbers?.[0], imageUri: c.imageUri })) };
   }
 
   // 5. phonetic/fuzzy local candidates — always a confirmation, never an execution (the round's
   // own rule: "nu selectează niciodată arbitrar alt contact").
   const fuzzyContacts = searchContacts(surface, localContacts, 5);
   if (fuzzyContacts.length > 0) {
-    return { status: 'NEEDS_CONFIRMATION', candidates: fuzzyContacts.slice(0, 3).map((c) => ({ verifiedDisplayName: c.displayName, source: 'fuzzy_contact' })) };
+    return { status: 'NEEDS_CONFIRMATION', candidates: fuzzyContacts.slice(0, 3).map((c) => ({ verifiedDisplayName: c.displayName, source: 'fuzzy_contact', contactId: c.id, phoneNumber: c.phoneNumbers?.[0], imageUri: c.imageUri })) };
   }
 
   // 6. stop safely — no invented contact.

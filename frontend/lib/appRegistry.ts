@@ -49,5 +49,5 @@ export const APP_REGISTRY: AppEntry[] = [
   { id: 'chrome',     name: 'Chrome',        category: 'utility', scheme: 'googlechrome://', packageName: 'com.android.chrome', fallbackUrl: 'https://www.google.com/' },
   { id: 'settings',   name: 'Settings',      category: 'utility', packageName: 'com.android.settings', fallbackUrl: '' },
   { id: 'calculator', name: 'Calculator',    category: 'utility', packageName: 'com.google.android.calculator', fallbackUrl: '' },
-  { id: 'camera',     name: 'Camera',        category: 'utility', packageName: 'com.android.camera2', fallbackUrl: '' },
+  { id: 'camera',     name: 'Camera',        category: 'utility', packageName: 'com.oplus.camera', fallbackUrl: '' },
 ];

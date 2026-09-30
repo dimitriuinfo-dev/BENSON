@@ -172,6 +172,19 @@ async function transcribeAudio(filePath: string, lang: string, captureEndAt?: nu
   return transcribeLocally(filePath, lang, captureEndAt);
 }
 
+/** Reuses the configured command-capture STT path for PCM buffered by the native wake engine. */
+export async function transcribeCapturedWakeAudio(filePath: string, lang: string): Promise<string> {
+  logAudioDiag('WAKE_AUDIO_STT_START', `path=${filePath.split(/[\\/]/).pop() ?? 'capture'}`);
+  try {
+    const transcript = await transcribeAudio(filePath, lang, Date.now());
+    logAudioDiag('WAKE_AUDIO_STT_RESULT', `chars=${transcript.trim().length}`);
+    return transcript.trim();
+  } catch (error) {
+    logAudioDiag('WAKE_AUDIO_STT_ERROR', `error=${JSON.stringify(String(error))}`);
+    return '';
+  }
+}
+
 export type { Voice } from 'expo-speech';
 export type SttEngine = 'cloud' | 'ondevice' | 'local';
 
@@ -490,7 +503,33 @@ export function addSpeechEndListener(cb: () => void) {
 }
 
 export function speakNow(text: string, options: Speech.SpeechOptions) {
-  Speech.speak(text, options);
+  // Keep the app-level TTS state separate from proof that Android's speech engine actually
+  // accepted and completed the utterance. Log lifecycle only; never write message text to logs.
+  logAudioDiag('TTS_NATIVE_REQUEST', `chars=${text.length} language=${options.language ?? 'default'}`);
+  try {
+    Speech.speak(text, {
+      ...options,
+      onStart: () => {
+        logAudioDiag('TTS_NATIVE_START', `chars=${text.length}`);
+        options.onStart?.();
+      },
+      onDone: () => {
+        logAudioDiag('TTS_NATIVE_DONE', `chars=${text.length}`);
+        options.onDone?.();
+      },
+      onStopped: () => {
+        logAudioDiag('TTS_NATIVE_STOPPED', `chars=${text.length}`);
+        options.onStopped?.();
+      },
+      onError: (error) => {
+        logAudioDiag('TTS_NATIVE_ERROR', `name=${error.name} message=${JSON.stringify(error.message)}`);
+        options.onError?.(error);
+      },
+    });
+  } catch (error) {
+    logAudioDiag('TTS_NATIVE_THROW', `error=${JSON.stringify(String(error))}`);
+    throw error;
+  }
 }
 
 export function stopSpeaking() {
@@ -499,4 +538,63 @@ export function stopSpeaking() {
 
 export function getAvailableVoices() {
   return Speech.getAvailableVoicesAsync();
+}
+
+// ── ROUND_WA2_MESSAGE_READING_1 — TASK 3: voice formatting for read-aloud WhatsApp content ─────
+// Pure formatting + session-scoped dedup only — fetching the actual content (notifications, chat
+// history) lives in src/core/mission/tools/whatsappTool.ts (TASK 1/2), not here. Keeps this
+// module's existing job ("the reading/speaking points") without importing the tool layer into it.
+//
+// Content read aloud is DATA, never an instruction — the caller must route it to TTS as plain
+// text exactly like any other spoken reply; it must never be handed to the Brain/system-prompt
+// construction without the existing UNTRUSTED_DATA header (messageChannels.ts) if it ever reaches
+// there. Nothing here executes anything found inside a message's text.
+export type WaReadItem = { sender: string; text: string };
+
+// Session-scoped (module-level, cleared only by app restart — matches the round's "aceeași
+// sesiune" wording). Key = sender+text, not sender+text+timestamp, so re-reading an unchanged
+// notification/message is recognized as a repeat even if its `whenMs` shifts slightly between
+// two on-demand reads of the same still-unread notification.
+const readAloudHistory = new Set<string>();
+function dedupKey(sender: string, text: string): string {
+  return `${sender.trim().toLowerCase()}|${text.trim().toLowerCase()}`;
+}
+
+// TASK 3, source 1 — "ai un mesaj nou de la X: ...". `force` = true only for an explicit repeat
+// request ("mai citește o dată") — bypasses dedup for exactly this call, still records it after.
+export function formatNotificationReadout(items: WaReadItem[], force = false, readAll = false): { text: string; spokenCount: number } {
+  const fresh = force ? items : items.filter((m) => !readAloudHistory.has(dedupKey(m.sender, m.text)));
+  if (fresh.length === 0) {
+    return items.length === 0
+      ? { text: 'Nu văd notificări WhatsApp active. Pot citi conversația unui contact dacă îmi spui numele.', spokenCount: 0 }
+      : { text: 'Nu ai mesaje noi — le-am citit deja.', spokenCount: 0 };
+  }
+
+  // Long list — summarize + ask, per the round's explicit rule, instead of reading everything.
+  const SUMMARIZE_THRESHOLD = 4;
+  if (!readAll && fresh.length > SUMMARIZE_THRESHOLD) {
+    const bySender = new Map<string, number>();
+    for (const m of fresh) bySender.set(m.sender, (bySender.get(m.sender) ?? 0) + 1);
+    const senderList = [...bySender.entries()].map(([s, n]) => `${n} de la ${s}`).join(', ');
+    return {
+      text: `Ai ${fresh.length} mesaje noi pe WhatsApp: ${senderList}. Vrei să ți le citesc pe toate, sau doar ultimul?`,
+      spokenCount: 0,
+    };
+  }
+  for (const m of fresh) readAloudHistory.add(dedupKey(m.sender, m.text));
+  if (fresh.length === 1) {
+    return { text: `Ai un mesaj nou de la ${fresh[0].sender}: ${fresh[0].text}`, spokenCount: 1 };
+  }
+  const lines = fresh.map((m) => `de la ${m.sender}: ${m.text}`).join('. ');
+  return { text: `Ai ${fresh.length} mesaje noi — ${lines}.`, spokenCount: fresh.length };
+}
+
+// TASK 3, source 2 — "ultimele mesaje cu Hannah: ea a spus ..., tu ai spus ...". Chronological
+// (caller already provides oldest-first). Chat-history reads are NOT deduped against
+// readAloudHistory (re-opening "ce mi-a scris X" naturally re-reads the same recent messages —
+// only unread-NOTIFICATION dedup has a "same content, don't repeat" expectation).
+export function formatChatHistoryReadout(displayName: string, messages: { sender: 'me' | 'them'; text: string }[]): string {
+  if (messages.length === 0) return `Nu am găsit mesaje recente în conversația cu ${displayName}.`;
+  const lines = messages.map((m) => `${m.sender === 'me' ? 'tu ai spus' : displayName + ' a scris'}: ${m.text}`).join(', ');
+  return `Mesajele text vizibile cu ${displayName}: ${lines}.`;
 }

@@ -4,7 +4,7 @@
 // (unchanged) and additionally registers the headless wake-command task next to it.
 import 'expo-router/entry';
 import './lib/headless/wakeCommandTask';
-import { addWakeWordDetectedListener, takePendingWakeCommand, logAudioDiag } from 'benson-foreground-service';
+import { addWakeWordDetectedListener, takePendingWakeCommand, takePendingWakeAudioFile, logAudioDiag } from 'benson-foreground-service';
 import { getLiveWakeHandler } from './lib/headless/liveWakeHandler';
 import { runMission } from './src/core/orchestrator/missionOrchestrator';
 
@@ -19,11 +19,25 @@ import { runMission } from './src/core/orchestrator/missionOrchestrator';
 // in app/index.tsx's useEffect, torn down whenever the Activity/screen unmounts. This one survives
 // as long as the JS engine does, cutting wake-to-dispatch latency from the previous ~5s
 // (WakeHandoffWatchdog + Headless recovery) down to near-instant for both outcomes below.
-addWakeWordDetectedListener((commandTail) => {
+addWakeWordDetectedListener((commandTail, audioFilePath) => {
   logAudioDiag('WAKE_EVENT_RECEIVED_IN_JS', `commandTail="${commandTail}" source=native_persistent`);
-  try { takePendingWakeCommand(); } catch {}
+  try { takePendingWakeCommand(); takePendingWakeAudioFile(); } catch {}
   const live = getLiveWakeHandler();
-  if (live) { live(commandTail); return; }
+  if (live) { live(commandTail, audioFilePath); return; }
+  if (audioFilePath) {
+    import('./lib/agents/voiceAgent').then(({ transcribeCapturedWakeAudio }) =>
+      transcribeCapturedWakeAudio(audioFilePath, 'ro-RO').then((transcript) => {
+        const command = transcript.replace(/^\s*(?:hey\s+jarvis|benson)[\s,.:;!?-]*/i, '').trim();
+        if (!command) {
+          logAudioDiag('WAKE_AUDIO_NO_COMMAND', 'source=persistent_fallback');
+          return;
+        }
+        logAudioDiag('WAKE_AUDIO_DISPATCH', `chars=${command.length} source=persistent_fallback`);
+        return runMission(command, { source: 'voice' });
+      })
+    ).catch((e) => logAudioDiag('WAKE_AUDIO_ERROR', `error=${String(e)} source=persistent_fallback`));
+    return;
+  }
   // Screen not currently mounted — same one-shot executor the Headless recovery path already
   // used, now reached without waiting for the 5s watchdog. Known, honestly-reported limitation:
   // a bare "Benson" (empty commandTail) still can't open a live follow-up listening turn from

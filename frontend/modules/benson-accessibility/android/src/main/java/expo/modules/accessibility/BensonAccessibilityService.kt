@@ -2090,9 +2090,10 @@ class BensonAccessibilityService : AccessibilityService() {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
         })
 
-    suspend fun runWhatsAppCallNative(contactRaw: String): WhatsAppCallNativeResult =
+    suspend fun runWhatsAppCallNative(contactRaw: String, callMode: String = "voice_call"): WhatsAppCallNativeResult =
         withContext(Dispatchers.Default) {
             val contact = contactRaw.trim()
+            val wantsVideo = callMode == "video_call"
             val t0 = System.currentTimeMillis()
             fun ms() = System.currentTimeMillis() - t0
             fun waLog(m: String) = Log.i("BENSON_AUDIO", m)
@@ -2105,8 +2106,8 @@ class BensonAccessibilityService : AccessibilityService() {
                 return WhatsAppCallNativeResult(false, step, reason, contact, ms())
             }
 
-            waLog("WA_NATIVE_START contact=\"$contact\"")
-            waLog("WA_CALL_STATE state=CALL_STARTING contact=\"$contact\"")
+            waLog("WA_NATIVE_START mode=${if (wantsVideo) "video" else "voice"} contact=\"$contact\"")
+            waLog("WA_CALL_STATE state=CALL_STARTING mode=${if (wantsVideo) "video" else "voice"} contact=\"$contact\"")
             if (contact.isEmpty()) return@withContext fail("VALIDATE", "empty contact")
 
             whatsappAutomationActive = true
@@ -2247,20 +2248,22 @@ class BensonAccessibilityService : AccessibilityService() {
                 val maxTop = headerRegionMaxTop()
                 val callNode = waitForNode(3000, 150, WA_PKG, "wa_native_call_id") { n ->
                     val vid = n.viewIdResourceName ?: ""
-                    (vid.endsWith("/menuitem_call") || vid.endsWith("/voip_call")) && !vid.contains("video")
+                    if (wantsVideo) (vid.endsWith("/menuitem_video_call") || vid.endsWith("/voip_video_call"))
+                    else (vid.endsWith("/menuitem_call") || vid.endsWith("/voip_call")) && !vid.contains("video")
                 } ?: waitForNode(1800, 150, WA_PKG, "wa_native_call_desc") { n ->
                     val b = Rect(); n.getBoundsInScreen(b)
                     val d = n.contentDescription?.toString()?.lowercase() ?: ""
-                    n.isClickable && b.top <= maxTop && d.isNotEmpty() && d != "video" &&
-                        (d.contains("sprachanruf") || d.contains("voice call") || d.contains("apel vocal") || d.contains("anrufen")) &&
-                        !d.contains("video")
+                    n.isClickable && b.top <= maxTop && d.isNotEmpty() &&
+                        (if (wantsVideo) (d.contains("videoanruf") || d.contains("video call") || d.contains("apel video"))
+                        else (d.contains("sprachanruf") || d.contains("voice call") || d.contains("apel vocal") || d.contains("anrufen")) && !d.contains("video"))
                 } ?: waitForNode(1500, 150, WA_PKG, "wa_native_call_sem") { n ->
                     val b = Rect(); n.getBoundsInScreen(b)
-                    n.isClickable && b.top <= maxTop && matchesAny(n, CALL_KEYWORDS) && !matchesAny(n, VIDEO_EXCLUDE_KEYWORDS)
+                    n.isClickable && b.top <= maxTop && (if (wantsVideo) matchesAny(n, VIDEO_EXCLUDE_KEYWORDS)
+                    else matchesAny(n, CALL_KEYWORDS) && !matchesAny(n, VIDEO_EXCLUDE_KEYWORDS))
                 }
-                if (callNode == null) { dumpScreenForDebug("wa_native_call"); return@withContext fail("CALL_NOT_FOUND", "voice-call button not found (viewId/contentDesc/semantic all missed)") }
+                if (callNode == null) { dumpScreenForDebug("wa_native_call"); return@withContext fail("CALL_NOT_FOUND", "${if (wantsVideo) "video" else "voice"}-call button not found (viewId/contentDesc/semantic all missed)") }
                 if (isPaymentSensitive(callNode)) return@withContext fail("CALL_BLOCKED", "call node matched payment-sensitive pattern")
-                waLog("WA_NATIVE_CALL_FOUND viewId=${callNode.viewIdResourceName ?: "-"} desc=\"${(callNode.contentDescription ?: "").toString().take(40)}\"")
+                waLog("WA_NATIVE_CALL_FOUND mode=${if (wantsVideo) "video" else "voice"} viewId=${callNode.viewIdResourceName ?: "-"} desc=\"${(callNode.contentDescription ?: "").toString().take(40)}\"")
 
                 // ── 13. CALL CLICK ─────────────────────────────────────────────────────────────
                 var callClicked = false
@@ -2349,10 +2352,11 @@ class BensonAccessibilityService : AccessibilityService() {
     // RUNs 1/2/6/9). Kept as a parallel copy on purpose — the proven runWhatsAppCallNative is not
     // refactored. Keep the two in sync; do not share-refactor without a 5/5 device pass.
     // ══════════════════════════════════════════════════════════════════════════════════════════════
-    suspend fun runWhatsAppOpenConversationCall(phoneRaw: String, expectedNameRaw: String): WhatsAppCallNativeResult =
+    suspend fun runWhatsAppOpenConversationCall(phoneRaw: String, expectedNameRaw: String, callMode: String = "voice_call"): WhatsAppCallNativeResult =
         withContext(Dispatchers.Default) {
             val phone = phoneRaw.filter { it.isDigit() }
             val contact = expectedNameRaw.trim()
+            val wantsVideo = callMode == "video_call"
             val t0 = System.currentTimeMillis()
             fun ms() = System.currentTimeMillis() - t0
             fun waLog(m: String) = Log.i("BENSON_AUDIO", m)
@@ -2443,18 +2447,20 @@ class BensonAccessibilityService : AccessibilityService() {
                 val maxTop = headerRegionMaxTop()
                 val callNode = waitForNode(3000, 150, WA_PKG, "wa_direct_call_id") { n ->
                     val vid = n.viewIdResourceName ?: ""
-                    (vid.endsWith("/menuitem_call") || vid.endsWith("/voip_call")) && !vid.contains("video")
+                    if (wantsVideo) (vid.endsWith("/menuitem_video_call") || vid.endsWith("/voip_video_call"))
+                    else (vid.endsWith("/menuitem_call") || vid.endsWith("/voip_call")) && !vid.contains("video")
                 } ?: waitForNode(1800, 150, WA_PKG, "wa_direct_call_desc") { n ->
                     val b = Rect(); n.getBoundsInScreen(b)
                     val d = n.contentDescription?.toString()?.lowercase() ?: ""
-                    n.isClickable && b.top <= maxTop && d.isNotEmpty() && d != "video" &&
-                        (d.contains("sprachanruf") || d.contains("voice call") || d.contains("apel vocal") || d.contains("anrufen")) &&
-                        !d.contains("video")
+                    n.isClickable && b.top <= maxTop && d.isNotEmpty() &&
+                        (if (wantsVideo) (d.contains("videoanruf") || d.contains("video call") || d.contains("apel video"))
+                        else (d.contains("sprachanruf") || d.contains("voice call") || d.contains("apel vocal") || d.contains("anrufen")) && !d.contains("video"))
                 } ?: waitForNode(1500, 150, WA_PKG, "wa_direct_call_sem") { n ->
                     val b = Rect(); n.getBoundsInScreen(b)
-                    n.isClickable && b.top <= maxTop && matchesAny(n, CALL_KEYWORDS) && !matchesAny(n, VIDEO_EXCLUDE_KEYWORDS)
+                    n.isClickable && b.top <= maxTop && (if (wantsVideo) matchesAny(n, VIDEO_EXCLUDE_KEYWORDS)
+                    else matchesAny(n, CALL_KEYWORDS) && !matchesAny(n, VIDEO_EXCLUDE_KEYWORDS))
                 }
-                if (callNode == null) { dumpScreenForDebug("wa_direct_call"); return@withContext fail("CALL_BUTTON_NOT_FOUND", "voice-call button not found in the verified conversation") }
+                if (callNode == null) { dumpScreenForDebug("wa_direct_call"); return@withContext fail("CALL_BUTTON_NOT_FOUND", "${if (wantsVideo) "video" else "voice"}-call button not found in the verified conversation") }
                 if (isPaymentSensitive(callNode)) return@withContext fail("CALL_BUTTON_NOT_FOUND", "call node matched payment-sensitive pattern")
 
                 var callClicked = false

@@ -3,3 +3,4 @@
 export * from './contactTypes';
 export * from './contactResolver';
 export * from './deviceContacts';
+export * from './channelCue';

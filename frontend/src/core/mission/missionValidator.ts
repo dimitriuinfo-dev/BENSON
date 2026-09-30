@@ -47,15 +47,51 @@ async function validateWhatsAppParams(
   const contactName = typeof request.params.contactName === 'string' ? request.params.contactName.trim() : '';
   if (!contactName) return { valid: false, reason: 'Contact name is missing.' };
 
-  // Doctrine (product-owner-directed 2026-07-31): the WhatsApp call route no longer reads the
-  // phone's contact list at all — BENSON governs WhatsApp's own UI (search by name, tap the first
-  // result, tap call), the same way a human would, and resolving a name against a real person is
-  // WhatsApp's job, not BENSON's. This used to call whatsappTool.resolveContact(contactName,
-  // contacts) here to correct STT mishears (e.g. "Hanna" -> "Hannah") against the device address
-  // book before typing into WhatsApp's search — that device-contacts read is the path being
-  // disconnected. buildCallSearchString only strips leaked Romanian clitics/prepositions
-  // (sună-O PE Hannah), it never touches contacts.
+  // Doctrine REVERSED (2026-09-23, BENSON CONTACT+CALL round, explicitly authorized for both call
+  // paths — see missionPlanner.ts's own matching note): the 2026-07-31 decision below disconnected
+  // device-contacts resolution from placeCall entirely, so BENSON never knew who it was actually
+  // calling before dialing — it just typed a cleaned name into WhatsApp's own search and trusted
+  // whichever row WhatsApp matched first. Real resolution now runs HERE, so the confirmation prompt
+  // (missionExecutor.ts's buildConfirmationPrompt) can show the real name + number, and dialing
+  // uses a real E.164 number instead of a blind name search. WhatsApp's own in-app search is kept
+  // ONLY as a fallback for a name genuinely not in the device address book — that remains a
+  // best-effort, NOT a confirmed identity (see whatsappTool.ts's tryDirectContactCall, which still
+  // independently re-resolves and verifies the on-screen call header before treating it as done).
+  //
+  // Prior text (2026-07-31, product-owner-directed, now superseded): "the WhatsApp call route no
+  // longer reads the phone's contact list at all — BENSON governs WhatsApp's own UI (search by
+  // name, tap the first result, tap call), the same way a human would." buildCallSearchString still
+  // exists and is still used for the fallback (it only strips leaked Romanian clitics/prepositions,
+  // never touches contacts).
   if (request.action === 'placeCall') {
+    const resolved = await whatsappTool.resolveContact(contactName, contacts);
+    if (resolved.status === 'resolved' && resolved.contact) {
+      const e164 = whatsappTool.toE164(resolved.contact.phoneNumbers?.[0] ?? '');
+      if (e164) {
+        return {
+          valid: true,
+          enrichedParams: {
+            contactName: resolved.contact.displayName,
+            phoneNumber: e164,
+            contactId: resolved.contact.id,
+            channel: 'whatsapp',
+          },
+        };
+      }
+      // Resolved locally but no country-code-qualified number — can't confirm a real E.164, fall
+      // through to the name-search fallback rather than guess at a dial-able number.
+    }
+    if (resolved.status === 'ambiguous') {
+      // BENSON CONTACT+CALL round (2026-09-23) fix, found on-device: this used to build its own
+      // "Multiple contacts match X: <names>" message — but resolveContact() (contactResolver.ts,
+      // BENSON_STABILIZATION_1) deliberately caps `candidates` to ONE entry and never enumerates
+      // names to the user, so that message always showed exactly one name (not "multiple", and not
+      // necessarily the one the caller meant) alongside a confusing "multiple" claim. Use its own,
+      // correct, already-bounded prompt instead of re-deriving a misleading one here.
+      return { valid: false, reason: resolved.message };
+    }
+    // not_found / missing_phone / no-qualified-number — WhatsApp's own search, as an EXPLICITLY
+    // unconfirmed fallback (per user instruction: never auto-select the first result silently).
     const searchString = whatsappTool.buildCallSearchString(contactName);
     if (!searchString) return { valid: false, reason: 'No name was given to search for.' };
     return { valid: true, enrichedParams: { contactName: searchString } };

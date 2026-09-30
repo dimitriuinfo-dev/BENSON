@@ -4,6 +4,7 @@
 // tasks; sensitive tasks are marked requiresConfirmation=true for the orchestrator to gate on.
 
 import type { AppCapability, Goal, MissionPlan, MissionTask, MissionTaskType } from './orchestratorTypes';
+import { detectChannelCue } from '../contacts';
 
 let idCounter = 0;
 function nextId(prefix: string): string {
@@ -43,15 +44,29 @@ function buildTaskForGoal(goal: Goal): MissionTask {
       // unusable hands-free (user-directed 2026-07-16). Messaging below stays gated: a sent
       // message can't be recalled the way an unanswered call can.
       //
-      // A plain "sună-o pe X" (no "pe WhatsApp") used to route here as PREPARE_CALL, the native
-      // Intent.ACTION_CALL path — confirmed live (2026-07-17) as unreliable on this device: without
-      // CALL_PHONE granted it falls back to a bare tel: link, which Android resolves through its
-      // own multi-dialer chooser (this phone has several dialer apps installed) instead of just
-      // calling. User-directed the same day: always use WhatsApp's calling automation instead —
-      // it's already proven working end-to-end — rather than debug the native dialer path further.
-      // Same task shape "sună X pe WhatsApp" already produces (PREPARE_MESSAGE/mode=voice_call),
-      // just reached from the plain phrasing too now.
+      // A plain "sună-o pe X" (no "pe WhatsApp") used to ALWAYS route here as PREPARE_MESSAGE/
+      // voice_call (a WhatsApp call) — confirmed live (2026-07-17) that the native Intent.ACTION_
+      // CALL path was unreliable on this device without CALL_PHONE granted (falls back to a bare
+      // tel: link, resolved through a multi-dialer chooser). User-directed the same day: default to
+      // WhatsApp's calling automation for the bare phrasing rather than debug the native path.
+      //
+      // BENSON CONTACT+CALL round (2026-09-23), doctrine change explicitly authorized for both call
+      // paths: phoneCallExecutor.ts (src/executors) has since been built and already requests
+      // CALL_PHONE properly, with an honest dialer fallback on denial — the 2026-07-17 blocker no
+      // longer applies unconditionally. A real channel cue in the utterance ("sună-l pe X pe
+      // mobil", "nu pe WhatsApp, sună normal") now routes to a genuine PREPARE_CALL task (real
+      // telephony, PhoneCallExecutor) instead of being silently forced onto WhatsApp. No cue =
+      // unchanged default (WhatsApp) — no regression for every phrasing already proven today.
       if (goal.sourceIntent === 'CALL_CONTACT' && goal.entities.contact) {
+        const channel = detectChannelCue(goal.rawText || goal.normalizedText);
+        if (channel === 'phone') {
+          return makeTask(
+            'PREPARE_CALL',
+            'messaging',
+            { contactName: goal.entities.contact },
+            true,
+          );
+        }
         return makeTask(
           'PREPARE_MESSAGE',
           'messaging',

@@ -11,10 +11,19 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
 
 class BensonForegroundServiceModule : Module() {
+  private fun systemCallAudioActive(): Boolean {
+    val context = appContext.reactContext ?: return false
+    val mode = try { (context.getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager).mode } catch (_: Exception) { AudioManager.MODE_NORMAL }
+    val waState = context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE)
+      .getString("wa_call_lifecycle_state", "IDLE")
+    return mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION ||
+      waState == "CALL_VERIFIED_ACTIVE" || waState == "CALL_ENDING_PENDING"
+  }
+
   override fun definition() = ModuleDefinition {
     Name("BensonForegroundService")
 
-    Events("onStopRequested", "onListenRequested", "onWakeWordDetected", "onWakePoke", "onSttWatchdogTimeout", "onTtsWatchdogTimeout", "onMicResumeWatchdogTimeout", "onCloudFetchTimeout", "onConfirmationResult")
+    Events("onStopRequested", "onListenRequested", "onWakeWordDetected", "onWakePoke", "onCallAudioStateChanged", "onSttWatchdogTimeout", "onTtsWatchdogTimeout", "onMicResumeWatchdogTimeout", "onCloudFetchTimeout", "onConfirmationResult")
 
     OnCreate {
       // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — delivered as an event (survives backgrounding),
@@ -55,8 +64,12 @@ class BensonForegroundServiceModule : Module() {
       BensonForegroundService.onWakePoke = {
         sendEvent("onWakePoke")
       }
-      BensonForegroundService.onWakeWordDetected = { commandTail ->
-        sendEvent("onWakeWordDetected", mapOf("commandTail" to commandTail))
+      BensonForegroundService.onCallAudioStateChanged = { active ->
+        sendEvent("onCallAudioStateChanged", mapOf("active" to active))
+      }
+      sendEvent("onCallAudioStateChanged", mapOf("active" to (BensonForegroundService.instance?.isCallAudioBlockedNow() ?: systemCallAudioActive())))
+      BensonForegroundService.onWakeWordDetected = { commandTail, audioFilePath ->
+        sendEvent("onWakeWordDetected", mapOf("commandTail" to commandTail, "audioFilePath" to audioFilePath))
       }
       // Flush a wake command that arrived while no JS listener existed (the process had just been
       // killed and restarted, or this module hadn't finished OnCreate yet) — otherwise it's lost
@@ -65,7 +78,8 @@ class BensonForegroundServiceModule : Module() {
       // unaudited access point to the same field); getAndSet(null) makes this consistent with
       // takePendingWakeCommand()'s own single-consumer guarantee.
       BensonForegroundService.pendingWakeCommand.getAndSet(null)?.let { commandTail ->
-        sendEvent("onWakeWordDetected", mapOf("commandTail" to commandTail))
+        val audioFilePath = BensonForegroundService.pendingWakeAudioFile.getAndSet(null)
+        sendEvent("onWakeWordDetected", mapOf("commandTail" to commandTail, "audioFilePath" to audioFilePath))
       }
     }
 
@@ -74,6 +88,7 @@ class BensonForegroundServiceModule : Module() {
       BensonForegroundService.onListenRequested = null
       BensonForegroundService.onWakeWordDetected = null
       BensonForegroundService.onWakePoke = null
+      BensonForegroundService.onCallAudioStateChanged = null
       BensonForegroundService.onSttWatchdogTimeout = null
       BensonForegroundService.onTtsWatchdogTimeout = null
       BensonForegroundService.onMicResumeWatchdogTimeout = null
@@ -161,6 +176,7 @@ class BensonForegroundServiceModule : Module() {
     Function("nativeWakeSetOwner") { owner: String ->
       BensonForegroundService.instance?.nativeWakeSetOwner(owner)
     }
+    Function("isCallAudioBlocked") { BensonForegroundService.instance?.isCallAudioBlockedNow() ?: systemCallAudioActive() }
 
     // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — background-safe replacement for the JS setTimeout that
     // used to release app/index.tsx's STT session gate. timeoutMs mirrors STT_SESSION_MAX_MS there.
@@ -216,6 +232,9 @@ class BensonForegroundServiceModule : Module() {
     Function("takePendingWakeCommand") {
       BensonForegroundService.instance?.takePendingWakeCommand()
     }
+    Function("takePendingWakeAudioFile") {
+      BensonForegroundService.pendingWakeAudioFile.getAndSet(null)
+    }
     // HEADLESS_WIRING_TEST_ISOLATION_1 (2026-09-20) — separate consumption point for the
     // debug-only wiring-test marker (pendingHeadlessTestCommand); the live/heartbeat paths above
     // call ONLY takePendingWakeCommand() and never this. Harmless in a release build: nothing
@@ -224,18 +243,20 @@ class BensonForegroundServiceModule : Module() {
     Function("takePendingHeadlessTestCommand") {
       BensonForegroundService.instance?.takePendingHeadlessTestCommand()
     }
-    // { model, cloud, running } — model=false ⇒ benson.tflite not bundled; cloud=false ⇒ no STT
-    // credentials pushed yet (setNativeWakeCredentials). JS treats "model || cloud" as "some
-    // native engine can own passive wake" (ROUND_WAKE_NATIVE_GENERIC_1) — nothing pretends a
-    // native engine is active when neither is true; the JS Whisper fallback stays primary then.
+    // `model` means a compatible on-device keyword model is actually present. `cloud` means
+    // command/STT credentials only; it never selects an ambient wake engine.
     Function("isNativeWakeAvailable") {
       val context = appContext.reactContext
-      val model = context != null && MicroWakeWord.modelPresent(context)
+      val heed = context != null && HeedWakeWord.modelPresent(context)
+      val microWakeWord = context != null && MicroWakeWord.modelPresent(context)
+      val model = heed || microWakeWord
       val cloud = context != null && NativeCloudWake.available(context)
       mapOf(
         "model" to model,
+        "engine" to if (heed) "heed" else if (microWakeWord) "microWakeWord" else "none",
         "cloud" to cloud,
         "running" to (BensonForegroundService.instance?.isNativeWakeRunning() == true),
+        "inputActive" to (BensonForegroundService.instance?.isNativeWakeAudioActive() == true),
       )
     }
 

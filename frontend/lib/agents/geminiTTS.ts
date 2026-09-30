@@ -14,6 +14,15 @@ const REQUEST_TIMEOUT_MS = 20000;
 
 let currentSound: Audio.Sound | null = null;
 let audioModeSet = false;
+let speakEpoch = 0;
+
+async function stopCurrentSound(): Promise<void> {
+  if (!currentSound) return;
+  const sound = currentSound;
+  currentSound = null;
+  try { await sound.stopAsync(); } catch {}
+  try { await sound.unloadAsync(); } catch {}
+}
 
 async function ensurePlaybackAudioMode(): Promise<void> {
   if (audioModeSet) return;
@@ -56,6 +65,7 @@ export async function speakWithGemini(
   voice: string = 'Kore',
   onDone?: () => void,
 ): Promise<void> {
+  const epoch = speakEpoch;
   const res = await fetchWithTimeout(
     'https://generativelanguage.googleapis.com/v1beta/interactions',
     {
@@ -70,12 +80,14 @@ export async function speakWithGemini(
     },
     REQUEST_TIMEOUT_MS,
   );
+  if (epoch !== speakEpoch) return;
   if (!res.ok) {
     const bodyText = await res.text().catch(() => '');
     logAudioDiag('GEMINI_TTS_ERROR_BODY', `status=${res.status} model=${GEMINI_TTS_MODEL} body=${bodyText.slice(0, 400)}`);
     throw new Error(`Gemini TTS failed: ${res.status}`);
   }
   const data = await res.json();
+  if (epoch !== speakEpoch) return;
   // Confirmed live 2026-08-25/26: the request succeeds (status 200) and Google's own usage stats
   // confirm audio WAS generated (output_tokens_by_modality: audio), but the documented
   // `output_audio.data` path is wrong for this endpoint. Real path, read directly from a live
@@ -103,12 +115,14 @@ export async function speakWithGemini(
   file.create();
   file.write(wavBytes);
 
-  await stopGeminiTTS();
+  await stopCurrentSound();
+  if (epoch !== speakEpoch) return;
   await ensurePlaybackAudioMode();
   const { sound } = await Audio.Sound.createAsync({ uri: file.uri }, { shouldPlay: true });
+  if (epoch !== speakEpoch) { try { await sound.stopAsync(); await sound.unloadAsync(); } catch {}; return; }
   currentSound = sound;
   sound.setOnPlaybackStatusUpdate((status) => {
-    if (status.isLoaded && status.didJustFinish) {
+    if (epoch === speakEpoch && status.isLoaded && status.didJustFinish) {
       if (currentSound === sound) currentSound = null;
       // Await unloadAsync before onDone — see openaiTTS.ts's identical comment: expo-av holds
       // audio focus until the player actually stops/unloads, not just at playback end. Firing
@@ -120,9 +134,6 @@ export async function speakWithGemini(
 }
 
 export async function stopGeminiTTS(): Promise<void> {
-  if (currentSound) {
-    try { await currentSound.stopAsync(); } catch {}
-    try { await currentSound.unloadAsync(); } catch {}
-    currentSound = null;
-  }
+  speakEpoch += 1;
+  await stopCurrentSound();
 }

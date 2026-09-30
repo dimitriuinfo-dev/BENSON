@@ -19,17 +19,34 @@ export type SanitySource = 'parser' | 'brain';
 export type SanityVerdict = { ok: true } | { ok: false; reason: string };
 
 // Wake / control / affirmation words that STT commonly leaves sitting in a "name" slot — RO/DE/EN.
+// ROUND_WA1_REMEDIATION_2 (2026-09-23, device-proven) — pronouns added: "scrie el ca ro un mesaj
+// pe what's it" (STT mangling of "scrie-i lui K Ro un mesaj pe WhatsApp") had the deterministic
+// parser extract "el" as the contact name — 2 chars, so `v.length < 2` let it through, and it was
+// never a control/wake word either. Resolved against the WHOLE address book via partial-substring
+// match ("el" appears inside dozens of real names), returning 82 ambiguous candidates. A bare
+// pronoun is never a name on its own in this app's languages — reject it the same way a bare verb
+// already is.
 const CONTROL_WORDS = new Set([
   'benson', 'wake up', 'wake', 'hey', 'hello', 'hi', 'salut', 'buna', 'bună',
   'ok', 'okay', 'oké', 'yes', 'no', 'da', 'nu', 'ja', 'nein',
   'stop', 'cancel', 'gata', 'anuleaza', 'anulează', 'renunta', 'renunță',
   'opreste', 'oprește', 'inchide', 'închide', 'weiter', 'abbrechen',
+  'el', 'ea', 'eu', 'tu', 'noi', 'voi', 'ei', 'ele', 'dânsul', 'dansul', 'dânsa', 'dansa',
+  'er', 'sie', 'es', 'ich', 'du', 'wir', 'ihr',
+  'he', 'she', 'it', 'they', 'them', 'him', 'her',
 ]);
 
 // Leading bare-imperative verbs — if the "name" starts with one of these, STT caught a verb, not
 // a person. RO/DE/EN, matched at the start only.
 const LEADING_VERB =
   /^(spune|zi|deschide|sun[ăa]|suna|trimite|scrie|caut[ăa]|cauta|opre[șs]te|porne[șs]te|arat[ăa]|arata|mergi|du|pleac[ăa]|vino|ascult[ăa]|open|call|send|write|search|play|go|close|show|tell|start|stop|öffne|ruf|schreib|geh|zeig|starte)\b/i;
+
+// ROUND_WA1_REMEDIATION_2 (2026-09-23, device-proven) — companion to CONTROL_WORDS' pronoun
+// entries: catches a pronoun as the FIRST word of a longer captured phrase ("el ca ro" — a wider
+// regex capture than the bare "el" case CONTROL_WORDS alone catches), the same way LEADING_VERB
+// catches a verb leading a longer phrase rather than only a bare verb.
+const LEADING_PRONOUN =
+  /^(el|ea|eu|tu|noi|voi|ei|ele|dânsul|dansul|dânsa|dansa|er|sie|es|ich|du|wir|ihr|he|she|it|they|them|him|her)\b/i;
 
 // Any character from a non-Latin script the app's languages (ro/de/en/fr/it/es) never use — a
 // "name" containing one means STT latched onto foreign on-screen text.
@@ -46,6 +63,7 @@ export function looksLikePersonName(raw: string): SanityVerdict {
   if (v.length < 2) return { ok: false, reason: 'too_short' };
   if (CONTROL_WORDS.has(low)) return { ok: false, reason: 'control_word' };
   if (LEADING_VERB.test(low)) return { ok: false, reason: 'verb' };
+  if (LEADING_PRONOUN.test(low)) return { ok: false, reason: 'pronoun' };
   if (NON_LATIN_SCRIPT.test(v)) return { ok: false, reason: 'foreign_script' };
   if (!HAS_LATIN_LETTER.test(v)) return { ok: false, reason: 'no_letters' };
   if (v.split(' ').length > 4) return { ok: false, reason: 'too_many_words' };

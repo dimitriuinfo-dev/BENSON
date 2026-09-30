@@ -157,7 +157,7 @@ class BensonAccessibilityModule : Module() {
     // WA-NATIVE-FINAL — THE active WhatsApp voice-call executor. One call from JS; Kotlin runs the
     // whole sequence on its own coroutine (Dispatchers.Default), independent of the RN Activity
     // being foregrounded. Resolves { success, step, error, contact, elapsedMs }.
-    AsyncFunction("runWhatsAppCallNative") { contact: String, promise: Promise ->
+    AsyncFunction("runWhatsAppCallNative") { contact: String, mode: String, promise: Promise ->
       // WA-CONTACT-TRACE — the exact string that crossed the JS→native bridge. This is what the
       // executor will type into WhatsApp's own search; there is no rename/fallback past this point.
       android.util.Log.i("BENSON_AUDIO", "WA_CONTACT_INPUT stage=native_bridge native=\"$contact\"")
@@ -171,7 +171,7 @@ class BensonAccessibilityModule : Module() {
         return@AsyncFunction
       }
       svc.runOnServiceScope {
-        val r = svc.runWhatsAppCallNative(contact)
+        val r = svc.runWhatsAppCallNative(contact, mode)
         promise.resolve(mapOf(
           "success" to r.success, "step" to r.step, "error" to r.error,
           "contact" to r.contact, "elapsedMs" to r.elapsedMs,
@@ -183,7 +183,7 @@ class BensonAccessibilityModule : Module() {
     // WA-FIX-4 — DIRECT-CONTACT-DEEPLINK call route. JS resolved the spoken name to a phone number
     // from the local address book; native opens the exact conversation via whatsapp://send?phone=,
     // verifies it, and reuses the proven call-button + verify sequence. No Chats list, no search.
-    AsyncFunction("runWhatsAppOpenConversationCall") { phone: String, expectedName: String, promise: Promise ->
+    AsyncFunction("runWhatsAppOpenConversationCall") { phone: String, expectedName: String, mode: String, promise: Promise ->
       val svc = BensonAccessibilityService.instance
       if (svc == null) {
         promise.resolve(mapOf(
@@ -194,7 +194,7 @@ class BensonAccessibilityModule : Module() {
         return@AsyncFunction
       }
       svc.runOnServiceScope {
-        val r = svc.runWhatsAppOpenConversationCall(phone, expectedName)
+        val r = svc.runWhatsAppOpenConversationCall(phone, expectedName, mode)
         promise.resolve(mapOf(
           "success" to r.success, "step" to r.step, "error" to r.error,
           "contact" to r.contact, "elapsedMs" to r.elapsedMs,

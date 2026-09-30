@@ -1,0 +1,24 @@
+BENSON first hands-free Calculator launch — sanitized device evidence
+Date: 2026-09-30 (phone-local log timestamps; UTC offset not captured)
+Device: OnePlus CPH2663, serial 9c1464eb
+Package: com.benson.butler
+Installed release APK SHA-256: DAA86D04D70ABB260D9C08443A379CECF3FCD56002C2401DEF0076CFB2F0D88C
+
+Observed sequence for the user's one-breath command “Benson, deschide calculatorul”:
+- 11:27:09 HEED_DETECTED phrase=Benson score=0.939; circular buffer included 24,000 pre-roll samples.
+- HEED_COMMAND_BUFFER phase=complete samples=64000; 4.0 s, mono 16 kHz capture; same captured WAV handed to STT (128,044-byte WAV).
+- WAKE_DETECT engine=heed keyword=Benson score=0.789; owner WAKE -> COMMAND_STT.
+- WAKE_EVENT_RECEIVED_IN_JS source=native_persistent.
+- Deepgram HTTP 200; transcript had 28 characters and confidence 0.663. Transcript text intentionally omitted.
+- Existing executor received the voice input once: EXEC_TRACE_MISSION taskCount=1; plan OPEN_APP.
+- APP_RESOLUTION selected unique package com.oneplus.calculator (query “calculatorul”); APP_FOREGROUND_REQUEST success=true.
+- EXEC_TRACE_FOREGROUND_VERIFY expected and observed com.oneplus.calculator, confirmedByEvent=true; Android top resumed activity was com.oneplus.calculator.
+- User independently confirmed the Calculator opened.
+
+Not established by this trial: repeatability; wake re-arm immediately after command; foreground/background/screen-off reliability; owner verification; false-activation rate; TTS/music/call suppression. One trial is not a general voice DEVICE_PASS.
+
+Re-arm observation from the same log window:
+- COMMAND_STT stayed owner until the generic owner watchdog reclaimed the microphone at about 11:27:56; transition COMMAND_STT -> NONE -> WAKE and HEED_REARM followed then.
+- Thus automatic recovery exists but took about 45 s after the successful launch. This is the next demonstrated defect to investigate. No new build has been made since this success.
+
+Privacy: transcript text, audio/WAV, account identifiers, and credentials are excluded. The application removed its transient WAV after STT. This file records only sanitized event metadata.

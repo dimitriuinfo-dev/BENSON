@@ -16,6 +16,15 @@ export function stopCapture() {
   return NativeModule.stopCapture();
 }
 
+// Retain exactly the next finalized WAV once, for an explicitly consented diagnostic.
+export function armNextDiagnosticCapture() {
+  return NativeModule.armNextDiagnosticCapture();
+}
+
+export function deleteDiagnosticCapture() {
+  return NativeModule.deleteDiagnosticCapture();
+}
+
 // Fires exactly once per startCapture() call, when the capture naturally ends.
 // filePath is '' (falsy) if nothing usable was captured (reason: 'no_speech' or 'error').
 export function addCaptureEndListener(listener) {

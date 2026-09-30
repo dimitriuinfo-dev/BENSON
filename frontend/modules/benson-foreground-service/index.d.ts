@@ -10,8 +10,9 @@ export declare function addListenRequestedListener(
   listener: () => void
 ): { remove: () => void };
 export declare function addWakeWordDetectedListener(
-  listener: (commandTail: string) => void
+  listener: (commandTail: string, audioFilePath?: string | null) => void
 ): { remove: () => void };
+export declare function takePendingWakeAudioFile(): string | null;
 /** ROUND_WAKE_NATIVE_TO_JS_ACK_1 — atomic take of a durable pending wake command; null = none pending. */
 export declare function takePendingWakeCommand(): string | null;
 export declare function takePendingHeadlessTestCommand(): string | null;
@@ -19,11 +20,13 @@ export declare function takePendingHeadlessTestCommand(): string | null;
 export declare function addWakePokeListener(
   listener: () => void
 ): { remove: () => void };
+export declare function addCallAudioStateListener(listener: (active: boolean) => void): { remove: () => void };
+export declare function isCallAudioBlocked(): boolean;
 /** ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — native mic-ownership handoff for the on-device wake engine. */
 export declare function nativeWakeSetOwner(
   owner: 'WAKE' | 'COMMAND_STT' | 'TTS' | 'CALL' | 'NONE'
 ): void;
-export declare function isNativeWakeAvailable(): { model: boolean; cloud: boolean; running: boolean };
+export declare function isNativeWakeAvailable(): { model: boolean; cloud: boolean; running: boolean; inputActive?: boolean };
 /** ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — native Handler timer; survives JS suspension while backgrounded. */
 export declare function armSttSessionWatchdog(sessionId: string, timeoutMs: number): void;
 export declare function cancelSttSessionWatchdog(sessionId: string): void;

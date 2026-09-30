@@ -37,7 +37,11 @@ export function addListenRequestedListener(listener) {
 // (whatever followed the name in the same utterance, e.g. "deschide Waze"; empty if the name
 // was said alone). Process a non-empty tail immediately; otherwise start real command capture.
 export function addWakeWordDetectedListener(listener) {
-  return emitter.addListener('onWakeWordDetected', (ev) => listener(ev?.commandTail ?? ''));
+  return emitter.addListener('onWakeWordDetected', (ev) => listener(ev?.commandTail ?? '', ev?.audioFilePath ?? null));
+}
+
+export function takePendingWakeAudioFile() {
+  try { return NativeModule.takePendingWakeAudioFile() ?? null; } catch { return null; }
 }
 
 // ROUND_WAKE_NATIVE_TO_JS_ACK_1 — atomic read+clear of a durable pending wake command (native
@@ -61,6 +65,12 @@ export function takePendingHeadlessTestCommand() {
 // re-arm inside startLocalWakeLoop is frozen while backgrounded).
 export function addWakePokeListener(listener) {
   return emitter.addListener('onWakePoke', () => listener());
+}
+export function addCallAudioStateListener(listener) {
+  return emitter.addListener('onCallAudioStateChanged', (ev) => listener(!!ev?.active));
+}
+export function isCallAudioBlocked() {
+  try { return !!NativeModule.isCallAudioBlocked(); } catch { return false; }
 }
 
 // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — native (TFLite/AudioRecord) wake engine, runs in the

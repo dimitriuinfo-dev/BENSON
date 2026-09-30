@@ -125,6 +125,9 @@ Rules for the object:
 - "action" must be one of the known actions listed below. Nothing else is representable and
   anything else is rejected before it reaches the validator.
 - Never chain actions. One proposal at a time.
+- Requests to read WhatsApp messages use read_whatsapp_messages with params.contact only when
+  the user names a person; otherwise omit contact to read active notifications. Never invent
+  message contents or say reading is unavailable before the reader has run.
 - If the request is ambiguous in a way that changes what would be executed, use "clarify"
   rather than guessing. If it is ambiguous in a way that does not, proceed.
 - All user-facing text inside the object is written in the output language.

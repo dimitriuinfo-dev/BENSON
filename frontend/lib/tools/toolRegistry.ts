@@ -73,7 +73,11 @@ function digitsOf(n: number): string[] {
 // narrower parseCalculatorRequest below decides what's actually executable.
 const CALC_TRIGGER = /\bcalculeaz[ăa]\b|\br[ăa]d[ăa]cin[ăa]\b|\bsinus(?:ul)?\b|\bcosinus(?:ul)?\b|\btangent[ăa]\b|\blogaritm(?:ul)?\b|\b(?:cat|c[ăa]t)\s+fac(?:e)?\b/i;
 export function looksLikeCalculatorRequest(rawText: string): boolean {
-  return CALC_TRIGGER.test((rawText || '').toLowerCase());
+  // Normalize Romanian diacritics before applying ASCII word boundaries: JavaScript's `\b`
+  // treats ă/â/î/ș/ț as non-word characters, so "Calculează" at phrase-end missed the CALC1 route.
+  const normalized = (rawText || '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+  return CALC_TRIGGER.test(rawText || '') ||
+    /\bcalculeaza\b|\bradacina\b|\bsinus(?:ul)?\b|\bcosinus(?:ul)?\b|\btangenta\b|\blogaritm(?:ul)?\b|\bcat\s+fac(?:e)?\b/i.test(normalized);
 }
 
 export type CalcParseResult = { symbols: string[]; spokenOperation: string } | null;

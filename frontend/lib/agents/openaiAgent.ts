@@ -56,11 +56,14 @@ export async function askOpenAI(params: {
   ];
 
   if (!params.onSentence) {
-    const res = await fetch(OPENAI_URL, {
+    // ROUND_INPUT_ROUTING_1 (2026-09-23) — was a plain fetch() with no timeout despite
+    // fetchWithTimeout being imported and REQUEST_TIMEOUT_MS already defined above (dead,
+    // unused) — could hang forever per fetchWithTimeout.ts's own doc comment. Wired up now.
+    const res = await fetchWithTimeout(OPENAI_URL, {
       method: 'POST',
       headers,
       body: JSON.stringify({ model, max_tokens: 600, messages }),
-    });
+    }, REQUEST_TIMEOUT_MS);
     // Confirmed live 2026-08-24: a failed request (429 quota/billing, 401 bad key, etc.) was
     // silently swallowed here — no res.ok check, so `data.choices` was just undefined and this
     // fell straight to the generic "I did not quite catch that" text on EVERY failure, with no

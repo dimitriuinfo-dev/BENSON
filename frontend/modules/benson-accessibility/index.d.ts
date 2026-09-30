@@ -62,12 +62,12 @@ export interface WhatsAppCallNativeResult {
   nameMatch: boolean;
 }
 /** WA-NATIVE-FINAL — the active WhatsApp voice-call executor. Runs the full sequence natively. */
-export function runWhatsAppCallNative(contact: string): Promise<WhatsAppCallNativeResult>;
+export function runWhatsAppCallNative(contact: string, mode?: 'voice_call' | 'video_call'): Promise<WhatsAppCallNativeResult>;
 
 /** WA-FIX-4 — DIRECT-CONTACT-DEEPLINK. `phone` = normalised digits resolved locally from the
  * address book. Native opens whatsapp://send?phone=<phone>, verifies the conversation matches
  * `expectedName`, then reuses the proven call-button + verify sequence. No Chats search/scroll. */
-export function runWhatsAppOpenConversationCall(phone: string, expectedName: string): Promise<WhatsAppCallNativeResult>;
+export function runWhatsAppOpenConversationCall(phone: string, expectedName: string, mode?: 'voice_call' | 'video_call'): Promise<WhatsAppCallNativeResult>;
 
 /** ROUND_WA_GOVERNANCE_WRITE_1 — PHASE A. Opens the exact conversation for `phone`, verifies it is
  * `expectedName`, finds the compose field, types `message`, verifies the typed text. STOPS before

@@ -4,9 +4,7 @@ import { CALL_PATTERN } from './contactsAgent';
 import { buildActionRequest, execute as executeGoverned } from '../../src/core/mission';
 import { launchApp } from './appLauncherAgent';
 import { SEARCH_PATTERN, NEWS_PATTERN, runSearchAgent } from './searchAgent';
-import { askClaudeWithTools } from './claudeAgent';
 import { askOpenAIWithTools } from './openaiAgent';
-import { askGeminiWithTools } from './geminiAgent';
 import type { ToolContext } from './tools';
 import { sanityCheckContactParam } from '../engines/actionSanity';
 // Re-exported so existing importers (app/index.tsx) keep `import { conversationFallbackLine }
@@ -50,29 +48,11 @@ export type OrchestratorContext = {
   onRememberFact?: (fact: string) => Promise<void> | void;
 };
 
-const HAIKU_MODEL = 'claude-haiku-4-5';
-// Rate-limit circuit breaker — see the doc comment at the routeCommand call sites below and
-// voiceAgent.ts's identical mechanism. Once a chat provider 429s, skip it for this cooldown
-// instead of re-proving the same guaranteed failure on every turn before falling back to Claude.
+// Rate-limit circuit breaker — see the doc comment at the routeCommand call site below and
+// voiceAgent.ts's identical mechanism. Once OpenAI 429s, skip it for this cooldown instead of
+// re-proving the same guaranteed failure on every turn.
 const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 let openaiChatRateLimitedUntil = 0;
-let geminiChatRateLimitedUntil = 0;
-const SIMPLE_MAX_WORDS = 10;
-// A short message can still be a "complex question" worth Sonnet/Opus-level reasoning —
-// these markers (multi-language) keep it off the fast path even under the word cap.
-const COMPLEX_QUESTION_PATTERN =
-  /\b(why|how|what if|explain|compare|analy[sz]e|de ce|cum s[ăa]|explic[ăa]|compar[ăa]|warum|wie|pourquoi|comment)\b/i;
-
-// Router rule: short, conversational turns (greetings, confirmations, thanks, simple
-// commands) go to Haiku for latency; anything longer, a complex question, or deep into
-// a long-context conversation stays on Sonnet/Opus.
-function isSimpleConversational(text: string, historyLength: number): boolean {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0 || words.length > SIMPLE_MAX_WORDS) return false;
-  if (historyLength > 6) return false;
-  if (COMPLEX_QUESTION_PATTERN.test(text)) return false;
-  return true;
-}
 
 export type AgentName = 'contacts' | 'appLauncher' | 'search' | 'claude' | 'weather' | 'media' | 'gallery' | 'notepad';
 
@@ -153,7 +133,7 @@ export async function routeCommand(
   }
 
   if (NOTEPAD_PATTERN.test(text)) {
-    const note = await runNoteRouterAgent(text, ctx.apiKey);
+    const note = await runNoteRouterAgent(text, ctx.openaiKey);
     if (!note || !isConfident(note)) {
       return {
         agent: 'notepad',
@@ -215,7 +195,7 @@ export async function routeCommand(
     const result = await runSearchAgent({
       text, query,
       tavilyKey: ctx.tavilyKey,
-      apiKey:    ctx.apiKey,
+      apiKey:    ctx.openaiKey,
       character: ctx.character,
       address:   ctx.address,
       lang:      ctx.lang,
@@ -245,55 +225,29 @@ export async function routeCommand(
     onSentence: ctx.onSentence,
     toolContext,
   };
-  const askClaudeFallback = () => askClaudeWithTools({
-    ...commonParams,
-    apiKey: ctx.apiKey,
-    model: isSimpleConversational(text, ctx.history.length) ? HAIKU_MODEL : undefined,
-  });
+  // ROUND_INPUT_ROUTING_1 (2026-09-23, product-owner-directed) — this used to pick Claude/OpenAI/
+  // Gemini off `ctx.modelProvider` (defaulting to Claude when unset) and fall back to Claude on
+  // ANY failure of whichever was picked. Device-proven bug: reaching this block at all (only
+  // possible today via brainRouter.ts's routeThroughBrain returning a genuine failure, itself now
+  // fixed to answer honestly instead of falling through here — see that file) used to mean a
+  // SECOND, unrelated provider (Anthropic, api.anthropic.com) got called silently, violating the
+  // standing "OpenAI is the only active Brain provider, no automatic fallback" decision. This is
+  // the last place in the app that could still reach a non-OpenAI provider for ordinary
+  // conversation/tool-use — OpenAI only now, no Claude/Gemini branch, no fallback-on-failure.
   const now = Date.now();
   let reply: string;
-  if (ctx.modelProvider === 'openai') {
-    // Rate-limit circuit breaker (product-owner-confirmed live 2026-08-25) — see voiceAgent.ts's
-    // identical mechanism for the full rationale: skip a provider entirely for a cooldown once it
-    // 429s, instead of re-proving the same guaranteed failure on every single turn before falling
-    // back to Claude.
-    if (now < openaiChatRateLimitedUntil) {
-      reply = ctx.apiKey ? await askClaudeFallback() : conversationFallbackLine(ctx.lang, ctx.address);
-    } else {
+  if (now < openaiChatRateLimitedUntil) {
+    reply = conversationFallbackLine(ctx.lang, ctx.address);
+  } else {
     try {
       reply = await askOpenAIWithTools({ ...commonParams, apiKey: ctx.openaiKey });
     } catch (e) {
-      // Confirmed live 2026-08-24: an unconfigured/rate-limited OpenAI account (429, no billing
-      // set up yet) made every ChatGPT-selected turn silently return the same unhelpful "I did
-      // not quite catch that" — openaiAgent.ts now throws instead of swallowing that, so this can
-      // fall back to Claude (the already-working, already-paid-for provider) rather than leaving
-      // the user stuck on a dead provider until they notice and switch it back manually in
-      // Settings. Only falls back when a Claude key actually exists — otherwise the OpenAI error
-      // is real and there's nothing else to try.
       if (String(e).includes('429')) openaiChatRateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
-      reply = ctx.apiKey ? await askClaudeFallback() : conversationFallbackLine(ctx.lang, ctx.address);
+      // Honest failure, recoverable — no hidden fallback to a different provider. Re-thrown so the
+      // caller (app/index.tsx's try/catch around routeCommand()) surfaces it the same way it
+      // already surfaces any other routeCommand() failure.
+      throw e;
     }
-    }
-  } else if (ctx.modelProvider === 'gemini') {
-    if (now < geminiChatRateLimitedUntil) {
-      reply = ctx.apiKey ? await askClaudeFallback() : conversationFallbackLine(ctx.lang, ctx.address);
-    } else {
-    try {
-      reply = await askGeminiWithTools({ ...commonParams, apiKey: ctx.geminiKey });
-    } catch (e) {
-      // Same fallback rule as OpenAI above — a bad/missing Gemini key or a disabled model
-      // (confirmed live 2026-08-25: gemini-2.5-flash 404s against some keys) must not strand the
-      // user on a dead provider.
-      if (String(e).includes('429')) geminiChatRateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
-      reply = ctx.apiKey ? await askClaudeFallback() : conversationFallbackLine(ctx.lang, ctx.address);
-    }
-    }
-  } else {
-    // Default provider is Claude. With no Anthropic key configured, don't let claudeAgent's own
-    // hardcoded English "I did not quite catch that" surface — use the single fallback line
-    // (Round 2 / Task 3). This is the last resort: the Build B brain and every other provider
-    // path have already been tried or are unconfigured.
-    reply = ctx.apiKey ? await askClaudeFallback() : conversationFallbackLine(ctx.lang, ctx.address);
   }
   return { agent: 'claude', reply };
 }

@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Image, Animated, Easing, useWindowDimensions } from 'react-native';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Image, Animated, Easing, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
-import Svg, { Circle } from 'react-native-svg';
+import Svg, { Circle, Path } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { logAudioDiag } from 'benson-foreground-service';
 import { QuickContactsWidget } from './canvas/QuickContactsWidget';
 import { fetchWeatherData, type WeatherData } from '../lib/contextEngine';
 import type { QuickContact } from '../lib/quickContacts';
@@ -31,20 +32,96 @@ function tap() {
 const PLATE_SOURCE     = require('../assets/brand/layer-plate.png');
 const ARCS_SOURCE      = require('../assets/brand/layer-arcs.png');
 const HAIRLINES_SOURCE = require('../assets/brand/layer-hairlines.png');
+const BACKGROUND_TEXTURE = require('../assets/brand/background-texture.png');
 
 const AnimatedImage = Animated.createAnimatedComponent(Image);
 
 // Continuous single-direction spin — never resets to 0, so it never visibly jumps backward.
-function useContinuousRotation(durationMs: number, clockwise: boolean) {
+function useContinuousRotation(durationMs: number, clockwise: boolean, active = true) {
   const value = useRef(new Animated.Value(0)).current;
   useEffect(() => {
+    if (!active) {
+      value.stopAnimation();
+      value.setValue(0);
+      return;
+    }
     const loop = Animated.loop(
       Animated.timing(value, { toValue: 1, duration: durationMs, easing: Easing.linear, useNativeDriver: true }),
     );
     loop.start();
     return () => loop.stop();
-  }, [value]);
+  }, [active, durationMs, value]);
   return value.interpolate({ inputRange: [0, 1], outputRange: clockwise ? ['0deg', '360deg'] : ['0deg', '-360deg'] });
+}
+
+// Background rebuild (2026-09-23, user-directed, reference: LOGO GRAFIC/437393c4...png) — the
+// prior flat `BG` fill is replaced by this same texture image, laid out adaptively instead of
+// assuming one phone's dimensions:
+//   - sized from useWindowDimensions() (live), never a fixed OnePlus resolution
+//   - resizeMode="cover" preserves the image's own aspect ratio and crops symmetrically —
+//     never stretches/distorts, never leaves an empty margin, on any screen ratio
+//   - absolutely positioned behind the whole root View, so safe-area/notch/system-bar handling
+//     already in the rest of this screen is completely unaffected (this layer never receives
+//     touches: pointerEvents="none")
+//   - user feedback (2026-09-23): the raw texture read as too dark, darker than the original
+//     flat `BG` fill it replaced — drawn at reduced opacity over the still-present `s.root`
+//     backgroundColor: BG (never removed, see below) so that original tone shows through and
+//     lightens the result, instead of the texture's own near-black tone standing alone.
+function BackgroundTexture() {
+  const { width, height } = useWindowDimensions();
+  return (
+    <Image
+      source={BACKGROUND_TEXTURE}
+      style={[StyleSheet.absoluteFillObject, { width, height, opacity: 0.55 }]}
+      resizeMode="cover"
+    />
+  );
+}
+
+type AnchorRect = { x: number; y: number; width: number; height: number };
+
+// Reports this child's position relative to the SAME root View the Svg overlay below fills —
+// onLayout's nativeEvent.layout is already relative to the immediate parent, and every anchored
+// control here is a direct child of s.root, exactly like <ControlConduits> itself, so no
+// separate measureInWindow() step (and its extra async round trip) is needed.
+function useAnchorReport(onAnchor: (r: AnchorRect) => void) {
+  return useCallback(
+    (e: LayoutChangeEvent) => {
+      const { x, y, width, height } = e.nativeEvent.layout;
+      onAnchor({ x, y, width, height });
+    },
+    [onAnchor],
+  );
+}
+
+// The texture's own baked-in circuit lines are decorative only — on a different screen size/ratio
+// they land wherever `cover` cropping happens to leave them, never guaranteed to reach a real
+// control. These two conduits are drawn fresh every render from each control's ACTUAL measured
+// center (via useAnchorReport above), so they visibly terminate at the mute button and the
+// settings gear on every phone, not just the reference device. Renders nothing until both anchors
+// have reported at least once (avoids a flash of wrongly-routed lines before first layout).
+function ControlConduits({ muteAnchor, gearAnchor }: { muteAnchor: AnchorRect | null; gearAnchor: AnchorRect | null }) {
+  const { width } = useWindowDimensions();
+  if (!muteAnchor || !gearAnchor) return null;
+
+  const muteCx = muteAnchor.x + muteAnchor.width / 2;
+  const muteCy = muteAnchor.y + muteAnchor.height / 2;
+  const gearCx = gearAnchor.x + gearAnchor.width / 2;
+  const gearCy = gearAnchor.y + gearAnchor.height / 2;
+
+  // Simple two-segment "elbow" per conduit, matching the reference texture's own right-angle
+  // routing style: straight down from the top edge, then straight across into the control.
+  const mutePath = `M ${muteCx} 0 L ${muteCx} ${Math.max(0, muteCy - 18)} L ${muteCx + muteAnchor.width / 2 + 10} ${muteCy}`;
+  const gearPath = `M ${gearCx} 0 L ${gearCx} ${Math.max(0, gearCy - 14)}`;
+
+  return (
+    <Svg width={width} pointerEvents="none" style={StyleSheet.absoluteFillObject}>
+      <Path d={mutePath} stroke={GOLD} strokeWidth={1.5} fill="none" opacity={0.55} strokeLinecap="round" />
+      <Circle cx={muteCx + muteAnchor.width / 2 + 10} cy={muteCy} r={3} fill={GOLD} opacity={0.7} />
+      <Path d={gearPath} stroke={GREEN} strokeWidth={1.5} fill="none" opacity={0.55} strokeLinecap="round" />
+      <Circle cx={gearCx} cy={Math.max(0, gearCy - 14)} r={3} fill={GREEN} opacity={0.7} />
+    </Svg>
+  );
 }
 
 // "Silent / Fully Off" — the only thing TopControls still renders is the way BACK on: a full-width
@@ -73,8 +150,9 @@ function TopControls({ silenced, onToggleSilence }: {
 // status bar/notch on any phone, not a fixed guess. Keeps listening (wake word + commands still
 // work) but makes no sound; distinct from "fully off", which stops listening entirely and now
 // lives in Settings.
-function MuteButton({ muted, onToggleMute, silenced }: { muted: boolean; onToggleMute: () => void; silenced: boolean }) {
+function MuteButton({ muted, onToggleMute, silenced, onAnchor }: { muted: boolean; onToggleMute: () => void; silenced: boolean; onAnchor: (r: AnchorRect) => void }) {
   const insets = useSafeAreaInsets();
+  const reportAnchor = useAnchorReport(onAnchor);
   // Hidden while fully silenced — user-directed 2026-08-23: this button's top-left position
   // physically overlapped the "BENSON E OPRIT" banner (same corner, same zIndex, painted after it),
   // so tapping the banner was actually hitting this button instead — toggleMute() has no visible
@@ -83,14 +161,37 @@ function MuteButton({ muted, onToggleMute, silenced }: { muted: boolean; onToggl
   // entirely instead of just nudging positions further apart.
   if (silenced) return null;
   return (
-    <View style={[s.muteButtonCorner, { top: insets.top + 8 }]}>
+    <View style={[s.muteButtonCorner, { top: insets.top + 18, left: 26 }]} onLayout={reportAnchor}>
       <TouchableOpacity
-        style={[s.muteButton, muted && s.muteButtonActive]}
+        style={s.muteButton}
         hitSlop={14}
         onPress={() => { tap(); onToggleMute(); }}
         accessibilityLabel={muted ? 'Pornește sunetul' : 'Mod mut, ascultă fără sunet'} accessibilityRole="button"
         accessibilityState={{ selected: muted }}>
-        <Ionicons name={muted ? 'megaphone' : 'megaphone-outline'} size={22} color={muted ? '#2E3742' : GOLD} />
+        <Ionicons name={muted ? 'megaphone' : 'megaphone-outline'} size={22} color={muted ? GREEN : GOLD} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// Camera shortcut, top-right corner mirroring the mute button (user-directed 2026-09-23, revised
+// to top-right per screen.jpg). Calls a DEDICATED direct-launch handler (onOpenCamera), not
+// onSubmitText('deschide camera') — that text pipeline was tried first and found ambiguous
+// on-device: several OTHER installed packages also contain "camera" in their name, and the
+// on-screen fallback ended up re-clicking this same button's own accessibilityLabel instead of
+// opening the app. See app/index.tsx's handleOpenCamera for the deterministic fix. Hidden while
+// silenced, same reasoning as MuteButton just above.
+function CameraButton({ silenced, onOpenCamera }: { silenced: boolean; onOpenCamera: () => void }) {
+  const insets = useSafeAreaInsets();
+  if (silenced) return null;
+  return (
+    <View style={[s.cameraButtonCorner, { top: insets.top + 18, right: 6 }]}>
+      <TouchableOpacity
+        style={s.muteButton}
+        hitSlop={14}
+        onPress={() => { tap(); onOpenCamera(); }}
+        accessibilityLabel="Deschide camera" accessibilityRole="button">
+        <Ionicons name="camera-outline" size={22} color={GOLD} />
       </TouchableOpacity>
     </View>
   );
@@ -98,10 +199,11 @@ function MuteButton({ muted, onToggleMute, silenced }: { muted: boolean; onToggl
 
 // Small settings gear above the medallion — replaces the old bottom SYSTEM box. Spins slowly,
 // continuously, independent of the medallion's own rotation.
-function SettingsGear({ onOpenSettings }: { onOpenSettings: () => void }) {
-  const rotate = useContinuousRotation(20_000, true);
+function SettingsGear({ onOpenSettings, onAnchor, active }: { onOpenSettings: () => void; onAnchor: (r: AnchorRect) => void; active: boolean }) {
+  const rotate = useContinuousRotation(20_000, true, active);
+  const reportAnchor = useAnchorReport(onAnchor);
   return (
-    <View style={s.gearRow}>
+    <View style={s.gearRow} onLayout={reportAnchor}>
       <TouchableOpacity hitSlop={14} onPress={() => { tap(); onOpenSettings(); }}
         accessibilityLabel="System settings" accessibilityRole="button">
         <Animated.View style={{ transform: [{ rotate }] }}>
@@ -115,20 +217,20 @@ function SettingsGear({ onOpenSettings }: { onOpenSettings: () => void }) {
 // Sized from useWindowDimensions() (read live, inside the component) rather than a module-scope
 // Dimensions.get('window') call — the latter can run before the native bridge has reported real
 // dimensions, producing an unconstrained size. Edge-to-edge, per spec.
-function Medallion({ onToggleConvMode }: { onToggleConvMode: () => void }) {
+function Medallion({ onManualActivation, active }: { onManualActivation: () => void; active: boolean }) {
   const { width } = useWindowDimensions();
   const size = Math.round(width);
   // 5042ms — the exact loop duration of the reference video (video (1).mp4, read from its mvhd
   // box: timescale 1000, duration 5042 units), so one full turn matches the original pacing.
-  const arcsRotate = useContinuousRotation(5042, true);
-  const hairlinesRotate = useContinuousRotation(5042, false);
+  const arcsRotate = useContinuousRotation(5042, true, active);
+  const hairlinesRotate = useContinuousRotation(5042, false, active);
   return (
     <View style={s.medallionZone}>
       <TouchableOpacity
         style={{ width: size, height: size }}
         activeOpacity={0.85}
-        onPress={() => { tap(); onToggleConvMode(); }}
-        accessibilityLabel="Toggle listening"
+        onPress={() => { tap(); onManualActivation(); }}
+        accessibilityLabel="Start voice command"
         accessibilityRole="button">
         {/* Rotating rings drawn first (behind); the plate goes last (in front) so the static
             wordmark/background — opaque everywhere except the two ring tracks — always covers
@@ -271,12 +373,18 @@ function ListeningWaveform({ active, level }: { active: boolean; level: number }
 // "Hannah" transcribed as "Ana" — not a fuzzy-match problem, the wrong word from the start), typed
 // text goes through the exact same handleIncomingText pipeline a voice transcript does, so a
 // command can be corrected/retried by typing instead of only by speaking.
-function ManualTextInput({ onSubmitText }: { onSubmitText: (text: string) => void }) {
+function ManualTextInput({ onSubmitText }: { onSubmitText: (text: string, requestId?: string) => void }) {
   const [value, setValue] = useState('');
   function submit() {
+    // ROUND_INPUT_ROUTING_1 (2026-09-23) — the RAW `value` state at the exact moment of submit,
+    // BEFORE trim(), tagged with a requestId that also appears in MISSION_INPUT (app/index.tsx) —
+    // this is the real production field (the debug screen has its own separate copy of this same
+    // trace), so a submitted-vs-received mismatch found here is the one that matters live.
+    const requestId = `main-${Date.now()}`;
+    logAudioDiag('DEBUG_FIELD_AT_SUBMIT', `requestId=${requestId} raw=${JSON.stringify(value)} length=${value.length}`);
     const trimmed = value.trim();
     if (!trimmed) return;
-    onSubmitText(trimmed);
+    onSubmitText(trimmed, requestId);
     setValue('');
   }
   return (
@@ -298,30 +406,30 @@ function ManualTextInput({ onSubmitText }: { onSubmitText: (text: string) => voi
   );
 }
 
-// No box — just the listening indicator, floating directly on the background. On strictly when
-// the master's voice is actually being recorded, so seeing it move is the confirmation BENSON
-// is hearing and about to act, never a decorative always-on animation.
-function Dashboard({ listening, micVolume }: { listening: boolean; micVolume: number }) {
+// No box — just the listening indicator, floating directly on the background. Passive wake uses
+// the native reader state; the waveform moves only during command capture, when live mic level exists.
+function Dashboard({ listening, wakeActive, micVolume }: { listening: boolean; wakeActive: boolean; micVolume: number }) {
+  const active = listening || wakeActive;
   return (
     <View style={s.listeningBlock}>
-      <RadialIndicator active={listening} />
-      <Text style={s.listeningLabel}>{listening ? 'LISTENING' : ''}</Text>
+      <RadialIndicator active={active} />
+      <Text style={s.listeningLabel}>{listening ? 'LISTENING' : wakeActive ? 'ASCULT' : ''}</Text>
       <ListeningWaveform active={listening} level={micVolume} />
     </View>
   );
 }
 
 export function BensonMainScreen({
-  listening, micVolume, loading, speaking, showQuickContacts,
+  listening, wakeActive, micVolume, loading, speaking, showQuickContacts,
   lastReply, quickContacts, isInPip, silenced, muted,
-  onToggleConvMode, onOpenSettings, onToggleQuickContacts,
-  onQuickContactsChange, onSubmitText, onToggleSilence, onToggleMute,
+  onManualActivation, onOpenSettings, onToggleQuickContacts,
+  onQuickContactsChange, onSubmitText, onToggleSilence, onToggleMute, onOpenCamera,
 }: {
   listening: boolean;
+  wakeActive: boolean;
   micVolume: number;
   loading: boolean;
   speaking: boolean;
-  convMode: boolean;
   carMode: boolean;
   showQuickContacts: boolean;
   activeCard: unknown;
@@ -330,28 +438,38 @@ export function BensonMainScreen({
   isInPip?: boolean;
   silenced: boolean;
   muted: boolean;
-  onToggleConvMode: () => void;
+  onManualActivation: () => void;
   onOpenSettings: () => void;
   onToggleQuickContacts: () => void;
   onToggleCarMode: () => void;
   onToggleTodo: (id: string) => void;
   onClearCompletedTodo: () => void;
   onQuickContactsChange: (contacts: QuickContact[]) => void;
-  onSubmitText: (text: string) => void;
+  onSubmitText: (text: string, requestId?: string) => void;
   onToggleSilence: () => void;
   onToggleMute: () => void;
+  onOpenCamera: () => void;
 }) {
+  // Declared before the isInPip early return — React hooks must run unconditionally, in the
+  // same order, every render.
+  const [muteAnchor, setMuteAnchor] = useState<AnchorRect | null>(null);
+  const [gearAnchor, setGearAnchor] = useState<AnchorRect | null>(null);
+
   if (isInPip) return <PipLogoView />;
 
   return (
     <View style={s.root}>
+      <BackgroundTexture />
+      <ControlConduits muteAnchor={muteAnchor} gearAnchor={gearAnchor} />
+
       <TopControls silenced={silenced} onToggleSilence={onToggleSilence} />
 
-      <MuteButton muted={muted} onToggleMute={onToggleMute} silenced={silenced} />
+      <MuteButton muted={muted} onToggleMute={onToggleMute} silenced={silenced} onAnchor={setMuteAnchor} />
+      <CameraButton silenced={silenced} onOpenCamera={onOpenCamera} />
 
-      <SettingsGear onOpenSettings={onOpenSettings} />
+      <SettingsGear onOpenSettings={onOpenSettings} onAnchor={setGearAnchor} active={listening || wakeActive || loading || speaking} />
 
-      <Medallion onToggleConvMode={onToggleConvMode} />
+      <Medallion onManualActivation={onManualActivation} active={listening || wakeActive || loading || speaking} />
 
       <ClockWeatherWidget />
 
@@ -365,7 +483,7 @@ export function BensonMainScreen({
 
       <ManualTextInput onSubmitText={onSubmitText} />
 
-      <Dashboard listening={listening} micVolume={micVolume} />
+      <Dashboard listening={listening} wakeActive={wakeActive} micVolume={micVolume} />
     </View>
   );
 }
@@ -387,11 +505,13 @@ const s = StyleSheet.create({
   // design (a megaphone the user just taps), no pill/label.
   // Top-left, floating — `top` set inline from real safe-area insets (see MuteButton).
   muteButtonCorner: { position: 'absolute', left: 16, zIndex: 20 },
+  // Camera shortcut — top-right corner, mirroring the mute button's top-left position.
+  cameraButtonCorner: { position: 'absolute', right: 16, zIndex: 20 },
+  // Keycap, not a circle — no drawn circle, styled as a squared-off key (thin border, small corner
+  // radius).
   muteButton: {
-    width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: LINE, backgroundColor: BG_RAISED,
+    width: 44, height: 44, alignItems: 'center', justifyContent: 'center',
   },
-  muteButtonActive: { backgroundColor: GOLD, borderColor: GOLD },
 
   // Gear sits above the medallion, centered — replaces the old bottom SYSTEM box.
   gearRow: { alignItems: 'center', paddingTop: 48, paddingHorizontal: 20 },

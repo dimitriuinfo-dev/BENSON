@@ -99,16 +99,16 @@ export function placeWhatsAppCall(contactName, autoPressCall) {
 // sequence (launch → verify package → search → type → match contact → verify chat → call → verify
 // call screen) on its own coroutine, so BENSON backgrounding when WhatsApp opens does NOT stall
 // it. Resolves { success, step, error, contact, elapsedMs }.
-export function runWhatsAppCallNative(contact) {
-  return NativeModule.runWhatsAppCallNative(contact);
+export function runWhatsAppCallNative(contact, mode = 'voice_call') {
+  return NativeModule.runWhatsAppCallNative(contact, mode);
 }
 
 // WA-FIX-4 — DIRECT-CONTACT-DEEPLINK. `phone` is already-normalised digits resolved from the local
 // address book; native opens whatsapp://send?phone=<phone>, verifies the conversation is
 // `expectedName`, then reuses the proven call-button + verify sequence. No Chats search / scroll.
 // Resolves { success, step, error, contact, elapsedMs }.
-export function runWhatsAppOpenConversationCall(phone, expectedName) {
-  return NativeModule.runWhatsAppOpenConversationCall(phone, expectedName);
+export function runWhatsAppOpenConversationCall(phone, expectedName, mode = 'voice_call') {
+  return NativeModule.runWhatsAppOpenConversationCall(phone, expectedName, mode);
 }
 
 // ROUND_WA_GOVERNANCE_WRITE_1 — PHASE A. Opens the exact conversation for `phone` (resolved

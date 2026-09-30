@@ -37,6 +37,9 @@ function toTrustedContact(c: Contacts.ExistingContact): TrustedContact | null {
     displayName: c.name,
     phoneNumbers: (c.phoneNumbers ?? []).map((p) => p.number).filter((n): n is string => Boolean(n)),
     emailAddresses: (c.emails ?? []).map((e) => e.email).filter((e): e is string => Boolean(e)),
+    // BENSON CONTACT+CALL round (2026-09-23) — read-only, shown only in a call confirmation; never
+    // written anywhere, never sent to the Brain (see contextResolver.ts's own header comment).
+    imageUri: c.image?.uri,
   };
 }
 
@@ -46,7 +49,7 @@ export async function loadDeviceContacts(): Promise<TrustedContact[]> {
   const granted = (await getContactsPermissionState()) === 'granted';
   if (!granted) return [];
   const { data } = await Contacts.getContactsAsync({
-    fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Emails],
+    fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Emails, Contacts.Fields.Image],
   });
   return data.map(toTrustedContact).filter((c): c is TrustedContact => c !== null);
 }

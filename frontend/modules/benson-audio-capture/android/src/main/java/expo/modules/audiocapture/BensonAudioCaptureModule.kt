@@ -10,11 +10,15 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.sqrt
@@ -67,7 +71,16 @@ private const val MAX_DURATION_MS = 15000L
 // oprește captura — nu mai ține microfonul deschis până la MAX_DURATION_MS pe o captură fără
 // vorbire (log de până acum: șapte capturi consecutive bytes=0 reason=max_duration = 105s).
 // Revert: EARLY_NO_SPEECH_STOP_MS = MAX_DURATION_MS (dezactivează efectiv oprirea timpurie).
-private const val EARLY_NO_SPEECH_STOP_MS = 3000L
+//
+// ROUND_DEAF_WINDOW_DIAG_1 (2026-09-23, device-proven) — was 3000. Măsurat live: după un "Benson"
+// rostit singur (fără comandă imediat după), fereastra oarbă totală până bucla nativă de veghe
+// asculta din nou era ~3,3s — dominată de această constantă (faza rămâne "pre_speech" tot timpul,
+// nimic nu trece de RMS_THRESHOLD). Distinctă de SILENCE_TIMEOUT_MS (linia de mai jos, deja
+// testată la 800 și respinsă — tăia comenzi reale la o pauză scurtă) — aici nu există riscul
+// acela: dacă n-a fost detectat NICIUN sunet încă, nu se taie nimic din mijlocul unei comenzi.
+// 1500 lasă timp de reacție real (BENSON nu dă niciun semnal sonor la activare — SHADOW_MODE_1),
+// dar înjumătățește timpul de așteptare pe tăcere completă.
+private const val EARLY_NO_SPEECH_STOP_MS = 1500L
 private const val READ_CHUNK_MS = 50L
 
 // Pre-roll buffer (product-owner-directed, root cause confirmed in code review 2026-07-31):
@@ -96,10 +109,14 @@ private const val PRE_ROLL_CHUNKS = 11
 // elsewhere in this app, so it can be flipped without a rebuild. Default false preserves today's
 // value exactly (see isNoiseSuppressorEnabled() below).
 private const val PREFS_NAME = "benson_watchdog_prefs"
+private const val DIAGNOSTIC_WAV_NAME = "benson_diagnostic_once.wav"
+private const val DIAGNOSTIC_WAV_TTL_MS = 30L * 60L * 1000L
 
 class BensonAudioCaptureModule : Module() {
   private var captureThread: Thread? = null
   private val stopRequested = AtomicBoolean(false)
+  private val diagnosticExpiryHandler = Handler(Looper.getMainLooper())
+  private var diagnosticExpiryRunnable: Runnable? = null
 
   // Audio focus (2026-08-28) — while BENSON is capturing, ask the system to duck every other
   // app's playback (AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK) so e.g. Waze's turn-by-turn voice drops
@@ -166,12 +183,27 @@ class BensonAudioCaptureModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("BensonAudioCapture")
 
+    OnCreate {
+      // A retained diagnostic never survives a fresh app process.
+      appContext.reactContext?.let { context ->
+        File(context.cacheDir, DIAGNOSTIC_WAV_NAME).delete()
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+          .putBoolean("retain_next_diagnostic_capture", false)
+          .putLong("diagnostic_capture_expiry_at", 0L).apply()
+      }
+    }
+
     Events("onCaptureEnd", "onVolumeChanged")
 
     AsyncFunction("startCapture") { promise: expo.modules.kotlin.Promise ->
       val context = appContext.reactContext
       if (context == null) {
         promise.reject("NO_CONTEXT", "No react context available", null)
+        return@AsyncFunction
+      }
+      if (context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean("call_audio_active", false)) {
+        Log.i("BENSON_AUDIO", "CAPTURE_REJECTED reason=call_audio_active")
+        promise.resolve(null)
         return@AsyncFunction
       }
       if (captureThread?.isAlive == true) {
@@ -188,6 +220,33 @@ class BensonAudioCaptureModule : Module() {
     AsyncFunction("stopCapture") { promise: expo.modules.kotlin.Promise ->
       stopRequested.set(true)
       promise.resolve(null)
+    }
+
+    // One-shot diagnostic retention. This is OFF by default and only armed by the explicit
+    // diagnostic UI after the user consents to temporary local storage of one utterance.
+    AsyncFunction("armNextDiagnosticCapture") { promise: expo.modules.kotlin.Promise ->
+      val context = appContext.reactContext
+      if (context == null) {
+        promise.reject("NO_CONTEXT", "No react context available", null)
+        return@AsyncFunction
+      }
+      context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .edit()
+        .putBoolean("retain_next_diagnostic_capture", true)
+        .putLong("diagnostic_capture_expiry_at", System.currentTimeMillis() + 60_000L)
+        .apply()
+      promise.resolve(true)
+    }
+
+    AsyncFunction("deleteDiagnosticCapture") { promise: expo.modules.kotlin.Promise ->
+      val context = appContext.reactContext
+      val file = context?.let { File(it.cacheDir, DIAGNOSTIC_WAV_NAME) }
+      context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+        ?.putBoolean("retain_next_diagnostic_capture", false)
+        ?.putLong("diagnostic_capture_expiry_at", 0L)?.apply()
+      diagnosticExpiryRunnable?.let { diagnosticExpiryHandler.removeCallbacks(it) }
+      diagnosticExpiryRunnable = null
+      promise.resolve(file?.delete() ?: false)
     }
   }
 
@@ -270,6 +329,11 @@ class BensonAudioCaptureModule : Module() {
       Log.i(TAG, "Capture started")
 
       while (!stopRequested.get()) {
+        if (context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean("call_audio_active", false)) {
+          Log.i("BENSON_AUDIO", "CAPTURE_CANCELLED reason=call_audio_active")
+          finish(recorder, aec, ns, null, "call_audio_active", 0, peakRms)
+          return
+        }
         val now = System.currentTimeMillis()
         val elapsed = now - captureStartedAt
 
@@ -394,45 +458,39 @@ class BensonAudioCaptureModule : Module() {
   private fun writeWav(context: Context, pcmData: ByteArray): String? {
     if (pcmData.isEmpty()) return null
     val path = try {
-      val file = File(context.cacheDir, "benson_capture_${System.currentTimeMillis()}.wav")
+      val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+      val diagnostic = prefs.getBoolean("retain_next_diagnostic_capture", false)
+      if (diagnostic) prefs.edit().putBoolean("retain_next_diagnostic_capture", false).commit()
+      val file = if (diagnostic) File(context.cacheDir, DIAGNOSTIC_WAV_NAME)
+        else File(context.cacheDir, "benson_capture_${System.currentTimeMillis()}.wav")
       FileOutputStream(file).use { out ->
         out.write(buildWavHeader(pcmData.size))
         out.write(pcmData)
+      }
+      if (diagnostic) {
+        diagnosticExpiryRunnable?.let { diagnosticExpiryHandler.removeCallbacks(it) }
+        diagnosticExpiryRunnable = Runnable { file.delete(); diagnosticExpiryRunnable = null }
+        diagnosticExpiryHandler.postDelayed(diagnosticExpiryRunnable!!, DIAGNOSTIC_WAV_TTL_MS)
+        val data = file.readBytes()
+        val header = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+        val pcmBytes = if (data.size >= 44) header.getInt(40) else -1
+        val rate = if (data.size >= 28) header.getInt(24) else -1
+        val channels = if (data.size >= 24) header.getShort(22).toInt() else -1
+        val bits = if (data.size >= 36) header.getShort(34).toInt() else -1
+        val durationMs = if (pcmBytes >= 0 && rate > 0 && channels > 0 && bits > 0)
+          pcmBytes * 1000L / (rate * channels * (bits / 8L)) else -1L
+        val valid = data.size >= 44 && String(data, 0, 4) == "RIFF" && String(data, 8, 4) == "WAVE" &&
+          String(data, 12, 4) == "fmt " && String(data, 36, 4) == "data" && header.getShort(20).toInt() == 1 &&
+          pcmBytes + 44 == data.size && header.getInt(4) + 8 == data.size
+        Log.i("BENSON_AUDIO", "AUDIO_DIAGNOSTIC_RETAINED wavValid=$valid bytes=${data.size} pcmBytes=$pcmBytes " +
+          "sampleRateHz=$rate channels=$channels bits=$bits durationMs=$durationMs exactUploadedWav=true ttlMs=$DIAGNOSTIC_WAV_TTL_MS")
       }
       file.absolutePath
     } catch (e: Exception) {
       Log.e(TAG, "writeWav failed", e)
       null
     }
-    if (path != null) maybeDumpForDiagnostics(context, pcmData)
     return path
-  }
-
-  // Diagnostic-only copy of the exact same PCM this capture already produces for whisper —
-  // written to app-external storage (adb-pullable without root, unlike cacheDir above) so a
-  // human can actually listen to what the recognizer heard. Gated on the SAME toggle already
-  // exposed in the Debug Panel (AudioDiagnosticsPanel, app/debug.tsx) for BENSON_AUDIO logging —
-  // no new flag, no new UI. Reads the shared prefs directly (no Gradle dependency on
-  // benson-foreground-service, where AudioDiag.kt's flag actually lives) — same cross-module
-  // idiom already used elsewhere in this app (see BensonAccessibilityService.kt's Guardian
-  // heartbeat, which reads benson-foreground-service's own prefs the same way). Never touches
-  // the cacheDir file transcribeLocally() actually uses — purely additive, on failure just logs
-  // and does not affect capture/transcription.
-  private fun maybeDumpForDiagnostics(context: Context, pcmData: ByteArray) {
-    try {
-      val enabled = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        .getBoolean("audio_diagnostics_enabled", true)
-      if (!enabled) return
-      val dir = context.getExternalFilesDir(null) ?: return
-      val dumpFile = File(dir, "benson_audio_dump_${System.currentTimeMillis()}.wav")
-      FileOutputStream(dumpFile).use { out ->
-        out.write(buildWavHeader(pcmData.size))
-        out.write(pcmData)
-      }
-      Log.i("BENSON_AUDIO", "AUDIO_DUMP_WRITTEN path=${dumpFile.absolutePath}")
-    } catch (e: Exception) {
-      Log.e("BENSON_AUDIO", "AUDIO_DUMP_FAILED error=${e.message}")
-    }
   }
 
   private fun buildWavHeader(dataSize: Int): ByteArray {

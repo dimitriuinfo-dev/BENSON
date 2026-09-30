@@ -43,6 +43,7 @@ export type KnownAction =
   | 'open_app'
   | 'call_contact'
   | 'send_whatsapp_message'
+  | 'read_whatsapp_messages'
   | 'navigate'
   | 'search_web'
   | 'set_reminder'
@@ -51,7 +52,7 @@ export type KnownAction =
   | 'media_stop';
 
 export const KNOWN_ACTIONS: readonly KnownAction[] = [
-  'open_app', 'call_contact', 'send_whatsapp_message', 'navigate', 'search_web', 'set_reminder',
+  'open_app', 'call_contact', 'send_whatsapp_message', 'read_whatsapp_messages', 'navigate', 'search_web', 'set_reminder',
   'media_play', 'media_pause', 'media_stop',
 ];
 

@@ -4,6 +4,14 @@ import { setNormalAudioMode } from './audioMode';
 
 let currentSound: Audio.Sound | null = null;
 let audioModeSet = false;
+let speakEpoch = 0;
+
+async function stopCurrentSound(): Promise<void> {
+  if (!currentSound) return;
+  const sound = currentSound;
+  currentSound = null;
+  try { await sound.stopAsync(); await sound.unloadAsync(); } catch {}
+}
 
 // Uses a NON-exclusive (ducking) playback mode — see lib/agents/audioMode.ts for the full rationale.
 // Previously this claimed DoNotMix (exclusive AUDIOFOCUS_GAIN), which permanently killed other apps'
@@ -24,6 +32,7 @@ export async function speakWithOpenAI(
   onDone?: () => void,
   instructions?: string,
 ): Promise<void> {
+  const epoch = speakEpoch;
   const res = await fetch('https://api.openai.com/v1/audio/speech', {
     method: 'POST',
     headers: {
@@ -37,19 +46,23 @@ export async function speakWithOpenAI(
       ...(instructions ? { instructions } : {}),
     }),
   });
+  if (epoch !== speakEpoch) return;
   if (!res.ok) throw new Error(`OpenAI TTS request failed: ${res.status}`);
 
   const buffer = await res.arrayBuffer();
+  if (epoch !== speakEpoch) return;
   const file = new File(Paths.cache, `benson-tts-${Date.now()}.mp3`);
   file.create();
   file.write(new Uint8Array(buffer));
 
-  await stopOpenAITTS();
+  await stopCurrentSound();
+  if (epoch !== speakEpoch) return;
   await ensurePlaybackAudioMode();
   const { sound } = await Audio.Sound.createAsync({ uri: file.uri }, { shouldPlay: true });
+  if (epoch !== speakEpoch) { try { await sound.stopAsync(); await sound.unloadAsync(); } catch {}; return; }
   currentSound = sound;
   sound.setOnPlaybackStatusUpdate((status) => {
-    if (status.isLoaded && status.didJustFinish) {
+    if (epoch === speakEpoch && status.isLoaded && status.didJustFinish) {
       if (currentSound === sound) currentSound = null;
       // Awaiting unloadAsync before onDone (2026-07-09): expo-av holds DoNotMix audio focus
       // until the player actually stops/unloads, not just when playback reaches the end. Firing
@@ -63,9 +76,6 @@ export async function speakWithOpenAI(
 }
 
 export async function stopOpenAITTS(): Promise<void> {
-  if (currentSound) {
-    const sound = currentSound;
-    currentSound = null;
-    try { await sound.stopAsync(); await sound.unloadAsync(); } catch {}
-  }
+  speakEpoch += 1;
+  await stopCurrentSound();
 }

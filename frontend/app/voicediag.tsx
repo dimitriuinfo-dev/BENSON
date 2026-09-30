@@ -1,16 +1,16 @@
-// BENSON — Isolated Voice Diagnostic Harness.
+// BENSON â€” Isolated Voice Diagnostic Harness.
 //
 // PURPOSE (read this before editing): give REAL, on-device proof of exactly where the
 // microphone -> speech-recognition -> transcript -> orchestrator chain breaks, WITHOUT depending
 // on adb logcat. Every one of the four checkpoints the product owner requires is shown live on
 // screen, with timestamps:
 //
-//   1. RECORD_AUDIO permission — checked programmatically (not assumed).
-//   2. Recognition session actually STARTS — proven by the native `start` event.
-//   3. The engine returns SOMETHING — any transcript (even wrong), `nomatch`, or the exact error
+//   1. RECORD_AUDIO permission â€” checked programmatically (not assumed).
+//   2. Recognition session actually STARTS â€” proven by the native `start` event.
+//   3. The engine returns SOMETHING â€” any transcript (even wrong), `nomatch`, or the exact error
 //      code/name. Mic ENERGY (volumechange RMS) is also shown: if it moves, the microphone
 //      hardware + permission + session are all genuinely working.
-//   4. The transcript reaches the ORCHESTRATOR — optional live routing through the SAME runMission
+//   4. The transcript reaches the ORCHESTRATOR â€” optional live routing through the SAME runMission
 //      the working typed Debug Panel uses, with the reply shown on screen.
 //
 // This screen deliberately talks DIRECTLY to `expo-speech-recognition` and imports NOTHING from
@@ -19,21 +19,27 @@
 // nothing appears even here, the bug is the recognizer/permission/device itself.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Platform, Alert } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
+import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system/legacy';
+import { armNextDiagnosticCapture, deleteDiagnosticCapture, stopCapture } from 'benson-audio-capture';
+import { nativeWakeSetOwner } from 'benson-foreground-service';
+import { getEngineConfig } from '../lib/engines/settingsStore';
+import { transcribeWithDeepgram } from '../lib/engines/stt/deepgramStt';
 import { runMission } from '../src/core/orchestrator';
 
 const KEEP_AWAKE_TAG = 'benson-voicediag';
 
-// The three languages BENSON is used in — lets the tester rule the language/locale in or out on
+// The three languages BENSON is used in â€” lets the tester rule the language/locale in or out on
 // the spot (Defect A in AUDIO_DIAGNOSIS_REPORT.md was a wrong-locale bug).
 const LANGS = ['ro-RO', 'en-US', 'de-DE'] as const;
 type Lang = (typeof LANGS)[number];
 
 // Every native event this library can emit (per ExpoSpeechRecognitionModule.types.ts). We attach
-// to ALL of them so nothing can fail silently — the absence of an expected event is itself the clue.
+// to ALL of them so nothing can fail silently â€” the absence of an expected event is itself the clue.
 const EVENT_NAMES = [
   'start', 'audiostart', 'soundstart', 'speechstart',
   'result', 'nomatch',
@@ -47,10 +53,21 @@ function fmtMs(ms: number) {
   return `+${(ms / 1000).toFixed(2)}s`;
 }
 
+function inspectWavHeader(base64: string, fileBytes: number): string {
+  const b = atob(base64.slice(0, 80));
+  const u16 = (i: number) => b.charCodeAt(i) | (b.charCodeAt(i + 1) << 8);
+  const u32 = (i: number) => (b.charCodeAt(i) | (b.charCodeAt(i + 1) << 8) | (b.charCodeAt(i + 2) << 16) | (b.charCodeAt(i + 3) << 24)) >>> 0;
+  const pcmBytes = u32(40), rate = u32(24), channels = u16(22), bits = u16(34);
+  const duration = rate && channels && bits ? pcmBytes / (rate * channels * bits / 8) : 0;
+  const valid = b.slice(0, 4) === 'RIFF' && b.slice(8, 12) === 'WAVE' && b.slice(12, 16) === 'fmt ' &&
+    u16(20) === 1 && b.slice(36, 40) === 'data' && fileBytes === pcmBytes + 44;
+  return `WAV ${valid ? 'valid' : 'INVALID'} Â· PCM=${u16(20)} Â· ${rate}Hz Â· ${channels}ch Â· ${bits}bit Â· data=${pcmBytes}B Â· ${duration.toFixed(2)}s Â· file=${fileBytes}B`;
+}
+
 export default function VoiceDiagScreen() {
   const router = useRouter();
 
-  // Device recognizer capabilities — the first thing to check on OxygenOS/ColorOS, where the
+  // Device recognizer capabilities â€” the first thing to check on OxygenOS/ColorOS, where the
   // default recognition service is often NOT Google's and may be missing entirely.
   const [caps, setCaps] = useState<string>('(tap "Check device" to load)');
 
@@ -72,9 +89,14 @@ export default function VoiceDiagScreen() {
 
   const [lang, setLang] = useState<Lang>('ro-RO');
   const [onDevice, setOnDevice] = useState(false);      // requiresOnDeviceRecognition toggle
-  const [interim, setInterim] = useState(true);         // interimResults — flip OFF to replicate the live app exactly
-  const [autoRoute, setAutoRoute] = useState(true);     // send final transcript to orchestrator
+  const [interim, setInterim] = useState(true);         // interimResults â€” flip OFF to replicate the live app exactly
+  const [autoRoute, setAutoRoute] = useState(false);    // diagnostics never execute commands by default
   const [listening, setListening] = useState(false);
+  const [wavPath, setWavPath] = useState('');
+  const [wavInfo, setWavInfo] = useState('');
+  const [wavTranscript, setWavTranscript] = useState('');
+  const [wavBusy, setWavBusy] = useState(false);
+  const wavSound = useRef<Audio.Sound | null>(null);
 
   const [log, setLog] = useState<LogLine[]>([]);
   const startTsRef = useRef<number>(0);
@@ -85,8 +107,8 @@ export default function VoiceDiagScreen() {
     setLog((prev) => [...prev, { t, tag, detail }]);
   }, []);
 
-  // Keep the screen awake — a sleeping screen is exactly what stopped prior live tests from ever
-  // capturing a full attempt (see AUDIO_DIAGNOSIS_REPORT.md §8).
+  // Keep the screen awake â€” a sleeping screen is exactly what stopped prior live tests from ever
+  // capturing a full attempt (see AUDIO_DIAGNOSIS_REPORT.md Â§8).
   useFocusEffect(
     useCallback(() => {
       activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch(() => {});
@@ -140,12 +162,12 @@ export default function VoiceDiagScreen() {
           append('languagedetection', `lang=${ev?.detectedLanguage ?? '?'} conf=${ev?.confidence ?? '?'}`);
           return;
         }
-        // audiostart / speechstart / speechend / etc — lightweight markers
+        // audiostart / speechstart / speechend / etc â€” lightweight markers
         append(name, ev ? JSON.stringify(ev).slice(0, 80) : '');
       }),
     );
 
-    // volumechange is high-frequency — handle separately, only track the peak so the log stays readable.
+    // volumechange is high-frequency â€” handle separately, only track the peak so the log stays readable.
     const volSub = ExpoSpeechRecognitionModule.addListener('volumechange' as any, (ev: any) => {
       const v = typeof ev?.value === 'number' ? ev.value : -999;
       setPeakRms((prev) => (v > prev ? v : prev));
@@ -159,11 +181,11 @@ export default function VoiceDiagScreen() {
   }, [autoRoute]);
 
   async function routeToOrchestrator(text: string) {
-    append('orchestrator', `runMission("${text}") …`);
+    append('orchestrator', `runMission("${text}") â€¦`);
     try {
       const result = await runMission(text, { source: 'voice', contacts: [] });
       append('orchestrator', `handled=${result.handled} message="${result.message ?? ''}"`);
-      setOrchestratorReply(result.handled ? (result.message ?? '(no message)') : '(not handled — would fall through to Claude)');
+      setOrchestratorReply(result.handled ? (result.message ?? '(no message)') : '(not handled â€” would fall through to Claude)');
     } catch (e) {
       append('orchestrator', `EXCEPTION ${String(e)}`);
       setOrchestratorReply(`EXCEPTION: ${String(e)}`);
@@ -172,7 +194,7 @@ export default function VoiceDiagScreen() {
 
   async function checkDevice() {
     if (Platform.OS !== 'android') {
-      setCaps(`Platform=${Platform.OS} — this harness targets Android device builds.`);
+      setCaps(`Platform=${Platform.OS} â€” this harness targets Android device builds.`);
       return;
     }
     try {
@@ -240,11 +262,11 @@ export default function VoiceDiagScreen() {
     const granted = await checkPermission();
     append('permission', `granted=${granted}`);
     if (!granted) {
-      append('permission', 'NOT granted — requesting…');
+      append('permission', 'NOT granted â€” requestingâ€¦');
       await requestPermission();
       const regrant = await checkPermission();
       if (!regrant) {
-        append('permission', 'STILL NOT granted — chain stops at step 1. Grant mic in Android Settings.');
+        append('permission', 'STILL NOT granted â€” chain stops at step 1. Grant mic in Android Settings.');
         return;
       }
     }
@@ -273,6 +295,98 @@ export default function VoiceDiagScreen() {
     }
   }
 
+  async function startExactWavCapture() {
+    if (Platform.OS !== 'android' || wavBusy) return;
+    Alert.alert(
+      'PÄƒstrare temporarÄƒ a unei capturi',
+      'BENSON va pÄƒstra local, o singurÄƒ datÄƒ, copia exactÄƒ WAV folositÄƒ pentru STT. Nu va porni executorul. Confirmi aceastÄƒ capturÄƒ?',
+      [
+        { text: 'AnuleazÄƒ', style: 'cancel' },
+        { text: 'Sunt de acord', onPress: () => { void captureExactWav(); } },
+      ],
+    );
+  }
+
+  async function captureExactWav() {
+    setWavBusy(true);
+    setWavPath(''); setWavInfo(''); setWavTranscript('');
+    try {
+      // Keep the production native wake AudioRecord as the sole microphone owner. The one-shot
+      // consent flag is consumed by NativeCloudWake when it builds the exact WAV request body;
+      // that same utterance is never routed to the executor while this diagnostic is armed.
+      await deleteDiagnosticCapture();
+      await armNextDiagnosticCapture();
+      await nativeWakeSetOwner('NONE');
+      const cache = FileSystem.cacheDirectory;
+      if (!cache) throw new Error('Temporary cache unavailable');
+      const uri = `${cache}benson_diagnostic_once.wav`;
+      const deadline = Date.now() + 45_000;
+      while (Date.now() < deadline) {
+        const info = await FileSystem.getInfoAsync(uri);
+        if (info.exists && 'size' in info && info.size > 44) {
+          const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+          setWavPath(uri);
+          setWavInfo(inspectWavHeader(base64, info.size));
+          setWavBusy(false);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      await deleteDiagnosticCapture();
+      setWavInfo('No voice phrase reached the wake engine; no WAV was retained.');
+      setWavBusy(false);
+    } catch (e) {
+      await deleteDiagnosticCapture().catch(() => false);
+      setWavInfo(`Capture did not start: ${String(e)}`); setWavBusy(false);
+      await nativeWakeSetOwner('NONE');
+    }
+  }
+  async function listenToExactWav() {
+    if (!wavPath) return;
+    try {
+      await wavSound.current?.unloadAsync();
+      const uri = wavPath.startsWith('file://') ? wavPath : `file://${wavPath}`;
+      const { sound } = await Audio.Sound.createAsync({ uri }, { shouldPlay: true });
+      wavSound.current = sound;
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          void sound.unloadAsync();
+          if (wavSound.current === sound) wavSound.current = null;
+        }
+      });
+    } catch (e) { setWavInfo(`Redarea WAV a eÈ™uat: ${String(e)}`); }
+  }
+
+  async function transcribeExactWav() {
+    if (!wavPath || wavBusy) return;
+    setWavBusy(true); setWavTranscript('');
+    try {
+      const config = await getEngineConfig('stt', 'deepgram');
+      if (!config?.apiKey) throw new Error('Deepgram nu este configurat');
+      const text = await transcribeWithDeepgram(wavPath, lang, config);
+      setWavTranscript(text || '(transcript gol)');
+    } catch (e) { setWavTranscript(`Eroare STT: ${String(e)}`); }
+    finally { setWavBusy(false); }
+  }
+
+  async function discardExactWav() {
+    try { await wavSound.current?.unloadAsync(); } catch {}
+    wavSound.current = null;
+    if (wavPath) await FileSystem.deleteAsync(wavPath.startsWith('file://') ? wavPath : `file://${wavPath}`, { idempotent: true }).catch(() => {});
+    await deleteDiagnosticCapture().catch(() => false);
+    setWavPath(''); setWavInfo('Captura temporarÄƒ È™tearsÄƒ.'); setWavTranscript('');
+    await nativeWakeSetOwner('NONE');
+  }
+
+  async function recoverWakeWithoutDeletingWav() {
+    try { ExpoSpeechRecognitionModule.stop(); } catch {}
+    try { await stopCapture(); } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await nativeWakeSetOwner('NONE');
+    setListening(false); setWavBusy(false);
+    append('wake-recovery', 'passive wake rearmed; diagnostic WAV retained');
+  }
+
   function stopTest() {
     try { ExpoSpeechRecognitionModule.stop(); append('stop-call', 'stop() called'); } catch (e) { append('stop-call', `stop() threw: ${String(e)}`); }
   }
@@ -283,13 +397,31 @@ export default function VoiceDiagScreen() {
     <View style={s.root}>
       <View style={s.topbar}>
         <TouchableOpacity onPress={() => router.back()} testID="voicediag-back" accessibilityRole="button">
-          <Text style={s.link}>‹ Back</Text>
+          <Text style={s.link}>â€¹ Back</Text>
         </TouchableOpacity>
         <Text style={s.title}>VOICE DIAGNOSTIC</Text>
         <View style={{ width: 48 }} />
       </View>
 
       <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+        <View style={s.card}>
+          <Text style={s.cardTitle}>ONE-SHOT WAV DIAGNOSTIC</Text>
+          <Text style={s.dim}>Manual only. One phrase. The app retains a byte-for-byte copy of the exact WAV uploaded to Deepgram; it does not route this transcript to the executor.</Text>
+          <TouchableOpacity disabled={wavBusy} onPress={startExactWavCapture} style={[s.btn, s.btnPrimary]} accessibilityRole="button">
+            <Text style={s.btnText}>{wavBusy ? 'CAPTURING / TRANSCRIBINGâ€¦' : 'CAPTURE ONE WAV PHRASE'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => { void recoverWakeWithoutDeletingWav(); }} style={[s.btn, s.btnSecondary]} accessibilityRole="button">
+            <Text style={s.btnTextSecondary}>RESUME BENSON WAKE Â· KEEP WAV</Text>
+          </TouchableOpacity>
+          {!!wavInfo && <Text style={s.mono}>{wavInfo}</Text>}
+          {!!wavPath && <View style={s.btnRow}>
+            <TouchableOpacity onPress={listenToExactWav} style={[s.btn, s.btnSecondary, { flex: 1 }]} accessibilityRole="button"><Text style={s.btnTextSecondary}>Listen to WAV</Text></TouchableOpacity>
+            <TouchableOpacity disabled={wavBusy} onPress={transcribeExactWav} style={[s.btn, s.btnSecondary, { flex: 1 }]} accessibilityRole="button"><Text style={s.btnTextSecondary}>Send same WAV to STT</Text></TouchableOpacity>
+          </View>}
+          {!!wavTranscript && <Text style={s.transcript}>STT: {wavTranscript}</Text>}
+          {!!wavPath && <TouchableOpacity onPress={() => { void discardExactWav(); }} style={[s.btn, s.btnStop]} accessibilityRole="button"><Text style={s.btnText}>DELETE TEMPORARY WAV</Text></TouchableOpacity>}
+        </View>
+
         {/* Checkpoints */}
         <View style={s.card}>
           <Text style={s.cardTitle}>4-STEP PROOF</Text>
@@ -304,17 +436,17 @@ export default function VoiceDiagScreen() {
         {/* Transcript + orchestrator */}
         <View style={s.card}>
           <Text style={s.cardTitle}>TRANSCRIPT</Text>
-          <Text testID="voicediag-transcript" style={s.transcript}>{transcript || '—'}</Text>
-          <Text style={s.tally}>partial results: {partialCount}   ·   final results: {finalCount}</Text>
+          <Text testID="voicediag-transcript" style={s.transcript}>{transcript || 'â€”'}</Text>
+          <Text style={s.tally}>partial results: {partialCount}   Â·   final results: {finalCount}</Text>
           {partialCount > 0 && finalCount === 0 && (
-            <Text style={s.warn}>⚠ Numai rezultate PARȚIALE, niciun FINAL — exact „Defect B” (device-ul nu trimite finalul). Microfonul MERGE; problema e că aplicația live aștepta finalul.</Text>
+            <Text style={s.warn}>âš  Numai rezultate PARÈšIALE, niciun FINAL â€” exact â€žDefect Bâ€ (device-ul nu trimite finalul). Microfonul MERGE; problema e cÄƒ aplicaÈ›ia live aÈ™tepta finalul.</Text>
           )}
           <Text style={s.subLabel}>last partial:</Text>
-          <Text style={s.subVal}>{lastPartial || '—'}</Text>
+          <Text style={s.subVal}>{lastPartial || 'â€”'}</Text>
           <Text style={s.subLabel}>last final:</Text>
-          <Text style={s.subVal}>{lastFinal || '—'}</Text>
+          <Text style={s.subVal}>{lastFinal || 'â€”'}</Text>
           <Text style={[s.cardTitle, { marginTop: 10 }]}>ORCHESTRATOR REPLY</Text>
-          <Text testID="voicediag-orchestrator-reply" style={s.reply}>{orchestratorReply || '—'}</Text>
+          <Text testID="voicediag-orchestrator-reply" style={s.reply}>{orchestratorReply || 'â€”'}</Text>
         </View>
 
         {/* Controls */}
@@ -366,7 +498,7 @@ export default function VoiceDiagScreen() {
         <View style={s.card}>
           <Text style={s.cardTitle}>LIVE EVENT TRACE ({log.length})</Text>
           {log.length === 0 ? (
-            <Text style={s.dim}>No events yet — tap START and speak a command.</Text>
+            <Text style={s.dim}>No events yet â€” tap START and speak a command.</Text>
           ) : (
             log.map((l, i) => (
               <Text key={i} style={s.logLine}>
@@ -383,7 +515,7 @@ export default function VoiceDiagScreen() {
 }
 
 function Checkpoint({ n, label, ok, bad }: { n: number; label: string; ok: boolean; bad?: boolean }) {
-  const mark = ok ? '✓' : bad ? '✕' : '·';
+  const mark = ok ? 'âœ“' : bad ? 'âœ•' : 'Â·';
   const color = ok ? '#4CC38A' : bad ? '#E5484D' : '#6b7683';
   return (
     <View style={s.cpRow}>
@@ -396,7 +528,7 @@ function Checkpoint({ n, label, ok, bad }: { n: number; label: string; ok: boole
 function Toggle({ label, value, onToggle, testID }: { label: string; value: boolean; onToggle: () => void; testID: string }) {
   return (
     <TouchableOpacity onPress={onToggle} style={s.toggleRow} testID={testID} accessibilityRole="switch" accessibilityState={{ checked: value }}>
-      <View style={[s.toggleBox, value && s.toggleBoxOn]}>{value && <Text style={s.toggleCheck}>✓</Text>}</View>
+      <View style={[s.toggleBox, value && s.toggleBoxOn]}>{value && <Text style={s.toggleCheck}>âœ“</Text>}</View>
       <Text style={s.toggleLabel}>{label}</Text>
     </TouchableOpacity>
   );

@@ -1,0 +1,15 @@
+Third-party source used by the BENSON Android foreground service
+
+The files under src/main/cpp and MicroWakeWordInference.kt are adapted from the
+Home Assistant Android Companion App, module android/microwakeword, commit
+b3db6a862c78263b72c8759209d0f24da7185407, licensed under Apache License 2.0.
+The MicroWakeWord.kt service runner is BENSON code and integrates that engine.
+
+The module's CMakeLists.txt fetches pinned dependencies at build time:
+- TensorFlow Lite Micro: 2747abd5c82a95fb1624106a946fc671c31f16e8 (Apache-2.0)
+- KissFFT: 7bce4153c6bc8aba2db0e889e576f9d00505cbe (BSD-3-Clause)
+- FlatBuffers: 0100f6a5779831fa7a651e4b67ef389a8752bd9b (Apache-2.0)
+- gemmlowp: fda83bdc38b118cc6b56753bd540caa49e570745 (Apache-2.0)
+- ruy: 54774a7a2cf85963777289193629d4bd42de4a59 (Apache-2.0)
+
+These components are third-party works distributed under their respective licenses.

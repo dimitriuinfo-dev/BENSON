@@ -12,6 +12,9 @@ export interface TrustedContact {
   preferredChannel?: PreferredChannel;
   isFamily?: boolean;
   isEmergencyContact?: boolean;
+  // BENSON CONTACT+CALL round (2026-09-23) — the device photo, when the OS has one, so a call
+  // confirmation can show it. Never fetched/stored beyond the live device-contacts read itself.
+  imageUri?: string;
 }
 
 export interface ContactResolveRequest {

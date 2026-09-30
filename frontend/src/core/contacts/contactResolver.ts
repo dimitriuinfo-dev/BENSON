@@ -47,13 +47,33 @@ function levenshtein(a: string, b: string): number {
 }
 
 // Two normalized strings are "close" if their edit distance is within ~1/3 of the longer one.
-// This is what rescues imperfect voice transcripts: "hana" -> "hannah" (distance 2, threshold 3),
+// This is what rescues imperfect voice transcripts: "hana" -> "hannah" (distance 2, threshold 2),
 // "steffan" -> "stefan", "adriaan" -> "adriana". Both must be >=3 chars so 1-2 letter fragments
 // never fuzzy-match half the address book.
+//
+// BENSON CONTACT+CALL round (2026-09-23) — ROUND_WHATSAPP_REGRESSION_REVERT_1's root cause, found
+// and fixed here: Math.ceil produced a threshold of 2 for a 4-letter query, which let "hana" fuzzy-
+// match the unrelated token "pane" (edit distance 2, inside "Peter Pane Johannes Günzel") — the
+// exact wrong-candidate collision that forced PERSON_RESOLVE_ENABLED off. Math.floor keeps the
+// documented rescues above working (still <= their required distance) while rejecting that
+// collision (floor(4/3)=1, distance 2 > 1 -> correctly no match).
+// BENSON CONTACT+CALL round (2026-09-23), second fix, found on-device (real test, not a guess):
+// the floor() fix above stopped the distance-2 "pane" collision but not distance-1 same-length
+// collisions — "hana" (4 letters) fuzzy-matched "dana", "oana", and the token "hans" (all real
+// contacts, all edit distance 1) alongside the one correct match (HANNAH), returning 7 candidates
+// for a single query. A same-length single-substitution match between two SHORT strings is almost
+// always two genuinely different short names, not an STT artifact — the documented rescues
+// ("hana"->"hannah", "steffan"->"stefan") are all LENGTH-CHANGING (an added/dropped sound), which
+// is what real STT mishears actually look like for a name. Requiring either a length difference or
+// both strings being long enough (>=6) keeps every documented rescue working (verified below) while
+// rejecting same-length short-word collisions.
 function fuzzyClose(a: string, b: string): boolean {
   if (a.length < 3 || b.length < 3) return false;
-  const threshold = Math.ceil(Math.max(a.length, b.length) / 3);
-  return levenshtein(a, b) <= threshold;
+  const threshold = Math.floor(Math.max(a.length, b.length) / 3);
+  const dist = levenshtein(a, b);
+  if (dist > threshold) return false;
+  if (a.length === b.length && Math.max(a.length, b.length) < 6) return false;
+  return true;
 }
 
 // Fuzzy tier: compare the query against the whole normalized candidate AND against each of its

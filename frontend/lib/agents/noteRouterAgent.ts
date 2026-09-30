@@ -1,4 +1,4 @@
-import { ANTHROPIC_URL, anthropicHeaders } from '../llmConfig';
+import { OPENAI_URL, openaiHeaders } from '../llmConfig';
 
 export const NOTEPAD_PATTERN =
   /\b(?:notează|noteaza|note that|amintește-mi|aminteste-mi|remind me|spune-i lui|tell)\b|(?:adaugă|adauga|add)\s+.+\s+(?:pe listă|pe lista|to (?:the )?list)|(?:vreau să adaugi|vreau sa adaugi|please add).+(?:în app|in app|to the app)/i;
@@ -40,23 +40,28 @@ function buildSystemPrompt(): string {
 }
 
 // NoteRouterAgent — the one agent in this codebase that leads with the model instead of a regex:
-// NOTEPAD_PATTERN only decides "this is a notepad-style command," Claude does the classification,
-// because free-form multi-intent dictation isn't something regex can reliably parse.
+// NOTEPAD_PATTERN only decides "this is a notepad-style command," the model does the
+// classification, because free-form multi-intent dictation isn't something regex can reliably
+// parse. ROUND_INPUT_ROUTING_1 (2026-09-23) — was Anthropic (claude-sonnet-5), independent of
+// `ctx.modelProvider` and untouched by the OpenAI-exclusive-Brain decision until now; switched to
+// the same OpenAI endpoint/key as the rest of BENSON's Brain — no other provider left reachable
+// from ordinary conversation/command routing.
 export async function runNoteRouterAgent(text: string, apiKey: string): Promise<ParsedNote | null> {
   try {
-    const res = await fetch(ANTHROPIC_URL, {
+    const res = await fetch(OPENAI_URL, {
       method: 'POST',
-      headers: anthropicHeaders(apiKey),
+      headers: openaiHeaders(apiKey),
       body: JSON.stringify({
-        model: 'claude-sonnet-5',
+        model: 'gpt-4o-mini',
         max_tokens: 400,
-        thinking: { type: 'disabled' },
-        system: buildSystemPrompt(),
-        messages: [{ role: 'user', content: text }],
+        messages: [
+          { role: 'system', content: buildSystemPrompt() },
+          { role: 'user', content: text },
+        ],
       }),
     });
     const data = await res.json();
-    const raw = data.content?.[0]?.text ?? '';
+    const raw = data.choices?.[0]?.message?.content ?? '';
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
     return JSON.parse(jsonMatch[0]);

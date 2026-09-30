@@ -10,9 +10,18 @@ import type { BrainOutput, ChatOpts, EngineConfig, LlmBrain, SystemTurn, Turn } 
 
 // PHASE_A_PROTOCOL_AND_TIMEOUT (2026-09-19, product-owner-directed) — was 30000 with one retry on
 // network failure (60s worst case — exactly what hung "intră în Netflix" for 60s on a Groq
-// outage, forensically proven in scratchpad/abba_netflix_dump.txt). Per the round's explicit
+// outage, forensically proven in scratchpad/abba_netflix_dump.txt). Per that round's explicit
 // spec: a 3s hard ceiling, NO retry — a timeout must surface fast enough that BENSON can say "Nu
 // am înțeles" and re-listen inside the same active session, never a second 30-60s wait.
+//
+// ROUND_INPUT_ROUTING_1 (2026-09-23, device-proven, product-owner-directed) — the 3s ceiling was
+// tuned for Groq's LPU inference. Since the OpenAI-exclusive-Brain decision (same day, earlier
+// round) this endpoint is ALWAYS OpenAI's actual chat/completions API, not Groq — device log
+// evidence: a real gpt-4o-mini call with a ~6.9K-char prompt (system persona + known actions +
+// history) measured elapsedMs=3006, i.e. it hit the 3s wall almost exactly, not a genuine hang.
+// That single spurious timeout was the trigger for the whole chain this round fixes (brain
+// call "fails" -> falls through to a legacy, non-OpenAI fallback — see brainRouter.ts). 10s keeps
+// the same "bounded, no retry, must recover the session" contract, sized for the ACTUAL provider.
 //
 // Late-response safety (verified, not assumed, before this edit): fetchWithTimeout.ts already
 // races the real fetch() against a promise that rejects the INSTANT the native watchdog fires
@@ -21,7 +30,7 @@ import type { BrainOutput, ChatOpts, EngineConfig, LlmBrain, SystemTurn, Turn } 
 // underlying fetch DOES resolve later, nothing here ever awaits or reads it again — no shared
 // mutable state, no cache, no callback captures it — so a late response cannot retroactively
 // speak, change session state, or execute anything. No new invalidation plumbing was needed.
-const REQUEST_TIMEOUT_MS = 3000;
+const REQUEST_TIMEOUT_MS = 10000;
 const MAX_OUTPUT_TOKENS = 250;
 
 type WireMessage = { role: string; content: string };
@@ -65,18 +74,18 @@ function errorMessage(lang: string, detail: string): string {
   }
   if (status === 401 || status === 403) {
     return ro
-      ? 'Cheia Groq pare invalidă sau fără acces — verific-o în Setări.'
-      : 'The Groq key looks invalid or unauthorized — check it in Settings.';
+      ? 'Cheia OpenAI pare invalidă sau fără acces — verific-o în Setări.'
+      : 'The OpenAI key looks invalid or unauthorized — check it in Settings.';
   }
   if (status === 404) {
     return ro
-      ? 'Modelul de conversație nu e disponibil pe acest cont Groq.'
-      : "The chat model isn't available on this Groq account.";
+      ? 'Modelul de conversație nu e disponibil pe acest cont OpenAI.'
+      : "The chat model isn't available on this OpenAI account.";
   }
   if (status === 429) {
     return ro
-      ? 'Groq e limitat temporar (prea multe cereri) — încearcă din nou în câteva minute.'
-      : 'Groq is rate-limited right now — try again in a few minutes.';
+      ? 'OpenAI e limitat temporar (prea multe cereri) — încearcă din nou în câteva minute.'
+      : 'OpenAI is rate-limited right now — try again in a few minutes.';
   }
   return ro
     ? `Nu am putut contacta creierul BENSON acum (HTTP ${status}).`

@@ -1,0 +1,25 @@
+BENSON wake / STT / overlay follow-up — sanitized read-only device evidence
+Device: OnePlus CPH2663, serial 9c1464eb; package com.benson.butler
+Installed release APK SHA-256: DAA86D04D70ABB260D9C08443A379CECF3FCD56002C2401DEF0076CFB2F0D88C
+
+Earlier spoken WhatsApp video request, 11:36:
+- 11:36:08 HEED_DETECTED phrase=Benson; 11:36:15 native wake was delivered to the persistent JS listener.
+- The command WAV payload was 256,044 bytes. Deepgram returned HTTP 200, zero transcript characters/confidence, and `MISSION_INPUT_ALLOWED=false`; no mission or executor event followed. Therefore this attempt has no transcript to parse; parser coverage cannot explain this specific no-action attempt.
+- The wake engine stopped for command capture and owner remained COMMAND_STT (engine=heed running=false) until 11:37:00.499, exactly the 45 s owner watchdog; it then re-armed. No second wake detection was logged during this 45 s blocked interval, so an actual attempted second activation within it is not proven.
+
+Later spoken WhatsApp message request, 11:40:
+- 11:40:24 HEED_DETECTED; captured 84,800 samples (5.3 s). The same WAV payload was 169,644 bytes.
+- At 11:40:29 Deepgram returned HTTP 200 with 42 transcript characters, confidence 0.937. Transcript content is intentionally not stored. Mission input was allowed; JS logged one `WAKE_AUDIO_DISPATCH` and `EXEC_TRACE_INPUT` (35 characters).
+- No mission plan, WhatsApp action, `WAKE_HEADLESS_RESULT`, or user-facing completion was logged before owner watchdog at 11:41:12.962. Wake re-armed at 11:41:13. This proves non-empty STT reached JS mission dispatch but does not reveal the transcript text or establish whether the WhatsApp parser/router accepted it.
+
+Overlay / UI at inspection:
+- `OVERLAY_POLICY_EVAL` repeatedly reported `isSelfForeground=false hadActiveOverlay=false` through both attempts.
+- Android app-op `SYSTEM_ALERT_WINDOW` was `allow`; `BensonBubbleService` existed but its visible service record was for `ACTION_IME_VISIBILITY`, and `dumpsys window windows` had no BENSON window. Top resumed activity was Android Launcher. Thus the overlay was genuinely not visible; this is separate from wake/STT, which demonstrably ran with no bubble.
+- No WhatsApp send or call was started.
+
+Build/source comparison:
+- Release APK SHA-256 remains `DAA86D04D70ABB260D9C08443A379CECF3FCD56002C2401DEF0076CFB2F0D88C`.
+- APK `assets/index.android.bundle` SHA-256 exactly matched the existing generated release bundle: `12E350D1CDC7EB8DA4B5C3AE10E1414EE00862C290349B84BB2C8D06B3584324` (3,716,736 bytes).
+- Compared relevant app, parser, WhatsApp executor, orchestrator, Heed source, model/config, and Gradle input file modification times with the APK build time (2026-09-30 09:15:04 UTC): none were newer. Only handover/evidence documentation was updated after the build. No rebuild/install occurred during this follow-up.
+
+Privacy: raw transcript, WAV/audio, account details, message body, and credentials are excluded.

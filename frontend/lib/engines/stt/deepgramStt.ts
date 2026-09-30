@@ -83,9 +83,10 @@ export async function transcribeWithDeepgram(
   const confidence = typeof alt?.confidence === 'number' ? alt.confidence : null;
   const elapsedMs = Date.now() - startedAt;
 
-  logAudioDiag('STT_RAW_TRANSCRIPT', `text="${rawText}"`);
+  // Audio/transcript content can be private; diagnostics keep metadata only.
+  logAudioDiag('STT_RAW_TRANSCRIPT', `chars=${rawText.length}`);
   logAudioDiag('STT_CONFIDENCE', `value=${confidence ?? 'n/a'}`);
-  logAudioDiag('STT_RESULT', `engine=deepgram elapsedMs=${elapsedMs} chars=${rawText.length} confidence=${confidence ?? 'n/a'} text="${rawText}"`);
+  logAudioDiag('STT_RESULT', `engine=deepgram elapsedMs=${elapsedMs} chars=${rawText.length} confidence=${confidence ?? 'n/a'}`);
 
   const accepted = rawText.length > 0;
   logAudioDiag('MISSION_INPUT_ALLOWED', `value=${accepted}`);

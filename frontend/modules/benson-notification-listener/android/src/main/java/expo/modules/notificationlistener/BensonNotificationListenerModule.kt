@@ -88,7 +88,7 @@ class BensonNotificationListenerModule : Module() {
         "SECURITY_EXCEPTION"
       } catch (e: Exception) {
         Log.e("BensonNotificationListener", "getWhatsAppNotifications failed", e)
-        "[]"
+        "READ_ERROR"
       }
     }
 

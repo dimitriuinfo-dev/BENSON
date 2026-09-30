@@ -13,7 +13,7 @@ import { resolveContact as resolveAgainstList, loadDeviceContacts, getContactsPe
 import type { ContactResolveResult, TrustedContact } from '../../contacts';
 import { isPackageInstalled, launchPackage, openUriWithPackage } from '../../action-engine/androidActionExecutor';
 import { enterPipMode } from 'benson-app-registry';
-import { hasOverlayPermission, showBubble } from 'benson-overlay';
+import { hasOverlayPermission, showBubble, updateBubbleStatus } from 'benson-overlay';
 import { waitForBackground } from '../appStateSignal';
 import type { ToolCallResult } from '../missionTypes';
 import { ensureAccessibilityReady, ACCESSIBILITY_DISCONNECTED_ERROR } from '../../safety';
@@ -83,6 +83,23 @@ async function enterPipBeforeWhatsApp(): Promise<void> {
   } catch (err) {
     devLog('enterPipBeforeWhatsApp: bubble/PiP threw', err);
   }
+}
+
+// EXECUTĂ — BENSON PESTE APLICAȚIA REALĂ (2026-09-23) — reuses the SAME bubble mechanism above
+// (proven live for calls) for the message prepare/confirm window: once Phase A has typed the
+// message into the real WhatsApp chat (WhatsApp is genuinely foreground by then — the accessibility
+// service just drove it there), show the existing bubble with the prepared text instead of building
+// a new overlay/dialog. Never carries the phone number — only displayName/message, matching the
+// standing "number never shown/spoken" rule. hideWaMessageBubble mirrors app/index.tsx's own
+// hideBubbleBandNow() convention (visible=false, terminal=false — an explicit immediate hide, not
+// a timed auto-dismiss) so it composes safely with the pre-existing state-driven band there.
+export function showWaMessageBubble(message: string): void {
+  enterPipBeforeWhatsApp();
+  try { updateBubbleStatus('AM ÎNȚELES', message, true, false, Date.now()); } catch (err) { devLog('showWaMessageBubble threw', err); }
+}
+
+export function hideWaMessageBubble(): void {
+  try { updateBubbleStatus('', '', false, false, Date.now()); } catch (err) { devLog('hideWaMessageBubble threw', err); }
 }
 
 export function maskPhone(raw: string): string {
@@ -898,7 +915,7 @@ function sanitizeWaPhone(raw: string): string {
 
 type DirectAttempt = { handled: true; result: ToolCallResult } | { handled: false };
 
-async function tryDirectContactCall(name: string): Promise<DirectAttempt> {
+async function tryDirectContactCall(name: string, callMode: 'voice_call' | 'video_call'): Promise<DirectAttempt> {
   if (!WA_DIRECT_CONTACT_DEEPLINK) return { handled: false };
   logAudioDiag('WA_DIRECT_RESOLVE_START', `name=${JSON.stringify(name)}`);
 
@@ -944,7 +961,7 @@ async function tryDirectContactCall(name: string): Promise<DirectAttempt> {
   logAudioDiag('WA_DIRECT_NUMBER_READY', `name=${JSON.stringify(contact.displayName)} tail=${phone.slice(-4)}`);
 
   try {
-    const r = await runWhatsAppOpenConversationCall(phone, contact.displayName);
+    const r = await runWhatsAppOpenConversationCall(phone, contact.displayName, callMode);
     logAudioDiag('WA_NATIVE_RESULT', `route=direct success=${r.success} step=${r.step} elapsedMs=${r.elapsedMs}`);
     if (r.success) {
       // ROUND_VERIFIED_IDENTITY_BRIDGE_1 — same rule as the write flow: only on a real, matched
@@ -1185,7 +1202,7 @@ export async function readChatMessages(searchString: string, maxMessages = 10): 
   return { ok: true, displayName: resolved.displayName, messages: parsed.messages ?? [] };
 }
 
-export async function placeCall(searchString: string, uiLang: string = DEFAULT_WHATSAPP_UI_LANG): Promise<ToolCallResult> {
+export async function placeCall(searchString: string, uiLang: string = DEFAULT_WHATSAPP_UI_LANG, callMode: 'voice_call' | 'video_call' = 'voice_call'): Promise<ToolCallResult> {
   const name = searchString.trim();
   // WA-CONTACT-TRACE — the value handed to the native executor. `searchString` is exactly the
   // parsed transcript name after buildCallSearchString() clitic-strip in missionValidator (no
@@ -1204,7 +1221,7 @@ export async function placeCall(searchString: string, uiLang: string = DEFAULT_W
   // WA-FIX-4 — PRIMARY: resolve the name locally and open the exact conversation directly. Only
   // when local resolution is unavailable (no permission / not found / no number) does this return
   // { handled: false } and control drops through to the UI-search route below.
-  const direct = await tryDirectContactCall(name);
+  const direct = await tryDirectContactCall(name, callMode);
   if (direct.handled) return direct.result;
   logAudioDiag('WA_DIRECT_FALLBACK', 'reason=falling_back_to_ui_search');
 
@@ -1212,7 +1229,7 @@ export async function placeCall(searchString: string, uiLang: string = DEFAULT_W
   // step-by-step executor, no enterPipMode (the native flow owns the foreground now).
   if (USE_NATIVE_CALL_RECIPE) {
     try {
-      const r = await runWhatsAppCallNative(name);
+      const r = await runWhatsAppCallNative(name, callMode);
       // ROUND_VERIFIED_IDENTITY_BRIDGE_1 — no phone/contactId known on this fallback (UI-search)
       // route by definition; still worth recording the verified display name <-> spoken alias so
       // resolvePerson()'s alias match works next time, even without a stable merge key.

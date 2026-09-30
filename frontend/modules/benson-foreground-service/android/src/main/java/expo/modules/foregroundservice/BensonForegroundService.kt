@@ -63,6 +63,9 @@ class BensonForegroundService : Service() {
   // native owns WAKE<->COMMAND_STT on keyword detect. When benson.tflite is absent the whole thing
   // is inert (micOwner stays NONE, JS wake fallback + the heartbeat below stay primary).
   private var microWakeWord: MicroWakeWord? = null
+  // Heed is the locally trained, configurable-name candidate. It owns the same single WAKE mic
+  // slot as MWW; it is never paired with ambient cloud transcription.
+  private var heedWakeWord: HeedWakeWord? = null
   // ROUND_WAKE_NATIVE_GENERIC_1 — Option C: native VAD-gated capture + cloud STT + text/fuzzy
   // match, reusing this exact mic-ownership state machine (micOwner/armNativeWake/
   // suspendNativeWake/nativeWakeSetOwner below), unchanged in shape from MICROWAKEWORD_1.
@@ -70,6 +73,14 @@ class BensonForegroundService : Service() {
   // benson.tflite is bundled). NativeCloudWake is what actually runs on this build.
   private var nativeCloudWake: NativeCloudWake? = null
   @Volatile private var micOwner: String = "NONE"
+  @Volatile private var callAudioBlocked = false
+  private var callStatePollRunning = false
+  private val callPrefsListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+    if (key == "wa_call_lifecycle_state") mainHandler.post { refreshCallAudioState("whatsapp_signal") }
+  }
+  private val audioModeChangedListener = AudioManager.OnModeChangedListener { mode ->
+    mainHandler.post { refreshCallAudioState("audio_mode_changed_$mode") }
+  }
   // ROUND_WAKE_NATIVE_GENERIC_1 — last-resort reclaim. Confirmed live on 9c1464eb this round: a
   // native wake trigger hands the mic to JS (micOwner=COMMAND_STT) exactly as designed, but if the
   // command that followed wasn't a recognized action, JS's own reply/conversation path can run
@@ -260,6 +271,10 @@ class BensonForegroundService : Service() {
   private var confirmationListener: NativeConfirmationListener? = null
 
   fun startConfirmationListening(confirmationId: String, timeoutMs: Long) {
+    if (callAudioBlocked || isCallAudioActive()) {
+      AudioDiag.log(this, "CONFIRM_LISTEN_SUPPRESSED", "reason=call_active")
+      return
+    }
     confirmationListener?.stop()
     setMicOwner("CONFIRMATION_STT", "confirmation_start")
     AudioDiag.log(this, "CONFIRM_LISTEN_START", "confirmationId=$confirmationId timeoutMs=$timeoutMs")
@@ -291,13 +306,27 @@ class BensonForegroundService : Service() {
     }
   }
 
+  // Ambient wake must be local. NativeCloudWake transcribes every VAD candidate and can upload
+  // unrelated nearby speech before the configured wake word is known; it is not a wake detector.
   private fun nativeWakeAvailable(): Boolean =
-    MicroWakeWord.modelPresent(this) || NativeCloudWake.available(this)
+    HeedWakeWord.modelPresent(this) || MicroWakeWord.modelPresent(this)
 
   // Build + start exactly one native wake engine. No-op unless nothing else owns the mic and the
   // model/credentials + kill switch allow it. Idempotent (both engines self-guard on `running`).
   private fun armNativeWake(why: String) {
-    if (!nativeWakeAvailable()) return
+    if (callAudioBlocked || isCallAudioActive()) {
+      AudioDiag.log(this, "WAKE_AUDIO_BLOCKED", "why=$why reason=call_active")
+      return
+    }
+    if (!nativeWakeAvailable()) {
+      if (nativeCloudWake?.isRunning() == true) {
+        AudioDiag.log(this, "WAKE_CLOUD_FALLBACK_STOP", "reason=local_model_missing ambient_upload_disabled=true")
+        try { nativeCloudWake?.stop() } catch (_: Exception) {}
+        nativeCloudWake = null
+      }
+      AudioDiag.log(this, "NATIVE_WAKE_UNAVAILABLE", "reason=missing_benson_model cloud_fallback_disabled=true")
+      return
+    }
     val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
     if (prefs.getBoolean("user_stopped", false)) return
     if (!prefs.getBoolean("wake_word_enabled", true)) return
@@ -306,12 +335,31 @@ class BensonForegroundService : Service() {
       return
     }
 
+    if (HeedWakeWord.modelPresent(this)) {
+      if (heedWakeWord?.isRunning() == true) { setMicOwner("WAKE", "already_armed"); return }
+      if (heedWakeWord == null) {
+        heedWakeWord = HeedWakeWord(
+          applicationContext,
+          onDetected = { phrase, score, wavPath -> onHeedWakeDetected(phrase, score, wavPath) },
+          log = { stage, fields -> AudioDiag.log(this, stage, fields) },
+        )
+      }
+      AudioDiag.log(this, "WAKE_ENGINE", "engine=HEED why=$why")
+      if (heedWakeWord?.start() == true) {
+        setMicOwner("WAKE", "heed_armed")
+        AudioDiag.log(this, "HEED_REARM", "why=$why")
+      } else {
+        AudioDiag.logError("HEED_ERROR", "reason=start_failed why=$why")
+      }
+      return
+    }
+
     if (MicroWakeWord.modelPresent(this)) {
       if (microWakeWord?.isRunning() == true) { setMicOwner("WAKE", "already_armed"); return }
       if (microWakeWord == null) {
         microWakeWord = MicroWakeWord(
           applicationContext,
-          onDetected = { score -> onNativeWakeDetected(score) },
+          onDetected = { score, wavPath -> onNativeWakeDetected(score, wavPath) },
           log = { stage, fields -> AudioDiag.log(this, stage, fields) },
         )
       }
@@ -326,24 +374,15 @@ class BensonForegroundService : Service() {
       return
     }
 
-    if (!NativeCloudWake.available(this)) return
-    if (nativeCloudWake?.isRunning() == true) { setMicOwner("WAKE", "already_armed"); return }
-    if (nativeCloudWake == null) {
-      nativeCloudWake = NativeCloudWake(
-        applicationContext,
-        onDetected = { commandTail -> onNativeCloudWakeDetected(commandTail) },
-        log = { stage, fields -> AudioDiag.log(this, stage, fields) },
-      )
-    }
-    AudioDiag.log(this, "WAKE_ENGINE", "engine=NATIVE_CLOUD why=$why")
-    if (nativeCloudWake?.start() == true) {
-      setMicOwner("WAKE", "native_armed")
-    } else {
-      AudioDiag.logError("WAKE_NATIVE_ERROR", "reason=start_failed why=$why")
-    }
+    // No cloud-STT wake fallback. Until the actual Benson model is bundled, passive wake remains
+    // unavailable; manual command capture remains a separate explicit action.
   }
 
   private fun suspendNativeWake(reason: String) {
+    if (heedWakeWord?.isRunning() == true) {
+      AudioDiag.log(this, "HEED_SUSPEND_REQUEST", "reason=$reason")
+      try { heedWakeWord?.stop() } catch (_: Exception) {}
+    }
     if (microWakeWord?.isRunning() == true) {
       AudioDiag.log(this, "NWW_SUSPEND", "reason=$reason")
       try { microWakeWord?.stop() } catch (_: Exception) {}
@@ -368,19 +407,37 @@ class BensonForegroundService : Service() {
   }
 
   fun isNativeWakeRunning(): Boolean =
-    microWakeWord?.isRunning() == true || nativeCloudWake?.isRunning() == true
+    heedWakeWord?.isRunning() == true || microWakeWord?.isRunning() == true || nativeCloudWake?.isRunning() == true
+
+  fun isNativeWakeAudioActive(): Boolean =
+    heedWakeWord?.isAudioInputActive() == true || microWakeWord?.isRunning() == true || nativeCloudWake?.isAudioInputActive() == true
+
+  private fun onHeedWakeDetected(phrase: String, score: Float, wavPath: String) {
+    mainHandler.post {
+      if (isCallAudioBlockedNow()) {
+        AudioDiag.log(this, "WAKE_RESULT_DROPPED", "reason=call_audio_active engine=heed")
+        return@post
+      }
+      AudioDiag.log(this, "WAKE_DETECT", "engine=heed keyword=${phrase.replace(' ', '_')} score=${"%.3f".format(score)}")
+      suspendNativeWake("COMMAND")
+      setMicOwner("COMMAND_STT", "wake_detected")
+      AudioDiag.log(this, "WAKE_COMMAND_AUDIO_READY", "engine=heed path=${java.io.File(wavPath).name}")
+      onHotwordDetected(phrase, wavPath)
+    }
+  }
 
   // Native keyword detect (runs on the MicroWakeWord thread). Release the wake mic, flip owner,
   // then hand to the existing wake-event path (bubble + ring + JS event + pendingWakeCommand).
-  private fun onNativeWakeDetected(score: Float) {
+  private fun onNativeWakeDetected(score: Float, wavPath: String) {
     mainHandler.post {
-      AudioDiag.log(this, "WAKE_DETECT", "engine=microwakeword keyword=benson score=${"%.3f".format(score)}")
+      if (isCallAudioBlockedNow()) { AudioDiag.log(this, "WAKE_RESULT_DROPPED", "reason=call_audio_active engine=microwakeword"); return@post }
+      AudioDiag.log(this, "WAKE_DETECT", "engine=microwakeword keyword=${MicroWakeWord.WAKE_PHRASE.replace(' ', '_')} score=${"%.3f".format(score)}")
       suspendNativeWake("COMMAND")
       setMicOwner("COMMAND_STT", "wake_detected")
       // Alexa-style: try to surface BENSON so command capture can start even from another app.
       // Best-effort — OxygenOS may block a bg Activity start; the bubble/ring below always show.
-      try { bringActivityToFront() } catch (_: Exception) {}
-      onHotwordDetected("")
+      AudioDiag.log(this, "WAKE_COMMAND_AUDIO_READY", "path=${java.io.File(wavPath).name}")
+      onHotwordDetected(MicroWakeWord.WAKE_PHRASE, wavPath)
     }
   }
 
@@ -390,7 +447,8 @@ class BensonForegroundService : Service() {
   // onWakeWordDetected JS event / pendingWakeCommand fallback) — no redesign of the command stack.
   private fun onNativeCloudWakeDetected(commandTail: String) {
     mainHandler.post {
-      AudioDiag.log(this, "WAKE_DETECT", "engine=native_cloud keyword=\"${NativeCloudWake.currentWakeName(this)}\" commandTail=\"$commandTail\"")
+      if (isCallAudioBlockedNow()) { AudioDiag.log(this, "WAKE_RESULT_DROPPED", "reason=call_audio_active engine=native_cloud"); return@post }
+      AudioDiag.log(this, "WAKE_DETECT", "engine=native_cloud keywordConfigured=true commandTailChars=${commandTail.length}")
       suspendNativeWake("COMMAND")
       setMicOwner("COMMAND_STT", "wake_detected")
       AudioDiag.log(this, "WAKE_COMMAND_HANDOFF", "source=native_cloud")
@@ -407,10 +465,11 @@ class BensonForegroundService : Service() {
   private val wakePokeTick = object : Runnable {
     override fun run() {
       try {
+        refreshCallAudioState("heartbeat")
         val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
         val userStopped = prefs.getBoolean("user_stopped", false)
         val wakeEnabled = prefs.getBoolean("wake_word_enabled", true)
-        if (!userStopped && wakeEnabled) {
+        if (!callAudioBlocked && !isCallAudioActive() && !userStopped && wakeEnabled) {
           if (nativeWakeAvailable()) {
             // Native engine health self-heal (ROUND_NATIVE_WAKE_MICROWAKEWORD_1, generalized in
             // ROUND_WAKE_NATIVE_GENERIC_1 to cover whichever engine armNativeWake() actually
@@ -418,14 +477,18 @@ class BensonForegroundService : Service() {
             // recreate it — this is the mechanism that lets wake recover after service recreation
             // without requiring JS to be alive to notice.
             val shouldBeArmed = micOwner == "WAKE" || micOwner == "NONE"
-            val usingMicroWakeWord = MicroWakeWord.modelPresent(this@BensonForegroundService)
-            val engineName = if (usingMicroWakeWord) "microwakeword" else "native_cloud"
-            val runningNow = if (usingMicroWakeWord) microWakeWord?.isRunning() == true else nativeCloudWake?.isRunning() == true
+            val usingHeed = HeedWakeWord.modelPresent(this@BensonForegroundService)
+            val usingMicroWakeWord = !usingHeed && MicroWakeWord.modelPresent(this@BensonForegroundService)
+            val engineName = if (usingHeed) "heed" else if (usingMicroWakeWord) "microwakeword" else "unavailable"
+            val runningNow = if (usingHeed) heedWakeWord?.isRunning() == true else if (usingMicroWakeWord) microWakeWord?.isRunning() == true else false
             AudioDiag.log(this@BensonForegroundService, "NWW_HEALTH",
               "micOwner=$micOwner engine=$engineName running=$runningNow")
             if (shouldBeArmed && !runningNow) {
               AudioDiag.log(this@BensonForegroundService, "WAKE_NATIVE_RECOVER", "micOwner=$micOwner engine=$engineName")
-              if (usingMicroWakeWord) {
+              if (usingHeed) {
+                try { heedWakeWord?.stop() } catch (_: Exception) {}
+                heedWakeWord = null
+              } else if (usingMicroWakeWord) {
                 try { microWakeWord?.stop() } catch (_: Exception) {}
                 microWakeWord = null
               } else {
@@ -433,7 +496,7 @@ class BensonForegroundService : Service() {
                 nativeCloudWake = null
               }
               armNativeWake("self_heal")
-              val recovered = if (usingMicroWakeWord) microWakeWord?.isRunning() == true else nativeCloudWake?.isRunning() == true
+              val recovered = if (usingHeed) heedWakeWord?.isRunning() == true else if (usingMicroWakeWord) microWakeWord?.isRunning() == true else false
               AudioDiag.log(this@BensonForegroundService,
                 if (recovered) "NWW_SELF_HEAL_OK" else "NWW_SELF_HEAL_FAIL", "engine=$engineName")
             }
@@ -465,6 +528,46 @@ class BensonForegroundService : Service() {
   }
   private val mainHandler = Handler(Looper.getMainLooper())
 
+  private fun isCallAudioActive(): Boolean {
+    val mode = try { (getSystemService(Context.AUDIO_SERVICE) as AudioManager).mode } catch (_: Exception) { AudioManager.MODE_NORMAL }
+    val waState = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+      .getString("wa_call_lifecycle_state", "IDLE")
+    return mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION ||
+      waState == "CALL_VERIFIED_ACTIVE" || waState == "CALL_ENDING_PENDING"
+  }
+  fun isCallAudioBlockedNow(): Boolean = callAudioBlocked || isCallAudioActive()
+
+  private fun refreshCallAudioState(reason: String) {
+    val active = isCallAudioActive()
+    if (active == callAudioBlocked) return
+    callAudioBlocked = active
+    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    if (active) {
+      AudioDiag.log(this, "CALL_AUDIO_GUARD", "state=active reason=$reason audioMode=${try { (getSystemService(Context.AUDIO_SERVICE) as AudioManager).mode } catch (_: Exception) { -1 }}")
+      prefs.edit().putBoolean("call_audio_active", true).apply()
+      pendingWakeCommand.getAndSet(null)
+      pendingWakeAudioFile.getAndSet(null)
+      pendingWakeCommandEpoch += 1
+      suspendNativeWake("call_active")
+      try { confirmationListener?.stop() } catch (_: Exception) {}
+      confirmationListener = null
+      setMicOwner("CALL", "call_audio_active")
+    } else {
+      AudioDiag.log(this, "CALL_AUDIO_GUARD", "state=ended reason=$reason")
+      prefs.edit().putBoolean("call_audio_active", false).apply()
+      if (micOwner == "CALL") setMicOwner("NONE", "call_audio_ended")
+      armNativeWake("call_audio_ended")
+    }
+    onCallAudioStateChanged?.invoke(active)
+  }
+
+  private val callStatePoll = object : Runnable {
+    override fun run() {
+      refreshCallAudioState("audio_poll")
+      if (callStatePollRunning) mainHandler.postDelayed(this, 500L)
+    }
+  }
+
   override fun onBind(intent: Intent?): IBinder? = null
 
   private val screenStateReceiver = object : android.content.BroadcastReceiver() {
@@ -484,6 +587,17 @@ class BensonForegroundService : Service() {
     isRunning = true
     instance = this
     AudioDiag.log(this, "SERVICE_CREATE", "")
+    getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE).registerOnSharedPreferenceChangeListener(callPrefsListener)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      try {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.addOnModeChangedListener(java.util.concurrent.Executor { task -> mainHandler.post(task) }, audioModeChangedListener)
+      } catch (e: Exception) { AudioDiag.logError("CALL_AUDIO_LISTENER", "reason=register_failed type=${e.javaClass.simpleName}") }
+    }
+    callAudioBlocked = false
+    refreshCallAudioState("service_start")
+    callStatePollRunning = true
+    mainHandler.post(callStatePoll)
     try {
       registerReceiver(screenStateReceiver, android.content.IntentFilter().apply {
         addAction(Intent.ACTION_SCREEN_ON)
@@ -626,13 +740,12 @@ class BensonForegroundService : Service() {
     acquireWakeLock()
     scheduleWatchdog()
     startWakePokeLoop() // ROUND_WAKE_STATE_BUG_1 — native heartbeat re-arms the JS wake loop while backgrounded
-    // ROUND_NATIVE_WAKE_MICROWAKEWORD_1 — native wake engine auto-arms here (in the FGS, on its own
-    // AudioRecord thread → survives Activity background / JS suspension). Only when benson.tflite is
-    // bundled; otherwise inert and the JS Whisper fallback + heartbeat above stay primary.
+    // Local keyword detector auto-arms in this foreground service, independently of Activity/JS
+    // lifecycle. The command audio buffer is handed to the existing transcription/executor path.
     if (nativeWakeAvailable()) {
       mainHandler.post { armNativeWake("service_start") }
     } else {
-      AudioDiag.logError("NATIVE_WAKE_UNAVAILABLE", "reason=missing_model asset=${MicroWakeWord.MODEL_ASSET}")
+      AudioDiag.logError("NATIVE_WAKE_UNAVAILABLE", "reason=no_compatible_local_model cloud_fallback_disabled=true")
     }
     // Removed unconditional startHotwordLoop() here (2026-08-24, confirmed live root cause):
     // this fired on EVERY service (re)start regardless of which engine JS actually wants —
@@ -662,8 +775,16 @@ class BensonForegroundService : Service() {
     isRunning = false
     if (instance === this) instance = null
     stopWakePokeLoop()
+    callStatePollRunning = false
+    mainHandler.removeCallbacks(callStatePoll)
+    try { getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(callPrefsListener) } catch (_: Exception) {}
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      try { (getSystemService(Context.AUDIO_SERVICE) as AudioManager).removeOnModeChangedListener(audioModeChangedListener) } catch (_: Exception) {}
+    }
     try { microWakeWord?.stop() } catch (_: Exception) {}
     microWakeWord = null
+    try { heedWakeWord?.stop() } catch (_: Exception) {}
+    heedWakeWord = null
     try { nativeCloudWake?.stop() } catch (_: Exception) {}
     nativeCloudWake = null
     stopHotwordLoop()
@@ -984,7 +1105,7 @@ class BensonForegroundService : Service() {
       consecutiveErrors = 0
       val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
       Log.i(TAG, "hotword burst raw transcript(s): $matches")
-      AudioDiag.log(this@BensonForegroundService, "STT_FINAL", "session=$hotwordSessionId component=hotword_loop text=${matches?.joinToString("|")}")
+      AudioDiag.log(this@BensonForegroundService, "STT_FINAL", "session=$hotwordSessionId component=hotword_loop resultCount=${matches?.size ?: 0} chars=${matches?.firstOrNull()?.length ?: 0}")
       val normalized = matches?.firstOrNull() ?: ""
       val hit = matches?.firstNotNullOfOrNull { WAKE_REGEX.find(it) }
       AudioDiag.log(this@BensonForegroundService, "WAKE_EVALUATION", "session=$hotwordSessionId source=final normalizedText=\"$normalized\" matched=${hit != null}")
@@ -993,8 +1114,8 @@ class BensonForegroundService : Service() {
         // — if present, skip the extra round-trip and process it immediately instead of
         // starting a second empty listening session.
         val commandTail = hit.groupValues.getOrNull(2)?.trim().orEmpty()
-        Log.i(TAG, "wake word matched, commandTail='$commandTail'")
-        AudioDiag.log(this@BensonForegroundService, "WAKE_ACCEPTED", "session=$hotwordSessionId commandTail=\"$commandTail\"")
+        Log.i(TAG, "wake word matched, commandTailChars=${commandTail.length}")
+        AudioDiag.log(this@BensonForegroundService, "WAKE_ACCEPTED", "session=$hotwordSessionId commandTailChars=${commandTail.length}")
         AudioDiag.log(this@BensonForegroundService, "WAKE_DETECTED_NATIVE", "session=$hotwordSessionId")
         AudioDiag.log(this@BensonForegroundService, "MODE_TRANSITION", "from=PASSIVE_WAKE to=COMMAND reason=WAKE_MATCH session=$hotwordSessionId")
         AudioDiag.log(this@BensonForegroundService, "PASSIVE_SESSION_TERMINATED", "session=$hotwordSessionId reason=result_wake_match")
@@ -1270,7 +1391,7 @@ class BensonForegroundService : Service() {
     }, delayMs)
   }
 
-  private fun onHotwordDetected(commandTail: String) {
+  private fun onHotwordDetected(commandTail: String, audioFilePath: String? = null) {
     hotwordLoopRunning = false // pause self; JS resumes us via ACTION_RESUME_HOTWORD when done
     hotwordRecognizer?.let { try { it.destroy() } catch (_: Exception) {} }
     hotwordRecognizer = null
@@ -1303,13 +1424,14 @@ class BensonForegroundService : Service() {
     // consumption point for both the live-event path and the heartbeat-poll fallback in
     // app/index.tsx's wakePokeSub — the same command can never be processed twice.
     pendingWakeCommand.set(commandTail)
+    pendingWakeAudioFile.set(audioFilePath)
     pendingWakeCommandEpoch += 1
     armWakeHandoffWatchdog()
 
     val hasJsListener = onWakeWordDetected != null
-    AudioDiag.log(this, "WAKE_EVENT_EMITTED_TO_JS", "hasListenerRegistered=$hasJsListener commandTail=\"$commandTail\"")
+    AudioDiag.log(this, "WAKE_EVENT_EMITTED_TO_JS", "hasListenerRegistered=$hasJsListener commandTailChars=${commandTail.length}")
     if (hasJsListener) {
-      onWakeWordDetected?.invoke(commandTail)
+      onWakeWordDetected?.invoke(commandTail, audioFilePath)
       return
     }
     // Confirmed live 2026-07-17: if the JS/Expo bridge isn't alive at this exact instant (OnePlus
@@ -1320,16 +1442,11 @@ class BensonForegroundService : Service() {
     // module's OnCreate flush it the moment JS actually comes back, and resuming the loop here
     // directly (not waiting on a JS round-trip that has no listener to receive it) means the mic
     // doesn't stay dead in the meantime either.
-    AudioDiag.log(this, "WAKE_COMMAND_QUEUED", "commandTail=\"$commandTail\" reason=no_js_listener")
-    // URGENT_WAKE_FRESH_SESSION_1 — proven live (hasListenerRegistered=false at a cold start):
-    // this fell back to startHotwordLoop(), the legacy Porcupine/plain-SpeechRecognizer passive
-    // loop (GATE_RMS-gated, no cloud STT, no wake-name matching) — NOT the proven NativeCloudWake
-    // engine actually configured on this build. Once in that loop, real "Benson" utterances were
-    // scanned by the weaker fallback until something else intervened. Re-arm the SAME engine
-    // armNativeWake() uses everywhere else instead; owner must be reset first (armNativeWake
-    // refuses while micOwner is still COMMAND_STT, set above by the caller before this fires).
-    setMicOwner("NONE", "no_js_listener_recover")
-    armNativeWake("no_js_listener_recover")
+    // Keep COMMAND_STT ownership while this durable command waits. The existing handoff watchdog
+    // will start the headless consumer and re-arm wake after 5s. Re-arming here used to clear
+    // COMMAND_STT, disabling that watchdog; subsequent detections could then overwrite the pending
+    // command before JS had consumed it (observed on-device: two wakes, zero executor handoff).
+    AudioDiag.log(this, "WAKE_COMMAND_QUEUED", "commandTailChars=${commandTail.length} reason=no_js_listener watchdog=armed")
   }
 
   // ROUND_WAKE_NATIVE_TO_JS_ACK_1 — much shorter than OwnerWatchdog's general 45s (that one covers
@@ -1407,7 +1524,7 @@ class BensonForegroundService : Service() {
     // actually taken, never on the (now expected, harmless) null case.
     val cmd = pendingWakeCommand.getAndSet(null) ?: return null
     pendingWakeCommandEpoch += 1
-    AudioDiag.log(this, "WAKE_PENDING_TAKEN", "commandTail=\"$cmd\"")
+    AudioDiag.log(this, "WAKE_PENDING_TAKEN", "commandTailChars=${cmd.length}")
     return cmd
   }
 
@@ -1419,7 +1536,7 @@ class BensonForegroundService : Service() {
   // takePendingWakeCommand() above.
   fun takePendingHeadlessTestCommand(): String? {
     val cmd = pendingHeadlessTestCommand.getAndSet(null) ?: return null
-    AudioDiag.log(this, "WAKE_PENDING_TAKEN", "commandTail=\"$cmd\" consumer=headless")
+    AudioDiag.log(this, "WAKE_PENDING_TAKEN", "commandTailChars=${cmd.length} consumer=headless")
     return cmd
   }
 
@@ -1596,12 +1713,13 @@ class BensonForegroundService : Service() {
     var onListenRequested: (() -> Unit)? = null
     // ROUND_WAKE_STATE_BUG_1 — native heartbeat → module sendEvent("onWakePoke") → JS re-arm.
     var onWakePoke: (() -> Unit)? = null
+    var onCallAudioStateChanged: ((Boolean) -> Unit)? = null
 
     // Invoked when the native hotword loop hears "Benson" — argument is whatever followed the
     // name in the same utterance ("Benson, deschide Waze" -> "deschide Waze"), empty if the name
     // was said alone. JS should process a non-empty tail immediately, otherwise start real
     // command capture.
-    var onWakeWordDetected: ((String) -> Unit)? = null
+    var onWakeWordDetected: ((String, String?) -> Unit)? = null
 
     // ROUND_STT_SESSION_WATCHDOG_NATIVE_1 — fired when armSttSessionWatchdog's native timer
     // expires for the still-current session id. Argument is that session's id.
@@ -1644,6 +1762,7 @@ class BensonForegroundService : Service() {
     // takePendingWakeCommand()'s own comment) — that is a separate, larger change (persist the
     // command until the mission is actually accepted, not just until it's read).
     val pendingWakeCommand = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    val pendingWakeAudioFile = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
     // HEADLESS_WIRING_TEST_ISOLATION_1 (2026-09-20) — a SEPARATE field, deliberately never
     // touched by the live onWakeWordDetected path or the JS heartbeat-poll fallback (both call

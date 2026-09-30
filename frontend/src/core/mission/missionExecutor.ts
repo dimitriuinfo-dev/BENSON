@@ -166,6 +166,9 @@ export async function execute(request: ActionRequest, options: { confirmed?: boo
         },
       };
       confirmMessage = `Am scris în conversația cu ${phaseA.contact} pe WhatsApp: "${phaseA.message}". Îl trimit?`;
+      // EXECUTĂ — BENSON PESTE APLICAȚIA REALĂ: WhatsApp is already foreground (Phase A drove it
+      // there) — show the existing bubble with the prepared text instead of BENSON's own screen.
+      whatsappTool.showWaMessageBubble(phaseA.message);
     } else {
       confirmMessage = buildConfirmationPrompt(enrichedRequest);
     }
@@ -188,6 +191,9 @@ export async function execute(request: ActionRequest, options: { confirmed?: boo
     const contact = String(enrichedRequest.params.waWriteContact ?? enrichedRequest.params.contactName ?? 'contact');
     result = await whatsappTool.confirmSendMessageDirect(missionId, message, contact);
     devLog('wa-write phase B', result);
+    // Mission concludes here either way (sent+verified or failed) — the bubble's job (showing the
+    // pending message for confirmation) is done; retract it, leave WhatsApp exactly as it is.
+    whatsappTool.hideWaMessageBubble();
   } else {
     result = await runTool(enrichedRequest);
   }
@@ -222,7 +228,11 @@ async function runTool(request: ActionRequest): Promise<{ outcome: LaunchOutcome
     // confirmed on this device) isn't populated by any caller yet; whatsappTool.placeCall
     // defaults to 'de' when absent, identical to the previously-hardcoded behavior.
     const uiLang = typeof request.params.uiLang === 'string' ? request.params.uiLang : undefined;
-    return whatsappTool.placeCall(String(request.params.contactName ?? ''), uiLang);
+    return whatsappTool.placeCall(
+      String(request.params.contactName ?? ''),
+      uiLang,
+      request.params.mode === 'video_call' ? 'video_call' : 'voice_call',
+    );
   }
   if (request.action === 'endCall') return whatsappTool.endCall();
   if (request.action === 'muteCall') return whatsappTool.muteCall();
@@ -348,11 +358,22 @@ function buildConfirmationPrompt(request: ActionRequest): string {
     return `Deschid WhatsApp și deschid conversația cu "${searchString}". Confirmi?`;
   }
   if (request.tool === 'whatsapp' && request.action === 'placeCall') {
-    // States the governance plan (target app + search string), never a bare/raw name — the
-    // search string is exactly what gets typed into WhatsApp's own search, nothing resolved
-    // against any contact list.
-    const searchString = String(request.params.contactName ?? '');
-    return `Deschid WhatsApp, caut "${searchString}", aleg primul rezultat și apăs apelul vocal. Confirmi?`;
+    // BENSON CONTACT+CALL round (2026-09-23) — missionValidator.ts now resolves the contact BEFORE
+    // this prompt is built (doctrine reversal, see its own comment); phoneNumber present means a
+    // real address-book match, shown here per the round's explicit requirement. Its absence means
+    // local resolution genuinely failed and WhatsApp's own search is about to run as an UNCONFIRMED
+    // fallback — said honestly, never phrased as if a specific contact were already found.
+    const contactName = String(request.params.contactName ?? '');
+    const phoneNumber = typeof request.params.phoneNumber === 'string' ? request.params.phoneNumber : '';
+    if (phoneNumber) {
+      return `Îl/o sun pe ${contactName} (${phoneNumber}) pe WhatsApp. Confirmi?`;
+    }
+    // HONEST LIMIT (see this round's report, "remaining gap"): the fallback below still can't show
+    // the WhatsApp-found name before dialing (that needs a native search/confirm split not built
+    // this round) — it only verifies AFTER the call connects, via the call-screen header, and says
+    // so plainly if the name doesn't match. This prompt asks consent for THAT search-and-call, not
+    // a shown candidate.
+    return `Nu găsesc "${contactName}" în agenda telefonului. Caut direct în WhatsApp și sun primul rezultat — nu pot confirma numele înainte de apel, doar după ce răspunde. Confirmi?`;
   }
   return 'Confirmi?';
 }
@@ -441,9 +462,14 @@ export async function confirmActiveMission(contacts: TrustedContact[] = []): Pro
   return execute(mission.request, { confirmed: true }, contacts);
 }
 
+function isWaTypedMessageMission(mission: Mission | null): boolean {
+  return !!mission && mission.request.tool === 'whatsapp' && mission.request.params.waWriteTyped === true;
+}
+
 export async function cancelActiveMission(): Promise<Mission | null> {
   const mission = getActiveMission();
   if (!mission) return null;
+  if (isWaTypedMessageMission(mission)) whatsappTool.hideWaMessageBubble();
   const cancelled = await transitionMission('Cancelled', { userMessage: 'Am anulat.' });
   await clearIfTerminal();
   return cancelled;
@@ -456,6 +482,7 @@ export async function cancelActiveMission(): Promise<Mission | null> {
 export async function supersedeActiveMission(reason: string): Promise<Mission | null> {
   const mission = getActiveMission();
   if (!mission) return null;
+  if (isWaTypedMessageMission(mission)) whatsappTool.hideWaMessageBubble();
   const superseded = await transitionMission('Superseded', {
     reason: `superseded: ${reason}`,
     userMessage: 'Am lăsat comanda anterioară și trec la ce mi-ai cerut acum.',

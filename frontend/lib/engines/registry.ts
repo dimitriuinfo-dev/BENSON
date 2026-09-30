@@ -125,22 +125,21 @@ export async function resolveSttEngine(): Promise<SttEngine> {
 // testLlmConnection() against the SAME resolution resolveLlmBrain() itself uses, instead of
 // re-implementing this fallback chain a second time. No behavior change to resolveLlmBrain() —
 // it now just calls this and wraps the result.
-export type ResolvedLlmConfigSource = 'creier' | 'groq_reuse';
+// BENSON CONTACT+CALL round (2026-09-23), explicit product decision: OpenAI is the ONLY active
+// Brain provider — no automatic Groq reuse for the LLM path, ever, even when no dedicated config
+// is saved. (Groq stays fully in place for STT — see resolveSttEngine() below, a completely
+// separate function/config slot; this change touches the Brain/LLM path only.) Previously, an
+// unconfigured CREIER silently fell back to reusing the Groq STT key against Groq's chat endpoint
+// — convenient, but it meant a "fixed" OpenAI key that failed to save (or was never re-read) could
+// go unnoticed, since the app would just keep answering via Groq. Now: dedicated 'llm'/
+// 'openai-compatible' config or nothing — a missing/broken one fails honestly instead of silently
+// substituting a different provider.
+export type ResolvedLlmConfigSource = 'creier';
 export async function resolveLlmConfig(): Promise<{ config: EngineConfig; source: ResolvedLlmConfigSource } | null> {
   const id = await getSelectedEngineId('llm', DEFAULT_LLM_ENGINE_ID);
   const dedicated = await getEngineConfig('llm', id);
   if (dedicated) return { config: dedicated, source: 'creier' };
-  // No dedicated CREIER config — fall back to the Groq key (see the defaults above). The model is
-  // discovered from the live /models list rather than hardcoded, because known-good ids have
-  // 404'd on this account.
-  const groq = await getEngineConfig('stt', 'groq');
-  if (!groq?.apiKey) return null;
-  const baseUrl = groq.baseUrl || GROQ_BRAIN_DEFAULT_BASE_URL;
-  const disc = await discoverGroqBrainModel(baseUrl, groq.apiKey);
-  // Even on a discovery failure, still return a config (with the last-resort id) so the chat call
-  // runs and surfaces the real HTTP error — lastLlmDiscoveryCause() carries the reason for the
-  // conversation layer to phrase.
-  return { config: { apiKey: groq.apiKey, baseUrl, model: disc.model ?? GROQ_BRAIN_DEFAULT_MODEL }, source: 'groq_reuse' };
+  return null;
 }
 
 // Returns null when no LLM engine is configured yet (no apiKey saved) — callers decide what to do

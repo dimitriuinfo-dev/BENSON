@@ -8,6 +8,7 @@ import type { ActionRequest } from './actionRequest';
 import { createActionRequest } from './actionRequest';
 import { normalizeTranscript } from './transcriptNormalizer';
 import { cleanDiscourse } from './discourseCleaner';
+import { looksLikePersonName } from '../../../lib/engines/actionSanity';
 
 // Leading boundary that works before a Romanian diacritic, unlike \b: JS's \b only treats
 // [A-Za-z0-9_] as a "word" character, so \b immediately before "închide"/"întoarce-te" (both
@@ -121,6 +122,14 @@ const WHATSAPP_CALL_PATTERNS: RegExp[] = [
   new RegExp(`\\bsun[ăa]?-?[oli]?\\s+(?:(?:o|l|le|îl|il)\\s+)?pe\\s+whats(?:app)?\\s+pe\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // sun-o pe WhatsApp pe mama / sună pe Whats pe Hannah
   new RegExp(`\\bsun[ăa]?-?[oli]?\\s+(?:(?:o|l|le|îl|il)\\s+)?(?:pe\\s+|la\\s+|lui\\s+)?(.+?)\\s+pe\\s+whats(?:app)?\\b`, 'i'), // sună pe Hannah pe WhatsApp / sun o pe Hannah pe WhatsApp / sună la Hannah pe Whats
   new RegExp(`\\bapel(?:[ăa]|eaz[ăa])\\s+(?:pe\\s+)?(.+?)\\s+pe\\s+whats(?:app)?\\b`, 'i'), // apelează pe Hannah pe WhatsApp / pe Whats
+];
+
+// Keep video calls distinct from voice calls so they cannot silently route to audio.
+const WHATSAPP_VIDEO_CALL_PATTERNS: RegExp[] = [
+  new RegExp(`\\bsun.?-?[oli]?\\s+(?:(?:o|l|le|il)\\s+)?video\\s+pe\\s+whats(?:app)?\\s+pe\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'),
+  new RegExp(`\\bsun.?-?[oli]?\\s+(?:(?:o|l|le|il)\\s+)?video\\s+(?:pe\\s+)?(.+?)\\s+pe\\s+whats(?:app)?\\b`, 'i'),
+  new RegExp(`\\bsun.?-?[oli]?\\s+(?:(?:o|l|le|il)\\s+)?(?:pe\\s+|la\\s+|lui\\s+)?(.+?)\\s+pe\\s+whats(?:app)?\\s+video\\b`, 'i'),
+  new RegExp(`\\bvideoanruf\\s+(?:mit\\s+)?(.+?)\\s+(?:ueber|auf)\\s+whats(?:app)?\\b`, 'i'),
 ];
 
 // Channel-ambiguous "send this message to X" — no app named at all ("scrie-i lui Hannah că
@@ -330,6 +339,15 @@ function classify(text: string): ParseResult {
   // WhatsApp voice-call phrasing — checked before plain CALL_CONTACT_PATTERNS so "pe whatsapp"
   // isn't captured as part of the contact name and BENSON gives the honest fallback instead of
   // dialing the phone number.
+  const whatsappVideoCallContact = firstMatch(WHATSAPP_VIDEO_CALL_PATTERNS, text);
+  if (whatsappVideoCallContact) {
+    return {
+      intent: 'OPEN_WHATSAPP_CONTACT',
+      parameters: { contactName: whatsappVideoCallContact, channel: 'whatsapp', mode: 'video_call' },
+      confidence: 1.0,
+    };
+  }
+
   const whatsappCallContact = firstMatch(WHATSAPP_CALL_PATTERNS, text);
   if (whatsappCallContact) {
     return {
@@ -392,8 +410,18 @@ function classify(text: string): ParseResult {
   // Helper — a message-family match ALWAYS resolves to MESSAGE_CONTACT (never open-chat). The
   // body is sanitized (wake-word bleed removed); if it empties, or it's just the recipient token
   // echoed back, the body stays "" and the router stops with MESSAGE_BODY_MISSING.
-  const messageContact = (contactRaw: string, bodyRaw: string, confidence: number): ParseResult => {
+  // ROUND_WA1_REMEDIATION_2 (2026-09-23, device-proven) — returns null when the extracted
+  // contactName doesn't pass the same looksLikePersonName() sanity check the CALL_PATTERN fast
+  // path already applies (a bare pronoun, wake word, verb, etc.). This parser used to treat ANY
+  // regex capture as a confidently-resolved contact — device-proven bug: "scrie el ca ro un mesaj
+  // pe what's it" (STT-mangled "scrie-i lui K Ro...") extracted "el" and resolved it against the
+  // WHOLE address book (82 partial-substring matches). Returning null here lets the caller fall
+  // through instead of claiming a confident match on garbage — eventually reaching the brain
+  // (routeThroughBrain), which can reinterpret the full phrase with real conversational context
+  // instead of a weak regex capture being treated as a secure identity.
+  const messageContact = (contactRaw: string, bodyRaw: string, confidence: number): ParseResult | null => {
     const contactName = stripTrailingPunctuation(contactRaw).replace(/\s+pe\s+whats(?:app)?$/i, '').trim();
+    if (!looksLikePersonName(contactName).ok) return null;
     let message = sanitizeMessageBody((bodyRaw ?? '').trim());
     if (bodyEqualsContact(message, contactName)) message = '';
     return { intent: 'MESSAGE_CONTACT', parameters: { contactName, message, channel: 'whatsapp' }, confidence };
@@ -402,23 +430,26 @@ function classify(text: string): ParseResult {
   // 1a. "write X on whatsapp Y"
   const whatsappMessageEn = text.match(WHATSAPP_MESSAGE_EN_PATTERN);
   if (whatsappMessageEn && whatsappMessageEn[1]?.trim()) {
-    return messageContact(whatsappMessageEn[1], whatsappMessageEn[2] ?? '', 1.0);
+    const r = messageContact(whatsappMessageEn[1], whatsappMessageEn[2] ?? '', 1.0);
+    if (r) return r;
   }
   // 1b. "scrie-i lui X pe WhatsApp că Y"
   const whatsappMessageRo = text.match(WHATSAPP_MESSAGE_RO_PATTERN);
   if (whatsappMessageRo && whatsappMessageRo[1]?.trim()) {
-    return messageContact(whatsappMessageRo[1], whatsappMessageRo[2] ?? '', 1.0);
+    const r = messageContact(whatsappMessageRo[1], whatsappMessageRo[2] ?? '', 1.0);
+    if (r) return r;
   }
   // 1c. channel-less "scrie-i lui X că Y" (defaults to WhatsApp).
   const messageMatch = text.match(MESSAGE_CONTACT_PATTERN);
   if (messageMatch && messageMatch[1]?.trim()) {
-    return messageContact(messageMatch[1], messageMatch[2] ?? '', 0.9);
+    const r = messageContact(messageMatch[1], messageMatch[2] ?? '', 0.9);
+    if (r) return r;
   }
 
   // 1d. message-family verb + contact but NO body → MESSAGE_CONTACT with an empty body. The
   //     router turns this into MESSAGE_BODY_MISSING ("ce să-i scriu?"), NEVER an open-chat.
   const whatsappMessageNoBody = firstMatch(WHATSAPP_MESSAGE_NOBODY_PATTERNS, text);
-  if (whatsappMessageNoBody) {
+  if (whatsappMessageNoBody && looksLikePersonName(whatsappMessageNoBody).ok) {
     return {
       intent: 'MESSAGE_CONTACT',
       parameters: { contactName: whatsappMessageNoBody, message: '', channel: 'whatsapp' },
@@ -428,7 +459,7 @@ function classify(text: string): ParseResult {
 
   // 2. explicit OPEN-the-chat (no send) — a distinct intent, never a messaging fallback.
   const whatsappOpenChat = firstMatch(WHATSAPP_OPEN_CHAT_PATTERNS, text);
-  if (whatsappOpenChat) {
+  if (whatsappOpenChat && looksLikePersonName(whatsappOpenChat).ok) {
     return {
       intent: 'OPEN_WHATSAPP_CONTACT',
       parameters: { contactName: whatsappOpenChat, channel: 'whatsapp' },
@@ -441,7 +472,7 @@ function classify(text: string): ParseResult {
   }
 
   const callContactName = firstMatch(CALL_CONTACT_PATTERNS, text);
-  if (callContactName) {
+  if (callContactName && looksLikePersonName(callContactName).ok) {
     return { intent: 'CALL_CONTACT', parameters: { contactName: callContactName }, confidence: 1.0 };
   }
 

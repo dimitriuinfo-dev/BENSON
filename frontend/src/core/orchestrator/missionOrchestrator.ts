@@ -82,7 +82,17 @@ import {
 // so a calculator-shaped utterance never collapses into a generic OPEN_APP or falls through to
 // the LLM. Parsing (Task 1) and native execution (Task 2/3) both live in toolRegistry.ts —
 // this file only recognizes the shape and dispatches.
-import { looksLikeCalculatorRequest, runCalculatorOperation } from '../../../lib/tools/toolRegistry';
+import { looksLikeCalculatorRequest, parseCalculatorRequest, runCalculatorOperation } from '../../../lib/tools/toolRegistry';
+import { getWhatsAppNotifications } from 'benson-notification-listener';
+import { readChatMessages } from '../mission/tools/whatsappTool';
+import { formatNotificationReadout, formatChatHistoryReadout } from '../../../lib/agents/voiceAgent';
+import { createWhatsAppReadDialogue } from './whatsappReadDialogue';
+
+const WA_READ_DIALOGUE_ENABLED = true;
+const handleWhatsAppReadDialogue = createWhatsAppReadDialogue({
+  readChat: readChatMessages, notifications: getWhatsAppNotifications,
+  formatNotifications: formatNotificationReadout, formatChat: formatChatHistoryReadout,
+});
 
 const LOG_TAG = '[MissionOrchestrator]';
 function devLog(...args: unknown[]): void {
@@ -147,9 +157,10 @@ export interface MissionRunResult {
   // result's text/voice/state must not overwrite what the user is looking at now. Does not affect
   // whether the underlying action ran — that already happened before this field is read.
   armedTurnId?: string;
+  awaitingReadChoice?: boolean;
 }
 
-type DisambiguationCandidate = { name: string; packageName?: string };
+export type DisambiguationCandidate = { name: string; packageName?: string };
 
 const CONTACT_TASK_TYPES = ['PREPARE_CALL', 'PREPARE_MESSAGE', 'CHECK_FAMILY_LOCATION'];
 
@@ -286,10 +297,10 @@ function toGovernedCall(task: MissionTask): GovernedCall | null {
       };
     }
 
-    if (task.input.mode === 'voice_call') {
+    if (task.input.mode === 'voice_call' || task.input.mode === 'video_call') {
       // "sună X pe WhatsApp" — governed as its own action (accessibility-verified call-button
       // tap, product-owner-authorized). Unchanged.
-      return { tool: 'whatsapp', action: 'placeCall', params: { contactName } };
+      return { tool: 'whatsapp', action: 'placeCall', params: { contactName, mode: task.input.mode } };
     }
 
     // ROUND_WA_GOVERNANCE_ROUTING — a message intent stays a message intent. It ALWAYS becomes
@@ -474,15 +485,41 @@ async function executeTask(
     task.status = 'WAITING';
     plan.status = 'WAITING_FOR_CONFIRMATION';
     emitEvent('ConfirmationRequested', { task: task.type }, plan.id, task.id);
-    const contactName = typeof task.input.contactName === 'string' ? task.input.contactName : '';
+    let contactName = typeof task.input.contactName === 'string' ? task.input.contactName : '';
     const message = typeof task.input.message === 'string' ? task.input.message : '';
+    // BENSON CONTACT+CALL round (2026-09-23) — resolve BEFORE building the question, not after
+    // "da": a real phone-channel call (PhoneCallExecutor, via CALL_CONTACT) must show the actual
+    // resolved contact + number, not the raw spoken name, per the round's explicit requirement.
+    // Stashed onto task.input so the later post-confirmation execution (which re-resolves via the
+    // same enrichContactAction, idempotent/pure) doesn't need any further change.
+    let phoneNumber: string | undefined;
+    if (task.type === 'PREPARE_CALL' && contactName) {
+      const probe = createActionRequest({
+        source: 'voice', rawText, intent: 'CALL_CONTACT', parameters: { contactName }, riskLevel: 'LOW', requiresConfirmation: true,
+      });
+      const bridged = enrichContactAction(probe, contacts);
+      if (bridged.status === 'resolved') {
+        contactName = String(bridged.request.parameters.contactName ?? contactName);
+        phoneNumber = typeof bridged.request.parameters.phoneNumber === 'string' ? bridged.request.parameters.phoneNumber : undefined;
+        task.input.contactName = contactName;
+        if (phoneNumber) task.input.phoneNumber = phoneNumber;
+      } else if (bridged.status !== 'not_found') {
+        // ambiguous / missing_phone — an honest, specific question beats a generic "confirmi?"
+        // built from a name that can't actually be dialed as-is.
+        return { message: bridged.message, waiting: true };
+      }
+      // not_found — falls through to the plain-name question below; PhoneCallExecutor itself will
+      // give the real "no number" answer if this genuinely can't be resolved at execution time.
+    }
     const question =
-      task.type === 'PREPARE_MESSAGE' && task.input.mode === 'voice_call'
+      task.type === 'PREPARE_MESSAGE' && task.input.mode === 'video_call'
+        ? `Inițiez apelul video WhatsApp cu ${contactName}. Confirmi?`
+        : task.type === 'PREPARE_MESSAGE' && task.input.mode === 'voice_call'
         ? `Deschid conversația WhatsApp cu ${contactName} pentru apel — confirmi?`
         : task.type === 'PREPARE_MESSAGE'
           ? `Trimit lui ${contactName}: "${message}"?`
           : task.type === 'PREPARE_CALL'
-            ? `Îl/o sun pe ${contactName}?`
+            ? phoneNumber ? `Îl/o sun pe ${contactName} (${phoneNumber}) la telefon?` : `Îl/o sun pe ${contactName} la telefon?`
             : 'Confirmi?';
     return { message: question, waiting: true };
   }
@@ -708,7 +745,9 @@ function stripDiac(s: string): string {
 
 // Match the user's pick against the proposed candidates: an ordinal ("primul", "a doua", "3"),
 // or a name substring either direction, or a >2-char token overlap. Null = no clear pick.
-function matchDisambiguationPick(
+// Exported (BENSON CONTACT+CALL round, 2026-09-23) — app/index.tsx's contact-choice gate reuses
+// this exact ordinal/substring logic instead of duplicating it (it only needs `{name}` objects).
+export function matchDisambiguationPick(
   text: string,
   candidates: DisambiguationCandidate[],
 ): DisambiguationCandidate | null {
@@ -925,9 +964,17 @@ type VisibleClickOutcome =
 
 function findVisibleCandidates(nodes: SnapshotNode[], normLabel: string): { matches: SnapshotNode[]; source: string } | null {
   const exactText = nodes.filter((n) => normalizeForMatch(n.text || '') === normLabel);
-  if (exactText.length > 0) return { matches: exactText, source: 'text' };
+  if (exactText.length > 0) {
+    const clickable = exactText.filter((n) => n.clickable);
+    const actionable = clickable.length > 0 ? clickable : exactText.filter((n) => n.viewId);
+    return { matches: actionable.length > 0 ? actionable : exactText, source: 'text' };
+  }
   const exactDesc = nodes.filter((n) => normalizeForMatch(n.contentDescription || '') === normLabel);
-  if (exactDesc.length > 0) return { matches: exactDesc, source: 'contentDescription' };
+  if (exactDesc.length > 0) {
+    const clickable = exactDesc.filter((n) => n.clickable);
+    const actionable = clickable.length > 0 ? clickable : exactDesc.filter((n) => n.viewId);
+    return { matches: actionable.length > 0 ? actionable : exactDesc, source: 'contentDescription' };
+  }
   const substring = nodes.filter(
     (n) => normalizeForMatch(n.text || '').includes(normLabel) || normalizeForMatch(n.contentDescription || '').includes(normLabel),
   );
@@ -938,7 +985,20 @@ function findVisibleCandidates(nodes: SnapshotNode[], normLabel: string): { matc
 async function clickVisibleLabel(label: string): Promise<VisibleClickOutcome> {
   const normLabel = normalizeForMatch(label);
   const before = await readSnapshotNodes();
-  const found = findVisibleCandidates(before, normLabel);
+  // Resolve spoken key names only to labels present in this fresh Accessibility tree.
+  const aliases: Record<string, string[]> = {
+    zero: ['0'], unu: ['1'], una: ['1'], doi: ['2'], doua: ['2'], trei: ['3'], patru: ['4'],
+    cinci: ['5'], sase: ['6'], sapte: ['7'], opt: ['8'], noua: ['9'],
+    plus: ['+'], minus: ['−', '-'], ori: ['×', '*'], inmultire: ['×', '*'],
+    impartire: ['÷', '/'], egal: ['='],
+  };
+  const labelsToTry = [label, ...(aliases[normLabel] ?? [])];
+  let found: ReturnType<typeof findVisibleCandidates> = null;
+  let matchedLabel = label;
+  for (const candidate of labelsToTry) {
+    const match = findVisibleCandidates(before, normalizeForMatch(candidate));
+    if (match) { found = match; matchedLabel = candidate; break; }
+  }
   if (!found) {
     logAudioDiag('VISIBLE_MATCH', `source=none confidence=0 label=${JSON.stringify(label)}`);
     return { status: 'not_found', label };
@@ -955,11 +1015,16 @@ async function clickVisibleLabel(label: string): Promise<VisibleClickOutcome> {
     `source=${found.source} confidence=single label=${JSON.stringify(label)} text=${JSON.stringify(node.text ?? '')} ` +
     `contentDescription=${JSON.stringify(node.contentDescription ?? '')} clickable=${node.clickable ?? false} bounds=${JSON.stringify(node.bounds ?? null)}`);
 
-  const beforeSignature = before.slice(0, 8).map((n) => normalizeForMatch(n.text || n.contentDescription || '')).join('|');
+  const beforeSignature = snapshotSignature(before);
   let clickOk = false;
   try {
+    // Use the exact resource id seen in the fresh tree when available; otherwise keep the
+    // reusable label-based Accessibility action. No coordinates or app-specific assumptions.
+    const match = node.viewId
+      ? { viewId: node.viewId, clickableAncestor: true }
+      : { textContainsAny: [matchedLabel], clickableAncestor: true };
     const r = (await executeCommand({
-      steps: [{ action: 'click', match: { textContainsAny: [label], clickableAncestor: true }, timeoutMs: 3000 }],
+      steps: [{ action: 'click', match, timeoutMs: 3000 }],
     } as any)) as { success?: boolean };
     clickOk = r?.success === true;
   } catch {
@@ -970,21 +1035,38 @@ async function clickVisibleLabel(label: string): Promise<VisibleClickOutcome> {
 
   await nativeDelay(600);
   const after = await readSnapshotNodes();
-  const afterSignature = after.slice(0, 8).map((n) => normalizeForMatch(n.text || n.contentDescription || '')).join('|');
+  const afterSignature = snapshotSignature(after);
   const changed = afterSignature !== beforeSignature;
   logAudioDiag('VISIBLE_VERIFY', `success=${changed} label=${JSON.stringify(label)} observation=${changed ? 'ui_changed' : 'unchanged'}`);
   return changed ? { status: 'success', label } : { status: 'no_change', label };
 }
 
+function snapshotSignature(nodes: SnapshotNode[]): string {
+  return nodes.map((n) => [n.viewId || '', normalizeForMatch(n.text || ''), normalizeForMatch(n.contentDescription || '')].join(':')).join('|');
+}
+
 async function tryHandleClickVisibleNamedElement(rawText: string): Promise<MissionRunResult | null> {
   const t = cleanDiscourse(normalizeTranscript(rawText));
   const m = APASA_NAMED_PATTERN.exec(t);
-  if (!m) return null;
-  const label = (m[2] || '').trim();
-  if (label.length < 2) return null;
+  let label = (m?.[2] || '').trim();
+  // STT can insert the foreground app name into a spoken key command (observed on device:
+  // "apasă în calculator 5"). Treat this as guided Calculator input only while the actual
+  // Calculator is foregrounded; resolve the remaining label through the fresh Accessibility tree.
+  const foreground = getForegroundPackage();
+  const calcTap = foreground === 'com.oneplus.calculator'
+    ? /^apas[ăa]\s+(?:în\s+)?calculator\s+(.+?)\s*\.?$/i.exec(t)
+    : null;
+  if (!m && !calcTap) return null;
+  if (calcTap) label = calcTap[1].trim();
+  if (label.length < 1) return null;
 
   const outcome = await clickVisibleLabel(label);
-  if (outcome.status === 'not_found') return null; // not this utterance — fall through, unchanged
+  if (outcome.status === 'not_found') {
+    // The phrase is unambiguously a guided action. Explain the observed blocker instead of
+    // forwarding it to the Brain and returning an unrelated network timeout.
+    if (calcTap) return { handled: true, message: `Nu găsesc „${label}” în Calculatorul deschis.` };
+    return null;
+  }
   if (outcome.status === 'ambiguous') {
     return { handled: true, message: `Am găsit mai multe pe ecran: ${outcome.candidateLabels.join(', ')}. Pe care?` };
   }
@@ -1121,10 +1203,16 @@ const END_CALL_PATTERN = /\b(închide|inchide|termină|termina|opre[șs]te)\s+ap
 const MUTE_CALL_PATTERN = /\b(pune|fă|fa|activeaz[ăa])\s+(?:pe\s+)?mute\b|\bmute\b|\bdezactiveaz[ăa]\s+microfonul\b/i;
 
 export async function runMission(rawText: string, options: RunMissionOptions = {}): Promise<MissionRunResult> {
-  logAudioDiag('EXEC_TRACE_INPUT', `text=${JSON.stringify(rawText)}`);
+  logAudioDiag('EXEC_TRACE_INPUT', `chars=${rawText.length}`);
   const normalizedText = normalizeTranscript(rawText);
   const cleanedForRepairCheck = cleanDiscourse(normalizedText);
-  devLog('rawText=', rawText, 'normalizedText=', normalizedText);
+  devLog('inputChars=', rawText.length, 'normalizedChars=', normalizedText.length);
+
+  const waDialogue = WA_READ_DIALOGUE_ENABLED ? await handleWhatsAppReadDialogue(normalizedText) : null;
+  if (waDialogue?.kind === 'read') {
+    logAudioDiag('WA_READ_DIALOGUE', `awaitingChoice=${!!waDialogue.awaitingChoice}`);
+    return { handled: true, message: waDialogue.message, awaitingReadChoice: waDialogue.awaitingChoice, armedTurnId: options.turnId };
+  }
 
   // ROUND_YOUTUBE_GOVERNANCE_2 — a pending "which video?" proposal takes priority over everything
   // else, same precedence reasoning as pendingDisambiguation below (checked first since it is the
@@ -1315,9 +1403,12 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
   // here, never sent to general conversation. looksLikeCalculatorRequest is deliberately broader
   // than what's actually executable (catches "sinus" etc. too), so an unsupported operation still
   // gets an honest "not supported" answer instead of silently falling through to the LLM/brain.
-  if (looksLikeCalculatorRequest(cleanedForRepairCheck) || looksLikeCalculatorRequest(normalizedText)) {
+  const calculatorUtterance = cleanedForRepairCheck || normalizedText;
+  const bareArithmeticInCalculator = getForegroundPackage() === 'com.oneplus.calculator' &&
+    parseCalculatorRequest(calculatorUtterance) !== null;
+  if (looksLikeCalculatorRequest(cleanedForRepairCheck) || looksLikeCalculatorRequest(normalizedText) || bareArithmeticInCalculator) {
     logAudioDiag('EXEC_TRACE_MISSION', 'missionId=calculator_operation taskCount=1');
-    const outcome = await runCalculatorOperation(cleanedForRepairCheck || normalizedText);
+    const outcome = await runCalculatorOperation(calculatorUtterance);
     return { handled: true, message: outcome.spoken };
   }
 
