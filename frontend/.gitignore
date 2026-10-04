@@ -54,7 +54,16 @@ modules/*/android/.cxx/
 # re-obtained/re-converted from scratch.
 /porcupine-model
 /whisper-models
-*.apk 
+*.apk
+*.keystore
+
+# device recovery copies (large signed APKs, kept only on this disk)
+/recovery
+
+# ad-hoc screenshots/UI dumps from live device debugging sessions, and run logs
+.tmp-*
+*.log
+
 # Only ignore truly-local env overrides; the deploy build context must be able to read
 # frontend/.env (the platform rewrites EXPO_PUBLIC_* / packager vars into it at deploy time).
 .env*.local

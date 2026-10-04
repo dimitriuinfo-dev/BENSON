@@ -1,0 +1,20 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <meta-data
+      android:name="com.google.android.gms.car.application"
+      android:resource="@xml/automotive_app_desc" />
+
+    <service
+      android:name=".BensonCarAppService"
+      android:exported="true"
+      android:label="Benson">
+      <intent-filter>
+        <action android:name="androidx.car.app.CarAppService" />
+        <category android:name="androidx.car.app.category.IOT" />
+      </intent-filter>
+      <meta-data
+        android:name="androidx.car.app.minCarApiLevel"
+        android:value="1" />
+    </service>
+  </application>
+</manifest>

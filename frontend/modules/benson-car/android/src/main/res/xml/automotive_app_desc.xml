@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RUNDA CAR-3a (2026-10-04, user-directed) — "categorie IOT (pentru uz personal cu surse
+     necunoscute; publicarea pentru clienți e altă discuție)." -->
+<automotiveApp>
+  <!-- FIX_CAR3A_TEMPLATE_USES_1 (2026-10-04, device-proven) — "iot" singur a dus la rejecția
+       validatorului Android Auto: "Package DENIED; Uses for TEMPLATE not defined". Orice app Car
+       App Library care randează șabloane (PaneTemplate etc.) trebuie să declare "template",
+       indiferent de categorie — confirmat în docs oficiale Android for Cars. -->
+  <uses name="template" />
+  <uses name="iot" />
+</automotiveApp>
