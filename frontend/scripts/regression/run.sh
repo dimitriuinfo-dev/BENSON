@@ -118,6 +118,36 @@ run_test() {
   fi
 }
 
+# RUNDA TEST-1 (2026-10-03) — native-pipeline injection. Every test above types into BENSON's own
+# JS text field (app/index.tsx) — it never exercises BensonForegroundService.kt's native parser
+# (tryNativeOpenApp / tryNativeYoutubeOpenSearch / tryNativeYoutube). DEBUG_INJECT calls
+# handleNativeCommandFlow directly via a broadcast; implicit OFF (DEBUG_INJECT_ENABLE must be sent
+# first, SharedPreferences flag, default false, never flipped by production code). The nested
+# single-quotes are required: `adb shell` re-joins argv into one string for the device's remote
+# shell, which would otherwise re-split "deschide youtube" at the space (same issue send_text()
+# works around above, different mechanism since `am broadcast` doesn't go through the IME).
+debug_inject_enable() { adb_shell am broadcast -a com.benson.butler.DEBUG_INJECT_ENABLE --ez enabled "$1" -p "$PKG" >/dev/null; sleep 1; }
+debug_inject() { adb_shell am broadcast -a com.benson.butler.DEBUG_INJECT --es text "'$1'" -p "$PKG" >/dev/null; }
+
+run_native_test() {
+  local id="$1" input="$2" wait_s="$3" pattern="$4"
+  echo "--- $id ---"
+  local offset
+  offset="$(capture_line_count)"
+  debug_inject "$input"
+  local match
+  match="$(capture_since "$offset" "$wait_s" "$pattern")"
+  if [ -n "$match" ]; then
+    echo "PASS: $id"
+    echo "$match"
+    RESULTS+=("PASS|$id|$(echo "$match" | tail -1)")
+  else
+    echo "FAIL: $id"
+    RESULTS+=("FAIL|$id|(no match for: $pattern)")
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
 START_TS=$(date +%s)
 start_capture
 
@@ -180,6 +210,86 @@ run_test "5a_AMBIGUOUS_OPEN" "deschide radio" 3 \
   'UI_STATE_JS.*state=CONFIRMING'
 run_test "5b_CORRECTION_LAUNCH" "Magic FM" 10 \
   'EXEC_TRACE_FOREGROUND_VERIFY.*confirmedByEvent=true'
+
+# 7. Native pipeline (RUNDA TEST-1) — the four device-proven phrases, asserted against
+#    BensonForegroundService.kt's own NATIVE_ROUTE/APP_LAUNCH log lines (tryNativeOpenApp:882/889,
+#    tryNativeYoutubeOpenSearch:~880, tryNativeYoutube:1133/1152).
+debug_inject_enable true
+run_native_test "7a_NATIVE_OPEN_YOUTUBE" "deschide youtube" 5 \
+  'NATIVE_ROUTE.*action=open_app target="youtube"|APP_LAUNCH.*pkg=com.google.android.youtube.*ok=true'
+run_native_test "7b_NATIVE_YOUTUBE_OPEN_AND_SEARCH" "deschide youtube si cauta madonna" 5 \
+  'NATIVE_ROUTE.*action=yt_open_and_search target="madonna"'
+run_native_test "7c_NATIVE_YOUTUBE_SEARCH" "cauta inna pe youtube" 5 \
+  'NATIVE_ROUTE.*action=yt_search target="inna"'
+run_native_test "7d_NATIVE_OPEN_SPOTIFY" "deschide spotify" 5 \
+  'NATIVE_ROUTE.*action=open_app target="spotify"|APP_LAUNCH.*pkg=com.spotify.music.*ok=true'
+# 8. WA-1 parser smoke (RUNDA WA_VISIBLE_DRAFT, 2026-10-03) — fake contact name only, NEVER a real
+#    one: WA_WRITE_SENT_VERIFIED (the actual send) cannot be safely automated here, it would text
+#    a real person on every CI run. This only proves the parser/resolve layer doesn't regress
+#    (device-proven today's exact bug: name corrupted by "mesaj"-as-separator, 14 false candidates
+#    — see CLAUDE.md "Comportamente dovedite 03.10.2026"). The real send stays a manual device test.
+debug_inject_enable true
+run_native_test "8a_WA_MESSAGE_NO_TEXT" "scrie un mesaj lui zzznonexistent pe whatsapp" 5 \
+  'WA_PARSE.*kind=message'
+run_native_test "8b_WA_MESSAGE_MESAJ_AFTER_NAME" "scriei lui zzznonexistent un mesaj in whatsapp" 5 \
+  'WA_RESOLVE.*candidates=0'
+# 8c. FIX_WA_CALL_PREPOSITION_1 (2026-10-03) — "sună la X" (not just "sună pe X") must reach the
+# native WA parser, never fall through to js_handoff. Fake name only, same reasoning as 8a/8b.
+run_native_test "8c_WA_CALL_LA_PREPOSITION" "suna la zzznonexistent pe whatsapp" 5 \
+  'WA_PARSE.*kind=call'
+# 8d. RUNDA S-1 (2026-10-03) — lipsea din harness: "video cu X" trebuia să fie deja testat de la
+# WA-4, nu era. Fake name only, same reasoning as 8a-8c.
+run_native_test "8d_WA_VIDEO_CU" "video cu zzznonexistent" 5 \
+  'WA_PARSE.*kind=video'
+debug_inject_enable false
+
+# 9. WA-3 WA_COMPOSE golden set — REAL brain call (gpt-4o-mini), weak verification per Rareș
+# (2026-10-03): non-empty output; "?" at the end for question-type instructions; output does NOT
+# start with "întreab-"/"dacă"/"spune-i" (the brain must transform the instruction, not echo it);
+# length <= 1.5x the instruction's length. Anything stronger (real semantic grading, "tolerance for
+# minor synonyms") needs an LLM judge, not a shell script — Rareș verifies that part by hand.
+#
+# Opt-in, REQUIRES WA_COMPOSE_CONTACT=<a real WhatsApp contact name on this phone>: every phrase
+# below opens that contact's REAL chat and types an unsent draft (never sent — stops at "Trimit?").
+# Never run unattended; the person running it must recognize the contact being used.
+if [ -n "${WA_COMPOSE_CONTACT:-}" ]; then
+  debug_inject_enable true
+  golden_phrase() { # $1=instruction (with $WA_COMPOSE_CONTACT already substituted), $2=question|statement
+    local instruction="$1" kind="$2"
+    local offset; offset="$(capture_line_count)"
+    debug_inject "$instruction"
+    sleep 7
+    local line; line="$(tail -n "+$((offset + 1))" "$CAPTURE" | grep "WA_COMPOSE" | tail -1)"
+    local out; out="$(echo "$line" | sed -n 's/.*out="\([^"]*\)".*/\1/p')"
+    local in_text; in_text="$(echo "$line" | sed -n 's/.*in="\([^"]*\)".*/\1/p')"
+    local id="9_WA_COMPOSE_GOLDEN_${kind}_$(echo "$instruction" | tr -cd 'a-zA-Z0-9' | head -c 20)"
+    local ok=true
+    [ -z "$out" ] && ok=false
+    if [ "$kind" = "question" ]; then [[ "$out" == *"?" ]] || ok=false; fi
+    local norm_out; norm_out="$(echo "$out" | tr '[:upper:]' '[:lower:]')"
+    case "$norm_out" in intreab*|"daca "*|"spune-i"*) ok=false ;; esac
+    if [ -n "$in_text" ]; then
+      local max_len=$(( ${#in_text} * 3 / 2 ))
+      [ "${#out}" -gt "$max_len" ] && ok=false
+    fi
+    if $ok; then
+      echo "PASS: $id"; echo "in=\"$in_text\" out=\"$out\""
+      RESULTS+=("PASS|$id|out=\"$out\"")
+    else
+      echo "FAIL: $id"; echo "in=\"$in_text\" out=\"$out\""
+      RESULTS+=("FAIL|$id|out=\"$out\""); FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+  }
+  golden_phrase "intreab-o pe $WA_COMPOSE_CONTACT daca vine diseara" "question"
+  golden_phrase "intreaba-l pe $WA_COMPOSE_CONTACT ce face la petrecere" "question"
+  golden_phrase "intreab-o pe $WA_COMPOSE_CONTACT daca a mancat" "question"
+  golden_phrase "spune-i lui $WA_COMPOSE_CONTACT ca ajung in zece minute" "statement"
+  golden_phrase "spune-i lui $WA_COMPOSE_CONTACT ca am plecat de acasa" "statement"
+  golden_phrase "spune-i lui $WA_COMPOSE_CONTACT ca o sun mai tarziu" "statement"
+  debug_inject_enable false
+else
+  echo "SKIPPED: WA_COMPOSE golden set (set WA_COMPOSE_CONTACT=<real contact name> to run; opens that contact's real chat, supervised only)"
+fi
 
 stop_capture
 END_TS=$(date +%s)

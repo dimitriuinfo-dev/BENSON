@@ -21,7 +21,7 @@ function routeWhatsApp(intent: string, params: Record<string, unknown>): Route {
   const message = typeof params.message === 'string' ? params.message.trim() : '';
   const mode = typeof params.mode === 'string' ? params.mode : '';
   if (intent === 'CALL_CONTACT') return 'placeCall';
-  if (intent === 'OPEN_WHATSAPP_CONTACT' && mode === 'voice_call') return 'placeCall';
+  if (intent === 'OPEN_WHATSAPP_CONTACT' && (mode === 'voice_call' || mode === 'video_call')) return 'placeCall';
   if (intent === 'OPEN_WHATSAPP_CONTACT') return 'openContact';
   if (intent === 'MESSAGE_CONTACT') return message ? 'prepareMessage' : 'MESSAGE_BODY_MISSING';
   return `other:${intent}`;
@@ -40,7 +40,7 @@ function run(utterance: string) {
   const contact = typeof p.contactName === 'string' ? p.contactName : '';
   const message = typeof p.message === 'string' ? p.message : '';
   const route = routeWhatsApp(req.intent, p);
-  return { intent: req.intent, contact, message, route };
+  return { intent: req.intent, contact, message, route, mode: p.mode };
 }
 
 const norm = (s: string) =>
@@ -157,6 +157,16 @@ console.log('=== ROUND_WA_GOVERNANCE_ROUTING — parser/routing ===\n');
   check('G3.message empty (echo of contact removed)', norm(r.message) === '', r.message);
   check('G3.route = MESSAGE_BODY_MISSING', r.route === 'MESSAGE_BODY_MISSING', r.route);
 }
+
+// H — video call is distinct, preserves the recipient, and routes through the guarded call action.
+for (const phrase of ['sun-o pe Hannah pe WhatsApp video', 'sună video pe Hannah pe WhatsApp', 'Videoanruf mit Hannah über WhatsApp']) {
+  const r = run(phrase);
+  check(`H video phrase routes to placeCall: ${phrase}`, r.route === 'placeCall', `${r.intent}/${r.route}`);
+  check(`H video phrase retains video mode: ${phrase}`, r.mode === 'video_call', String(r.mode));
+  check(`H video phrase retains contact: ${phrase}`, norm(r.contact) === 'hannah', r.contact);
+}
+const voiceCall = run('sună pe Hannah pe WhatsApp');
+check('H audio call remains voice_call', voiceCall.mode === 'voice_call', String(voiceCall.mode));
 
 console.log(`\n=== ${failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)'} ===`);
 if (failures > 0 && typeof process !== 'undefined') process.exitCode = 1;

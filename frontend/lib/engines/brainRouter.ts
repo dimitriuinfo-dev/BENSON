@@ -194,6 +194,10 @@ export function buildCanonicalCommand(
       const who = p('contact', 'contactName', 'name', 'person');
       return who ? `citește-mi mesajele de la ${who} pe WhatsApp` : 'citește-mi mesajele pe WhatsApp';
     }
+    case 'open_whatsapp_chat': {
+      const who = p('contact', 'contactName', 'name', 'person');
+      return who ? `deschide conversația cu ${who} pe WhatsApp` : '';
+    }
     case 'send_whatsapp_message': {
       const who = p('contact', 'contactName', 'name', 'person');
       const text = p('text', 'message', 'body');

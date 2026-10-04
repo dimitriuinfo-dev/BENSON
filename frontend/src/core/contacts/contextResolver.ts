@@ -5,7 +5,7 @@
 
 import type { PersonReference } from '../../../lib/engines/types';
 import type { TrustedContact } from './contactTypes';
-import { searchContacts, normalizeName } from './contactResolver';
+import { searchContacts, normalizeName, namesPhoneticallyMatch } from './contactResolver';
 import type { VerifiedIdentity } from './verifiedIdentityStore';
 
 export type ResolutionStatus = 'RESOLVED' | 'NEEDS_CONFIRMATION' | 'UNRESOLVED';
@@ -70,35 +70,7 @@ function fromContact(c: TrustedContact, source: ResolvedPerson['resolutionSource
   };
 }
 
-// Small self-contained Levenshtein — contactResolver.ts's own fuzzy helpers are private to that
-// file; duplicated here rather than exported cross-purpose, same "no shared dependency, literal
-// duplicate" idiom already used elsewhere in this codebase (NativeCloudWake vs BensonAudioCapture).
-function levenshtein(a: string, b: string): number {
-  if (a === b) return 0;
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  let prev = Array.from({ length: n + 1 }, (_, i) => i);
-  for (let i = 1; i <= m; i++) {
-    const cur = [i];
-    for (let j = 1; j <= n; j++) {
-      cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    }
-    prev = cur;
-  }
-  return prev[n];
-}
-
-// A phonetic STT variant ("Hana"/"Luhana" for "Hannah") is typically a substring/superstring or a
-// short edit distance away — never an exact match, or normalizeName's own exact check above
-// would already have caught it.
-function phoneticallyClose(a: string, b: string): boolean {
-  if (a.length < 2 || b.length < 2) return false;
-  if (a.includes(b) || b.includes(a)) return true;
-  const maxDist = Math.max(a.length, b.length) >= 5 ? 2 : 1;
-  return levenshtein(a, b) <= maxDist;
-}
-
+// Named-identity matching uses the same shared phonetic comparator as live device contacts below.
 export function resolvePerson(ctx: ResolveContext): ResolutionResult {
   const { personRef, verifiedIdentities, localContacts } = ctx;
 
@@ -146,8 +118,8 @@ export function resolvePerson(ctx: ResolveContext): ResolutionResult {
   // 3b. verified alias — phonetic ("Hana"/"Luhana" -> "Hannah"). Unique match resolves; more than
   // one still-plausible verified identity asks rather than guesses.
   const fuzzyAlias = verifiedIdentities.filter((v) =>
-    phoneticallyClose(normSurface, normalizeName(v.verifiedDisplayName)) ||
-    v.observedAliases.some((a) => phoneticallyClose(normSurface, normalizeName(a))));
+    namesPhoneticallyMatch(normSurface, normalizeName(v.verifiedDisplayName)) ||
+    v.observedAliases.some((a) => namesPhoneticallyMatch(normSurface, normalizeName(a))));
   if (fuzzyAlias.length === 1) return { status: 'RESOLVED', resolved: toResolved(fuzzyAlias[0], 'verified_alias', 0.8, localContacts) };
   if (fuzzyAlias.length > 1) {
     return { status: 'NEEDS_CONFIRMATION', candidates: fuzzyAlias.slice(0, 3).map((v) => ({ verifiedDisplayName: v.verifiedDisplayName, source: 'verified_alias', contactId: v.stableContactId, phoneNumber: v.normalizedPhoneNumber })) };

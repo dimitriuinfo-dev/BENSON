@@ -37,3 +37,9 @@ android {
     abortOnError false
   }
 }
+
+// RUNDA G-1 (2026-10-03) — plain JVM unit tests for the pure "mâna universală" logic
+// (ControlLocator, ButtonSafetyClassifier, UniversalHandCommandMatcher), no device/instrumentation.
+dependencies {
+  testImplementation "junit:junit:4.13.2"
+}

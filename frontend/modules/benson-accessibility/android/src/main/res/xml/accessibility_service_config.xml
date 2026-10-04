@@ -43,13 +43,35 @@
   îl dezactivează, scoate "|flagRetrieveInteractiveWindows" și revino la calea lastForegroundPackage
   (WAFIX1_WINDOW_SCAN = false în BensonCommandExecutor). Revert: scoate flag-ul.
 -->
+<!--
+  ADAOS K-1 (2026-10-03, user-directed): canRequestFilterKeyEvents true. Needed for
+  BensonAccessibilityService.onKeyEvent() to globally intercept KEYCODE_HEADSETHOOK /
+  KEYCODE_MEDIA_PLAY_PAUSE (long-press ≥600ms → wake) regardless of which app currently owns the
+  active MediaSession — a MediaSession-only approach in BensonForegroundService would only receive
+  this key while BENSON's own session is the active one, not while e.g. YouTube is playing.
+  DE VERIFICAT după instalare: accessibility trebuie oprit și repornit manual din Setări pentru ca
+  noua capacitate să fie citită (capacitățile sunt citite la bind, nu la fiecare pornire a
+  aplicației). Revert: readu "false" și scoate onKeyEvent() din service.
+-->
+<!--
+  FIX_C1_TOUCH_SIGNAL_1 (2026-10-04, user-directed): +typeViewClicked|typeViewScrolled|
+  typeViewTextChanged, pentru RUNDA C-1 (semnalul real de atingere a ecranului, înlocuind
+  typeWindowContentChanged care se declanșa și fără nicio atingere). ATENȚIE: ACEASTĂ COMBINAȚIE
+  EXACTĂ (minus typeViewFocused) a fost documentată mai sus ca parte a setului care a provocat
+  criza CPU/termică din 2026-07-09 (75-105% CPU, ~90°C) când era pornită sistem-wide, în orice
+  aplicație. onAccessibilityEvent tratează aceste tipuri ieftin (doar verificare de fereastră de
+  timp, fără parcurgere de arbore), dar VOLUMUL de evenimente (orice click/scroll/text din orice
+  aplicație, tot timpul) rămâne un risc real necunoscut pe acest device până la un test real.
+  DE VERIFICAT OBLIGATORIU la următorul test pe telefon: CPU/temperatura, nu doar funcționalitatea
+  curățeniei. Revert: scoate "|typeViewClicked|typeViewScrolled|typeViewTextChanged".
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewScrolled|typeViewTextChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="false"
-    android:canRequestFilterKeyEvents="false"
+    android:canRequestFilterKeyEvents="true"
     android:canRequestTouchExplorationMode="false"
     android:notificationTimeout="150"
     android:description="@string/benson_accessibility_description" />

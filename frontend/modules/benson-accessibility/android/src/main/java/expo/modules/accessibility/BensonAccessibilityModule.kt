@@ -223,6 +223,21 @@ class BensonAccessibilityModule : Module() {
       }
     }
 
+    AsyncFunction("runWhatsAppTypeCurrentConversation") { message: String, missionId: String, promise: Promise ->
+      val svc = BensonAccessibilityService.instance
+      if (svc == null) {
+        promise.resolve(mapOf("success" to false, "step" to "SERVICE", "error" to "Accessibility Service is not running.", "contact" to "current conversation", "elapsedMs" to 0))
+        return@AsyncFunction
+      }
+      svc.runOnServiceScope {
+        val r = svc.runWhatsAppTypeCurrentConversation(message, missionId)
+        promise.resolve(mapOf(
+          "success" to r.success, "step" to r.step, "error" to r.error, "contact" to r.contact, "elapsedMs" to r.elapsedMs,
+          "verifiedHeaderText" to r.verifiedHeaderText, "nameMatch" to r.nameMatch,
+        ))
+      }
+    }
+
     // ── ROUND_WA2_MESSAGE_READING_1 ─────────────────────────────────────────────────────────────
     // Opens the exact conversation (same deep link as above), verifies identity, reads the last
     // `maxMessages` message bubbles — one native call, never types, never touches Send. Resolves a
@@ -242,14 +257,14 @@ class BensonAccessibilityModule : Module() {
     // PHASE B: called ONLY after an explicit YES. Presses Send at most once for `missionId`, then
     // verifies the exact outgoing message appears in the conversation. Idempotent: a mission already
     // at SEND_ATTEMPTED/SENT_VERIFIED re-verifies, never re-presses.
-    AsyncFunction("pressWhatsAppSendVerified") { missionId: String, message: String, promise: Promise ->
+    AsyncFunction("pressWhatsAppSendVerified") { missionId: String, message: String, expectedChat: String, promise: Promise ->
       val svc = BensonAccessibilityService.instance
       if (svc == null) {
         promise.resolve(mapOf("success" to false, "step" to "SERVICE", "error" to "Accessibility Service is not running.", "contact" to "", "elapsedMs" to 0))
         return@AsyncFunction
       }
       svc.runOnServiceScope {
-        val r = svc.pressWhatsAppSendVerified(missionId, message)
+        val r = svc.pressWhatsAppSendVerified(missionId, message, expectedChat)
         promise.resolve(mapOf("success" to r.success, "step" to r.step, "error" to r.error, "contact" to r.contact, "elapsedMs" to r.elapsedMs))
       }
     }

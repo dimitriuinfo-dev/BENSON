@@ -40,6 +40,10 @@ function pkgTokens(pkg: string): string[] {
   return (pkg || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }
 
+// Generic package suffixes are not app names. In particular, `com.deepseek.chat` must not make
+// any sentence mentioning “chat” look like a DeepSeek request.
+const GENERIC_PACKAGE_TOKENS = new Set(['android', 'app', 'chat', 'client', 'launcher', 'mobile', 'service']);
+
 // ── E2-fix / Fix 2 (2026-09-07, product-owner-directed): potrivire fonetică ────────────────────
 // Un singur slip de vocală din STT ("Flexparkon" vs "FlexParken") pica la scor 0 cu regulile
 // exacte/substring/startsWith de mai jos — nicio toleranță la greșeli. Adaug două semnale ieftine
@@ -125,7 +129,9 @@ function scoreApp(qTokens: string[], qJoined: string, app: IndexedApp): number {
   const nTok = nameTokens(app.appName);
   const nJoined = nTok.join('');
   const pTok = pkgTokens(app.packageName);
-  const pLast = pTok[pTok.length - 1] ?? '';
+  const rawPLast = pTok[pTok.length - 1] ?? '';
+  const pLast = GENERIC_PACKAGE_TOKENS.has(rawPLast) ? '' : rawPLast;
+  const searchablePkgTokens = pTok.filter((token) => !GENERIC_PACKAGE_TOKENS.has(token));
 
   if (nJoined && nJoined === qJoined) return 100; // "you tube" -> "YouTube"
   if (nTok.length === qTokens.length && nTok.every((t, i) => t === qTokens[i])) return 98;
@@ -137,7 +143,7 @@ function scoreApp(qTokens: string[], qJoined: string, app: IndexedApp): number {
   if (qTokens.every((t) => nSet.has(t))) score = Math.max(score, 72 + qTokens.length); // all query words are whole name words
   if (nJoined && qJoined && (nJoined.includes(qJoined) || qJoined.includes(nJoined))) score = Math.max(score, 58);
   if (pLast && qJoined && (pLast.includes(qJoined) || qJoined.includes(pLast)) && qJoined.length >= 3) score = Math.max(score, 55);
-  if (pTok.some((t) => t.length >= 3 && qTokens.includes(t))) score = Math.max(score, 44);
+  if (searchablePkgTokens.some((t) => t.length >= 3 && qTokens.includes(t))) score = Math.max(score, 44);
   const partial = qTokens.filter((qt) => nTok.some((nt) => nt.includes(qt) || qt.includes(nt))).length;
   if (partial) score = Math.max(score, 18 + partial * 6);
 
@@ -178,6 +184,11 @@ export function matchApps(query: string, apps: IndexedApp[]): AppMatch {
 
   const top = ranked[0];
   const second = ranked[1];
+  // A generic word shared with a package name (e.g. “chat” in com.deepseek.chat) is not
+  // sufficient evidence to launch an app. The old single-shortlist fallback turned
+  // “open the what's up chat with Baby” into a unique DeepSeek match (score 44), which launched
+  // the wrong app. Real fuzzy/phonetic app-name hits score >=50; weaker text asks/fails closed.
+  if (top.s < 50) return { kind: 'none' };
   if (top.s >= 90 && (!second || top.s - second.s >= 6)) return { kind: 'exact', app: top.app };
   if (top.s >= 50 && (!second || top.s - second.s >= 14)) return { kind: 'single', app: top.app };
 

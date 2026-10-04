@@ -77,6 +77,10 @@ import { executeCommand, getScreenSnapshot } from 'benson-accessibility';
 import {
   searchMedia, selectMediaCandidate, findProviderByMention, type MediaProvider, type MediaCandidate,
 } from '../../executors/mediaSearchExecutor';
+import { searchForegroundApp } from '../../executors/foregroundSearchExecutor';
+import { extractForegroundSearchQuery, isBareForegroundSearchRequest } from '../../executors/foregroundSearchQuery';
+import { extractGenericScrollDirection } from '../../executors/genericScrollIntent';
+import { extractVisibleMediaControlIntent } from '../../executors/genericVisibleMediaControl';
 // CALC1 (2026-09-22) — deterministic Calculator recognition, same shape/placement as
 // extractYouTubeQuery/extractGenericMediaSearch above: checked before extractGoals/planMission
 // so a calculator-shaped utterance never collapses into a generic OPEN_APP or falls through to
@@ -275,6 +279,7 @@ function toGovernedCall(task: MissionTask): GovernedCall | null {
 
   if (task.type === 'PREPARE_MESSAGE') {
     const contactName = typeof task.input.contactName === 'string' ? task.input.contactName : '';
+    const currentChat = task.input.currentChat === true;
     const message = typeof task.input.message === 'string' ? task.input.message.trim() : '';
     const sourceIntent = typeof task.input.intent === 'string' ? task.input.intent : '';
     const rawText = typeof task.input.rawText === 'string' ? task.input.rawText : '';
@@ -289,7 +294,7 @@ function toGovernedCall(task: MissionTask): GovernedCall | null {
       return {
         tool: 'whatsapp', action: 'prepareMessage',
         params: {
-          contactName, message, waWriteTyped: true,
+          contactName, message, currentChat, waWriteTyped: true,
           waWriteMissionId: task.input.waWriteMissionId,
           waWriteMessage: typeof task.input.waWriteMessage === 'string' ? task.input.waWriteMessage : message,
           waWriteContact: typeof task.input.waWriteContact === 'string' ? task.input.waWriteContact : contactName,
@@ -315,7 +320,7 @@ function toGovernedCall(task: MissionTask): GovernedCall | null {
     logAudioDiag('WA_MSG_INTENT_PARSED', `contact=${JSON.stringify(contactName)} message=${JSON.stringify(message)}`);
     logAudioDiag('WA_MSG_ROUTE_SELECTED', `route=${message ? 'DIRECT_WRITE' : 'MESSAGE_BODY_MISSING'}`);
     logAudioDiag('WA_PAYLOAD_ACTION', `contact=${JSON.stringify(contactName)} message=${JSON.stringify(message)}`);
-    return { tool: 'whatsapp', action: 'prepareMessage', params: { contactName, message } };
+    return { tool: 'whatsapp', action: 'prepareMessage', params: { contactName, message, currentChat } };
   }
 
   return null;
@@ -412,6 +417,7 @@ async function runGovernedTask(
     if (governed.tool === 'whatsapp' && governed.action === 'prepareMessage' && outcome.mission.reason === 'MESSAGE_BODY_MISSING') {
       task.input.waAwaitingMessageBody = true;
       task.input.waWriteContact = governed.params.contactName;
+      task.input.currentChat = governed.params.currentChat === true;
       task.status = 'WAITING';
       plan.status = 'WAITING_FOR_CONFIRMATION';
       emitEvent('ConfirmationRequested', { task: task.type }, plan.id, task.id);
@@ -739,6 +745,9 @@ let pendingDisambiguation: { candidates: DisambiguationCandidate[]; kind: 'app' 
 let pendingDisambiguationSetAt = 0;
 const PENDING_DISAMBIGUATION_TIMEOUT_MS = 60000;
 
+let pendingForegroundSearch: { packageName: string; setAt: number } | null = null;
+const PENDING_FOREGROUND_SEARCH_TIMEOUT_MS = 60000;
+
 function stripDiac(s: string): string {
   return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 }
@@ -901,6 +910,38 @@ function classifyApasaAction(word: string): MediaAction | null {
 // Returns null (not this utterance) if no visible-action phrase is present, same convention as
 // tryHandleActiveMediaCommand.
 async function tryHandleGenericVisibleAction(rawText: string): Promise<MissionRunResult | null> {
+  const visibleIntent = extractVisibleMediaControlIntent(rawText);
+  if (visibleIntent) {
+    const pkg = getForegroundPackage() ?? undefined;
+    if (!pkg || pkg === 'com.benson.butler' || pkg === 'com.google.android.inputmethod.latin') {
+      logAudioDiag('GENERIC_VISIBLE_ACTION', `action=${visibleIntent.action} status=no_target_app`);
+      return { handled: true, message: 'Nu pot identifica aplicația de redare activă pe ecran.' };
+    }
+    logAudioDiag('GENERIC_VISIBLE_ACTION', `action=${visibleIntent.action} package=${JSON.stringify(pkg)} labels=${JSON.stringify(visibleIntent.labels)}`);
+    for (const label of visibleIntent.labels) {
+      const outcome = await clickVisibleLabel(label, pkg);
+      if (outcome.status === 'ambiguous') {
+        return { handled: true, message: `Am găsit mai multe controale „${label}” pe ecran. Spune-mi pe care.` };
+      }
+      if (outcome.status === 'success' || outcome.status === 'no_change') {
+        const playing = visibleIntent.action === 'play' && await verifyPlaying(pkg, 2500);
+        logAudioDiag('GENERIC_VISIBLE_ACTION_VERIFY', `action=${visibleIntent.action} package=${JSON.stringify(pkg)} observed=${outcome.status} playing=${playing}`);
+        if (playing) return { handled: true, message: 'Redarea a pornit.' };
+        return { handled: true, message: 'Am apăsat controlul vizibil, dar nu pot confirma că redarea a pornit.' };
+      }
+      if (outcome.status === 'click_failed') {
+        return { handled: true, message: `Am găsit „${label}”, dar aplicația nu a acceptat apăsarea.` };
+      }
+    }
+    const accepted = await mediaAct(visibleIntent.action, pkg);
+    const playing = accepted && visibleIntent.action === 'play' && await verifyPlaying(pkg, 2500);
+    logAudioDiag('GENERIC_VISIBLE_ACTION_VERIFY', `action=${visibleIntent.action} package=${JSON.stringify(pkg)} mechanism=media_session accepted=${accepted} playing=${playing}`);
+    return {
+      handled: true,
+      message: playing ? 'Redarea a pornit.' : accepted ? 'Comanda a fost acceptată, dar nu pot confirma redarea.' : 'Nu am găsit un control de redare funcțional în aplicația afișată.',
+    };
+  }
+
   const t = cleanDiscourse(normalizeTranscript(rawText));
   const m = APASA_ACTION_PATTERN.exec(t);
   if (!m) return null;
@@ -982,17 +1023,26 @@ function findVisibleCandidates(nodes: SnapshotNode[], normLabel: string): { matc
   return null;
 }
 
-async function clickVisibleLabel(label: string): Promise<VisibleClickOutcome> {
-  const normLabel = normalizeForMatch(label);
+async function clickVisibleLabel(label: string, expectedPackage?: string): Promise<VisibleClickOutcome> {
+  if (expectedPackage && getForegroundPackage() !== expectedPackage) return { status: 'click_failed', label };
+  const cleanLabel = label.replace(/^(?:butonul|buton|tasta|litera|cifra|numarul|numar|culoarea|sageata)\s+/i, '').replace(/^(?:din|spre|la|pe)\s+/i, '').trim();
+  const normLabel = normalizeForMatch(cleanLabel);
   const before = await readSnapshotNodes();
   // Resolve spoken key names only to labels present in this fresh Accessibility tree.
   const aliases: Record<string, string[]> = {
     zero: ['0'], unu: ['1'], una: ['1'], doi: ['2'], doua: ['2'], trei: ['3'], patru: ['4'],
     cinci: ['5'], sase: ['6'], sapte: ['7'], opt: ['8'], noua: ['9'],
+    stanga: ['left', 'left arrow', 'arrow left', 'sageata spre stanga'],
+    dreapta: ['right', 'right arrow', 'arrow right', 'sageata spre dreapta'],
+    sus: ['up', 'up arrow', 'arrow up', 'sageata in sus'],
+    jos: ['down', 'down arrow', 'arrow down', 'sageata in jos'],
+    verde: ['green', 'grun'], rosu: ['red', 'rot'], galben: ['yellow', 'gelb'],
+    albastru: ['blue', 'blau'], negru: ['black', 'schwarz'], alb: ['white', 'weiss'],
+    a: ['letter a'], b: ['letter b'], c: ['letter c'],
     plus: ['+'], minus: ['−', '-'], ori: ['×', '*'], inmultire: ['×', '*'],
     impartire: ['÷', '/'], egal: ['='],
   };
-  const labelsToTry = [label, ...(aliases[normLabel] ?? [])];
+  const labelsToTry = [label, cleanLabel, ...(aliases[normLabel] ?? [])];
   let found: ReturnType<typeof findVisibleCandidates> = null;
   let matchedLabel = label;
   for (const candidate of labelsToTry) {
@@ -1024,7 +1074,7 @@ async function clickVisibleLabel(label: string): Promise<VisibleClickOutcome> {
       ? { viewId: node.viewId, clickableAncestor: true }
       : { textContainsAny: [matchedLabel], clickableAncestor: true };
     const r = (await executeCommand({
-      steps: [{ action: 'click', match, timeoutMs: 3000 }],
+      steps: [{ action: 'click', match, timeoutMs: 3000, ...(expectedPackage ? { requirePackage: expectedPackage } : {}) }],
     } as any)) as { success?: boolean };
     clickOk = r?.success === true;
   } catch {
@@ -1034,6 +1084,7 @@ async function clickVisibleLabel(label: string): Promise<VisibleClickOutcome> {
   if (!clickOk) return { status: 'click_failed', label };
 
   await nativeDelay(600);
+  if (expectedPackage && getForegroundPackage() !== expectedPackage) return { status: 'click_failed', label };
   const after = await readSnapshotNodes();
   const afterSignature = snapshotSignature(after);
   const changed = afterSignature !== beforeSignature;
@@ -1202,6 +1253,33 @@ export function clearPendingDisambiguation(): void {
 const END_CALL_PATTERN = /\b(închide|inchide|termină|termina|opre[șs]te)\s+apelul\b|\bhang\s*up\b|\bend\s+(?:the\s+)?call\b/i;
 const MUTE_CALL_PATTERN = /\b(pune|fă|fa|activeaz[ăa])\s+(?:pe\s+)?mute\b|\bmute\b|\bdezactiveaz[ăa]\s+microfonul\b/i;
 
+async function tryHandleGenericScroll(rawText: string): Promise<MissionRunResult | null> {
+  const direction = extractGenericScrollDirection(cleanDiscourse(normalizeTranscript(rawText)));
+  if (!direction) return null;
+  const expectedPackage = getForegroundPackage();
+  if (!expectedPackage || expectedPackage === 'com.benson.butler') return null;
+  let before: { packageName?: string; nodes?: SnapshotNode[] } | null = null;
+  try { before = JSON.parse(await getScreenSnapshot()); } catch {}
+  if (!before || before.packageName !== expectedPackage || !Array.isArray(before.nodes)) {
+    logAudioDiag('GENERIC_SCROLL_FAIL', `package=${expectedPackage} phase=observe_before`);
+    return { handled: true, message: 'Nu pot vedea ecranul aplicației ca să derulez în siguranță.' };
+  }
+  const result = await executeCommand({ steps: [{ action: 'scroll', direction, requirePackage: expectedPackage }] } as any);
+  if (!result?.success) {
+    logAudioDiag('GENERIC_SCROLL_FAIL', `package=${expectedPackage} direction=${direction} status=${result?.status ?? 'failed'}`);
+    return { handled: true, message: 'Nu găsesc conținut derulabil pe ecranul curent.' };
+  }
+  await nativeDelay(400);
+  let after: { packageName?: string; nodes?: SnapshotNode[] } | null = null;
+  try { after = JSON.parse(await getScreenSnapshot()); } catch {}
+  const changed = after?.packageName === expectedPackage && Array.isArray(after.nodes) &&
+    snapshotSignature(before.nodes) !== snapshotSignature(after.nodes);
+  if (pendingYouTubeSelection) pendingYouTubeSelectionSetAt = Date.now();
+  if (pendingMediaSelection) pendingMediaSelectionSetAt = Date.now();
+  logAudioDiag('GENERIC_SCROLL_RESULT', `package=${expectedPackage} direction=${direction} changed=${changed}`);
+  return { handled: true, message: changed ? 'Am derulat. Uită-te la ce a apărut mai jos.' : 'Am derulat, dar lista pare să fi ajuns la capăt.' };
+}
+
 export async function runMission(rawText: string, options: RunMissionOptions = {}): Promise<MissionRunResult> {
   logAudioDiag('EXEC_TRACE_INPUT', `chars=${rawText.length}`);
   const normalizedText = normalizeTranscript(rawText);
@@ -1212,6 +1290,38 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
   if (waDialogue?.kind === 'read') {
     logAudioDiag('WA_READ_DIALOGUE', `awaitingChoice=${!!waDialogue.awaitingChoice}`);
     return { handled: true, message: waDialogue.message, awaitingReadChoice: waDialogue.awaitingChoice, armedTurnId: options.turnId };
+  }
+
+  // Explicit page scrolling outranks pending media selection so the user can inspect more results
+  // before choosing; the pending choice is retained and its timeout refreshed after verified scroll.
+  const scrollResult = await tryHandleGenericScroll(rawText);
+  if (scrollResult) return scrollResult;
+
+  if (pendingForegroundSearch) {
+    const pending = pendingForegroundSearch;
+    if (Date.now() - pending.setAt >= PENDING_FOREGROUND_SEARCH_TIMEOUT_MS) {
+      pendingForegroundSearch = null;
+    } else {
+      const answer = cleanDiscourse(normalizedText).trim();
+      if (/^(?:nu|anuleaz[aă]|renun[tț]|cancel|stop)$/i.test(answer)) {
+        pendingForegroundSearch = null;
+        logAudioDiag('FOREGROUND_SEARCH_CANCEL', `package=${pending.packageName}`);
+        return { handled: true, message: 'Am anulat căutarea.' };
+      }
+      const looksLikeAnotherAction = /^(?:deschide|open|apas[aă]|click|deruleaz|scroll|mai jos|mai sus|trimite|scrie|sun[aă]|apeleaz|cite[șs]te|r[aă]spunde|înapoi|inapoi|play|pauz|opre[șs]te|stop|mute|calculeaz)/i.test(answer);
+      if (!looksLikeAnotherAction && !isBareForegroundSearchRequest(answer) && answer.length > 0) {
+        pendingForegroundSearch = null;
+        logAudioDiag('FOREGROUND_SEARCH_CONTINUE', `package=${pending.packageName} queryChars=${answer.length}`);
+        const query = extractForegroundSearchQuery(answer) ?? answer;
+        const outcome = await searchForegroundApp(query, pending.packageName);
+        return { handled: true, message: outcome.message ?? 'Nu am putut căuta în aplicația deschisă.' };
+      }
+      if (isBareForegroundSearchRequest(answer)) {
+        pending.setAt = Date.now();
+        return { handled: true, message: 'Ce vrei să caut în aplicația deschisă?' };
+      }
+      pendingForegroundSearch = null;
+    }
   }
 
   // ROUND_YOUTUBE_GOVERNANCE_2 — a pending "which video?" proposal takes priority over everything
@@ -1399,6 +1509,28 @@ export async function runMission(rawText: string, options: RunMissionOptions = {
     };
   }
 
+  // A bare explicit search continues inside the app already on screen (for example, after
+  // "deschide Google" followed by "caută vremea mâine"). App/provider-specific search handlers
+  // above retain priority. The shared executor resolves only controls observed in that app's
+  // current Accessibility tree and verifies the exact query before submitting it.
+  const foregroundQuery = extractForegroundSearchQuery(cleanedForRepairCheck) || extractForegroundSearchQuery(normalizedText);
+  if (isBareForegroundSearchRequest(cleanedForRepairCheck) || isBareForegroundSearchRequest(normalizedText)) {
+    const foregroundPackage = getForegroundPackage();
+    if (foregroundPackage && foregroundPackage !== 'com.benson.butler' && foregroundPackage !== 'com.google.android.inputmethod.latin') {
+      pendingForegroundSearch = { packageName: foregroundPackage, setAt: Date.now() };
+      logAudioDiag('FOREGROUND_SEARCH_WAIT_QUERY', `package=${foregroundPackage}`);
+      return { handled: true, message: 'Ce vrei să caut în aplicația deschisă?' };
+    }
+    return { handled: true, message: 'Deschide aplicația în care vrei să caut, apoi spune-mi ce să caut.' };
+  }
+  if (foregroundQuery) {
+    const foregroundPackage = getForegroundPackage();
+    const outcome = await searchForegroundApp(foregroundQuery, foregroundPackage);
+    if (outcome.status !== 'no_foreground_app') {
+      return { handled: true, message: outcome.message ?? 'Nu am putut căuta în aplicația deschisă.' };
+    }
+  }
+
   // CALC1 — Task 4 routing: a calculator-shaped utterance must be recognized as `decision=command`
   // here, never sent to general conversation. looksLikeCalculatorRequest is deliberately broader
   // than what's actually executable (catches "sinus" etc. too), so an unsupported operation still
@@ -1494,6 +1626,7 @@ export async function resumePendingTask(
   // same message_body; only the recipient slot changes, and Phase A must re-run for the new
   // contact (the old contact's typed/verified text is now void — never send to the wrong person).
   injectedContactCorrection?: string,
+  injectedEditedDraft?: string,
 ): Promise<MissionRunResult> {
   const { plan, taskIndex } = pending;
   const task = plan.tasks[taskIndex];
@@ -1516,6 +1649,17 @@ export async function resumePendingTask(
     delete task.input.waWriteMessage;
     logAudioDiag('WA_CONTACT_CORRECTION', `missionId=${plan.id} newContact=${JSON.stringify(injectedContactCorrection)} message=${JSON.stringify(task.input.message ?? '')} state=RESUMING`);
   }
+  const isDraftEdit = injectedEditedDraft !== undefined && task?.type === 'PREPARE_MESSAGE'
+    && typeof task.input.waWriteMissionId === 'string' && !!task.input.waWriteMissionId;
+  if (isDraftEdit) {
+    task.input.message = injectedEditedDraft;
+    task.input.waWriteMessage = injectedEditedDraft;
+    // Phase A must type and verify the corrected body again. The native writer refuses a second
+    // send for the old key; a fresh request key is stamped after the new field text is verified.
+    delete task.input.waWriteMissionId;
+    delete task.input.waWriteTyped;
+    logAudioDiag('WA_DRAFT_EDIT_CONTEXT', `missionId=${plan.id} contact=${JSON.stringify(task.input.waWriteContact ?? '')} len=${injectedEditedDraft.length} state=RETYPING`);
+  }
   const rawText = plan.goals[0]?.rawText ?? '';
   // E1-5 — the user just said "da"; the ACK ("O sun.") now fires before the WhatsApp/Waze side
   // effect, in parallel with it.
@@ -1528,5 +1672,5 @@ export async function resumePendingTask(
   // (open chat, verify header, type, verify-typed) now that the message text is known, then asks
   // "Îl trimit?" itself — the existing, proven Phase A/B flow, unchanged. A contact correction
   // needs the exact same treatment: Phase A must run fresh for the new contact.
-  return runPlanFrom(plan, taskIndex, rawText, contacts, !isMessageBodyInjection && !isContactCorrection, onAck);
+  return runPlanFrom(plan, taskIndex, rawText, contacts, !isMessageBodyInjection && !isContactCorrection && !isDraftEdit, onAck);
 }

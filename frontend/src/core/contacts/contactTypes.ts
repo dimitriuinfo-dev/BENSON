@@ -23,7 +23,7 @@ export interface ContactResolveRequest {
   contacts: TrustedContact[];
 }
 
-export type ContactResolveStatus = 'resolved' | 'not_found' | 'ambiguous' | 'missing_phone';
+export type ContactResolveStatus = 'resolved' | 'not_found' | 'ambiguous' | 'missing_phone' | 'missing_email';
 
 export interface ContactResolveResult {
   status: ContactResolveStatus;

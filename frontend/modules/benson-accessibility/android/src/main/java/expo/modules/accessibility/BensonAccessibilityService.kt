@@ -8,6 +8,9 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
+import android.os.Handler
+import android.os.Looper
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -44,6 +47,54 @@ class BensonAccessibilityService : AccessibilityService() {
     // placeWhatsAppCall() below runs on this scope, driven by native delay()/rootInActiveWindow
     // polling, never a JS setTimeout.
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    // ADAOS K-1 (2026-10-03) — see onKeyEvent() below and the onHeadsetButton callback above.
+    private val headsetHandler by lazy { Handler(Looper.getMainLooper()) }
+    private var headsetLongFired = false
+    private val headsetLongPressRunnable = Runnable {
+        headsetLongFired = true
+        onHeadsetButton?.invoke(true)
+    }
+
+    // Swallows ONLY KEYCODE_HEADSETHOOK/KEYCODE_MEDIA_PLAY_PAUSE (both DOWN and UP, so the normal
+    // play/pause for a short press never reaches the originally-playing app's own session — the
+    // caller must replicate that itself via onHeadsetButton(false), since once consumed here the
+    // raw event cannot be un-consumed later if the press turns out to be short). Every other key
+    // (volume included) returns false immediately, untouched, per explicit instruction.
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        // ADAOS K-1 (2026-10-03, user-directed) — HW_TRIGGER, default false: "fără teste K-1
+        // acum, las-o așa". Whole feature is a no-op until this flag is flipped on; zero behavior
+        // change from before this round while false. Revert: delete this block too.
+        if (!getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE).getBoolean("hw_trigger_enabled", false)) {
+            return false
+        }
+        if (event.keyCode != KeyEvent.KEYCODE_HEADSETHOOK && event.keyCode != KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
+            return false
+        }
+        // ADAOS K-1 diagnostic (2026-10-03) — raw-event visibility while bringing up a new
+        // headset: proves the key even reaches Android (some true-wireless earbuds use a private
+        // HID/app profile instead of standard AVRCP and never send this at all). Revert: delete.
+        val actionName = when (event.action) {
+            KeyEvent.ACTION_DOWN -> "down"; KeyEvent.ACTION_UP -> "up"; else -> "other"
+        }
+        Log.i("BENSON_AUDIO", "HEADSET_KEY code=${event.keyCode} action=$actionName repeat=${event.repeatCount}")
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    headsetLongFired = false
+                    headsetHandler.removeCallbacks(headsetLongPressRunnable)
+                    headsetHandler.postDelayed(headsetLongPressRunnable, HEADSET_LONG_PRESS_MS)
+                }
+                return true
+            }
+            KeyEvent.ACTION_UP -> {
+                headsetHandler.removeCallbacks(headsetLongPressRunnable)
+                if (!headsetLongFired) onHeadsetButton?.invoke(false)
+                return true
+            }
+            else -> return true
+        }
+    }
 
     // Generic, asset-backed executor. App-specific flows belong in declarative profiles; this
     // service remains the native runtime that survives JS throttling in the background.
@@ -145,6 +196,14 @@ class BensonAccessibilityService : AccessibilityService() {
 
         /** Setat de BensonAccessibilityModule.OnCreate, curățat la OnDestroy. */
         var onScreenUpdate: ((String) -> Unit)? = null
+
+        // ADAOS K-1 (2026-10-03, user-directed) — same cross-module idiom as onScreenUpdate above.
+        // BensonForegroundService.onCreate sets this (it already depends on benson-accessibility);
+        // this module never depends the other way, so a direct call isn't possible. Argument:
+        // true = long press (≥600ms, held past HEADSET_LONG_PRESS_MS) → wake; false = short press
+        // → normal play/pause toggle. Cleared on onDestroy.
+        var onHeadsetButton: ((longPress: Boolean) -> Unit)? = null
+        private const val HEADSET_LONG_PRESS_MS = 600L
 
         // Fired synchronously on every TYPE_WINDOW_STATE_CHANGED event — works regardless of
         // canRetrieveWindowContent (unlike emitScreenSnapshot/rootInActiveWindow-based reads,
@@ -563,6 +622,26 @@ class BensonAccessibilityService : AccessibilityService() {
                     }
                 }
             }
+            // FIX_C1_TOUCH_SIGNAL_1 (2026-10-04) — real touch signal for the RUNDA C-1 cleanup
+            // window, replacing TYPE_WINDOW_CONTENT_CHANGED (fired even without any touch — the
+            // end-of-call screen updating itself, a message arriving). TouchInteractionClassifier
+            // (pure) excludes events within 1s of BENSON's own last action (lastSelfActionAt, set by
+            // clickNodeOrAncestor/setTextOn/performGlobalNav) so BENSON's own send-button tap, say,
+            // never reads back as "Rareș touched the screen".
+            AccessibilityEvent.TYPE_VIEW_CLICKED, AccessibilityEvent.TYPE_VIEW_SCROLLED, AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                if (cleanupWatchDeadline > 0 && System.currentTimeMillis() < cleanupWatchDeadline &&
+                    event.packageName?.toString() == WA_PKG
+                ) {
+                    val kind = when (event.eventType) {
+                        AccessibilityEvent.TYPE_VIEW_CLICKED -> "click"
+                        AccessibilityEvent.TYPE_VIEW_SCROLLED -> "scroll"
+                        else -> "text_changed"
+                    }
+                    if (TouchInteractionClassifier.isUserInteraction(kind, System.currentTimeMillis(), lastSelfActionAt)) {
+                        cleanupInteracted = true
+                    }
+                }
+            }
             else -> { /* ignorat — reduce zgomotul */ }
         }
     }
@@ -576,6 +655,7 @@ class BensonAccessibilityService : AccessibilityService() {
         Log.i("BENSON_AUDIO", "WA_SERVICE_LIFECYCLE event=destroyed epoch=$connectionEpoch")
         acc1Receiver?.let { try { unregisterReceiver(it) } catch (_: Exception) {} }
         acc1Receiver = null
+        headsetHandler.removeCallbacks(headsetLongPressRunnable) // ADAOS K-1
         serviceScope.cancel()
         instance = null
         connectionEpoch++
@@ -616,7 +696,8 @@ class BensonAccessibilityService : AccessibilityService() {
 
         val text = node.text?.toString().orEmpty()
         val desc = node.contentDescription?.toString().orEmpty()
-        val hasContent = text.isNotBlank() || desc.isNotBlank() || node.isEditable
+        val hint = node.hintText?.toString().orEmpty()
+        val hasContent = text.isNotBlank() || desc.isNotBlank() || hint.isNotBlank() || node.isEditable
 
         if (hasContent) {
             val bounds = Rect()
@@ -627,6 +708,7 @@ class BensonAccessibilityService : AccessibilityService() {
                 put("viewId", node.viewIdResourceName ?: JSONObject.NULL)
                 put("text", text)
                 put("contentDescription", desc)
+                put("hintText", hint)
                 put("className", node.className?.toString() ?: "")
                 put("clickable", node.isClickable)
                 put("editable", node.isEditable)
@@ -1205,18 +1287,81 @@ class BensonAccessibilityService : AccessibilityService() {
             Log.i("BENSON_AUDIO", "WA_CALL_END_SIGNAL state=published")
             Log.i("BENSON_AUDIO", "WA_WAKE_RESTORE_REQUEST reason=call_ended")
         }
-        // Outside the lock — network/UI. Auto-return is best-effort and independent of wake restore
-        // (which the JS self-heal does off the published signal, foreground or not).
-        val sent = try { returnToBensonForeground("call_ended") } catch (_: Exception) { false }
+        // RUNDA C-1 (2026-10-04, user-directed) — REPLACES the old unconditional
+        // returnToBensonForeground("call_ended") (which always brought BENSON's own Activity
+        // forward after any call). The user's explicit new spec: restore whatever app was in front
+        // BEFORE the call, or go Home if that was the launcher/unknown/BENSON itself — never just
+        // pop BENSON's own screen up. Independent of wake restore either way, per the original
+        // comment this replaces. Revert: restore the three lines above (sent/serviceScope.launch
+        // verification loop) and drop the scheduleCallCleanup call below.
+        scheduleCallCleanup("call_end")
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // RUNDA C-1 (2026-10-04, user-directed) — "curățenie după apel". captureCleanupPrevPackage() is
+    // called at the top of every WA action (call/video/message) BEFORE launchWhatsApp() changes the
+    // foreground, so cleanupPrevPackage holds "where Rareș was" when the action started.
+    // cleanupWatchDeadline/cleanupInteracted are a proxy for "did he touch the screen" — see the
+    // TYPE_WINDOW_CONTENT_CHANGED branch in onAccessibilityEvent below. TYPE_TOUCH_INTERACTION_START
+    // (what the spec literally asked for) is NOT delivered without touch-exploration mode, which
+    // would turn the whole phone into a screen-reader — deliberately not enabled. This proxy catches
+    // scrolling/tapping inside the WhatsApp chat but not a touch-free glance at the screen.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    @Volatile private var cleanupPrevPackage: String? = null
+    @Volatile private var cleanupWatchDeadline = 0L
+    @Volatile private var cleanupInteracted = false
+
+    private fun captureCleanupPrevPackage() {
+        cleanupPrevPackage = lastForegroundPackage
+    }
+
+    private fun scheduleCallCleanup(trigger: String) {
+        val prevPkg = cleanupPrevPackage
+        cleanupInteracted = false
+        cleanupWatchDeadline = System.currentTimeMillis() + 2000
         serviceScope.launch {
-            var fgVerified = false
-            val deadline = System.currentTimeMillis() + 4000
-            while (System.currentTimeMillis() < deadline) {
-                if (lastForegroundPackage == packageName) { fgVerified = true; break }
-                delay(300)
+            delay(2000)
+            cleanupWatchDeadline = 0L
+            val stillFg = try { foregroundIsPackage(WA_PKG).first } catch (_: Exception) { false }
+            val launcher = try {
+                val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                packageManager.resolveActivity(homeIntent, 0)?.activityInfo?.packageName
+            } catch (_: Exception) { null }
+            val action = CallCleanupDecision.decide(stillFg, cleanupInteracted, prevPkg, launcher, packageName)
+            val reason = when { cleanupInteracted -> "touched"; !stillFg -> "left_foreground"; else -> "idle" }
+            Log.i("BENSON_AUDIO", "CLEANUP trigger=$trigger prev=${prevPkg ?: "none"} action=${action.name.lowercase()} reason=$reason")
+            when (action) {
+                CallCleanupDecision.Action.RESTORE -> {
+                    val ok = try {
+                        val intent = packageManager.getLaunchIntentForPackage(prevPkg!!)
+                        if (intent != null) {
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                            startActivity(intent); true
+                        } else false
+                    } catch (_: Exception) { false }
+                    if (!ok) try { performGlobalAction(GLOBAL_ACTION_HOME) } catch (_: Exception) {}
+                }
+                CallCleanupDecision.Action.HOME -> try { performGlobalAction(GLOBAL_ACTION_HOME) } catch (_: Exception) {}
+                CallCleanupDecision.Action.SKIP -> {}
             }
-            Log.i("BENSON_AUDIO", "WA_CALL_RETURN_FOREGROUND_VERIFIED verified=$fgVerified sent=$sent fg=${lastForegroundPackage ?: "?"}")
         }
+    }
+
+    // FIX_G1_STALE_FOREGROUND_1 (2026-10-04, device-proven) — lastForegroundPackage (updated only
+    // on TYPE_WINDOW_STATE_CHANGED) was stale/wrong for "caută X" right after "deschide youtube":
+    // tryUniversalHand's foreground check used it and incorrectly declined, falling through to
+    // Google search instead of searching inside YouTube — confirmed in log while the SAME-moment
+    // "mai jos"/"apasă pe play" (which read rootInActiveWindow directly) correctly saw YouTube.
+    // Live read, no caching, for exactly this kind of just-switched-foreground decision.
+    fun currentForegroundPackageLive(): String? = try { rootInActiveWindow?.packageName?.toString() } catch (_: Exception) { null }
+
+    // RUNDA C-1 (2026-10-04, user-directed) — "închide"/"ieși"/"acasă" → Home, "înapoi" → Back,
+    // oricând, clasa LIBER (fără confirmare). Fără coordonate — doar acțiuni globale.
+    fun performGlobalNav(action: String): Boolean {
+        lastSelfActionAt = System.currentTimeMillis()
+        return try {
+            performGlobalAction(if (action == "back") GLOBAL_ACTION_BACK else GLOBAL_ACTION_HOME)
+        } catch (_: Exception) { false }
     }
 
     // Called from onServiceConnected: a fresh AccessibilityService instance reads the persisted
@@ -1722,7 +1867,238 @@ class BensonAccessibilityService : AccessibilityService() {
         return false
     }
 
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // RUNDA MUSIC-2 (2026-10-04, user-directed) — STRATUL ECRAN, generic, fără ancore per-
+    // aplicație: înlocuiește adaptorul Spotify-specific din RUNDA MUSIC-1 (eșuat pe dispozitiv —
+    // butonul "Mehr Optionen" a fost confundat cu rezultatul), per cererea explicită "soluția
+    // generică, nativă, nu pe aplicații". Căutarea folosește findControl (G-1, sinonime RO/DE/EN
+    // deja construite); selecția folosește findFirstResult (potrivire de text, agnostic de
+    // aplicație). Verificarea FINALĂ (metadata MediaSession) rămâne la apelant
+    // (BensonForegroundService), care încearcă ÎNTÂI MediaTransport.playFromSearch (stratul media)
+    // și apelează asta doar dacă acela n-a fost confirmat.
+    suspend fun genericSearchAndPlay(query: String): Boolean = withContext(Dispatchers.Default) {
+        val root = rootInActiveWindow ?: return@withContext false
+        val pkg = root.packageName?.toString().orEmpty()
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val searchNode = ControlLocator.findControl(ControlSynonyms.wordsFor("search"), tree)
+            if (searchNode == null) {
+                Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=find_search ok=false pkg=$pkg")
+                return@withContext false
+            }
+            val directInput = searchNode.ref as? AccessibilityNodeInfo
+            val input = if (directInput?.isEditable == true) {
+                directInput
+            } else {
+                val clickTarget = ControlLocator.clickableTarget(searchNode, tree)?.ref as? AccessibilityNodeInfo
+                val tapped = clickTarget?.let { clickNodeOrAncestor(it) } ?: false
+                Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=activate ok=$tapped pkg=$pkg")
+                if (!tapped) return@withContext false
+                // FIX_MUSIC2_ACTIVATE_TIMING_1 (2026-10-04, device-observed) — Spotify's tap-through
+                // placeholder-to-real-input transition did not always complete within 2s on this
+                // device (intermittent "no_input_found" across otherwise-identical attempts);
+                // widened, no other change.
+                var found = waitForNode(3000, 100, pkg, "music_search_input") { it.isEditable }
+                if (found == null) {
+                    // FIX_MUSIC2_ACTIVATE_RETRY_1 (2026-10-04, user-directed) — widening the wait
+                    // alone did not clear "no_input_found" (device-proven, same session): the first
+                    // tap sometimes lands before the UI can accept it and is swallowed outright, not
+                    // just slow. One extra tap-and-wait on the SAME target before giving up.
+                    val retried = clickTarget?.let { clickNodeOrAncestor(it) } ?: false
+                    Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=activate_retry ok=$retried pkg=$pkg")
+                    if (retried) found = waitForNode(3000, 100, pkg, "music_search_input") { it.isEditable }
+                }
+                found
+            }
+            if (input == null) {
+                Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=type ok=false pkg=$pkg reason=no_input_found")
+                return@withContext false
+            }
+            val typed = setTextOn(input, query)
+            Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=type ok=$typed pkg=$pkg")
+            if (!typed) return@withContext false
+
+            // Submit: ACTION_IME_ENTER on whatever's currently input-focused — best-effort, some
+            // apps show live results with no explicit submit needed (same as BensonCommandExecutor's
+            // own doImeAction, inlined here to avoid instantiating the whole step-engine for one action).
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                        ?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+                }
+            } catch (_: Exception) {}
+            delay(1300)
+
+            val freshRoot = rootInActiveWindow
+                ?: run { Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=extract ok=false pkg=$pkg reason=no_root"); return@withContext false }
+            val freshRefs = mutableListOf<AccessibilityNodeInfo>()
+            try {
+                val freshTree = snapshotTree(freshRoot, freshRefs, intArrayOf(0))
+                val candidate = ControlLocator.findFirstResult(query, freshTree, SearchResultNoiseFilter::isNoise)
+                if (candidate == null) {
+                    Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=extract ok=false pkg=$pkg")
+                    return@withContext false
+                }
+                val clickTarget = ControlLocator.clickableTarget(candidate, freshTree)?.ref as? AccessibilityNodeInfo
+                val clicked = clickTarget?.let { clickNodeOrAncestor(it) } ?: false
+                Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=select ok=$clicked pkg=$pkg candidate=\"${candidate.text.ifBlank { candidate.desc }.take(60)}\"")
+                // RUNDA MUSIC-2 (2026-10-04, device-proven) — an album/EP/remix-collection result
+                // ("Justify My Love (Remixes)") does not auto-play on tap, unlike a direct single
+                // track — it opens a detail screen with its own Play control. Generic (G-1
+                // ControlSynonyms "play": RO/DE/EN, no per-app hint list) — best-effort, a no-op if
+                // the selected result already started playing and no such control is on screen.
+                if (clicked) {
+                    // FIX_MUSIC2_PLAY_CONTROL_TIMING_1 (2026-10-04, device-proven) — a single 700ms
+                    // delay + one-shot find missed the detail screen's Play button intermittently
+                    // ("play_control ok=false" on otherwise-identical attempts), same shape as the
+                    // already-fixed search-activation race (FIX_MUSIC2_ACTIVATE_TIMING_1). Polling
+                    // instead of a single snapshot, same ControlSynonyms("play") dictionary.
+                    val playWords = ControlSynonyms.wordsFor("play")
+                    fun isPlayMatch(node: AccessibilityNodeInfo): Boolean {
+                        if (!node.isClickable) return false
+                        val label = (node.text?.toString() ?: node.contentDescription?.toString() ?: "").lowercase()
+                        return label.isNotBlank() && playWords.any { label.contains(it.lowercase()) }
+                    }
+                    val ready = waitForNode(2500, 150, pkg, "music_play_control", ::isPlayMatch)
+                    var playClicked = false
+                    if (ready != null) {
+                        // FIX_MUSIC2_PLAY_CONTROL_SETTLE_1 (2026-10-04, device-proven) — `ready`
+                        // can trigger on the FIRST frame where only the persistent mini-player bar
+                        // exists yet (foundAfterMs=9 observed), before the detail screen's own,
+                        // larger Play button has rendered — collecting candidates at that instant
+                        // sees just the one, wrong control. A short settle lets the real page catch up.
+                        delay(400)
+                        // FIX_MUSIC2_PLAY_CONTROL_TARGET_1 (2026-10-04, device-proven) — the first
+                        // match grabbed Spotify's persistent mini-player bar
+                        // (viewId=com.spotify.music:id/play_pause_button, 120x120px, reflecting
+                        // whatever was already queued) instead of the detail screen's own Play
+                        // control, starting an unrelated already-cued track twice in a row. Generic
+                        // fix, not Spotify-specific: among ALL matching controls on screen, the
+                        // primary per-screen action is reliably the LARGEST — a docked transport bar
+                        // is always smaller than a page's own Play button.
+                        fun collect(node: AccessibilityNodeInfo, out: MutableList<AccessibilityNodeInfo>) {
+                            if (isPlayMatch(node)) out.add(node)
+                            for (i in 0 until node.childCount) node.getChild(i)?.let { collect(it, out) }
+                        }
+                        val freshRoot2 = rootInActiveWindow
+                        if (freshRoot2 != null) {
+                            val candidates = mutableListOf<AccessibilityNodeInfo>()
+                            try {
+                                collect(freshRoot2, candidates)
+                                val best = candidates.maxByOrNull { n ->
+                                    val r = android.graphics.Rect(); n.getBoundsInScreen(r); r.width().toLong() * r.height()
+                                }
+                                if (best != null) {
+                                    val r = android.graphics.Rect(); best.getBoundsInScreen(r)
+                                    Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=play_control_target desc=\"${best.contentDescription}\" viewId=\"${best.viewIdResourceName}\" area=${r.width() * r.height()} candidates=${candidates.size}")
+                                    playClicked = clickNodeOrAncestor(best)
+                                }
+                            } finally {
+                                for (r in candidates) if (r !== freshRoot2) try { r.recycle() } catch (_: Exception) {}
+                            }
+                        }
+                    }
+                    Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=play_control ok=$playClicked pkg=$pkg")
+                }
+                clicked
+            } finally {
+                for (r in freshRefs) if (r !== freshRoot) try { r.recycle() } catch (_: Exception) {}
+            }
+        } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    // RUNDA SPEAK-1 (2026-10-04, user-directed, device-proven on highway) — "deschide YouTube și
+    // caută X" opens results via an Intent (ACTION_SEARCH, query pre-filled) — results are
+    // already on screen, no search box to activate/type into. Re-running genericSearchLocateFirst
+    // there would tap the search icon again and could blank out the Intent's own results. Direct
+    // extraction only, same ControlLocator/SearchResultNoiseFilter pair, no search-activation.
+    suspend fun locateFirstResultOnScreen(query: String): String? = withContext(Dispatchers.Default) {
+        val root = rootInActiveWindow ?: return@withContext null
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val candidate = ControlLocator.findFirstResult(query, tree, SearchResultNoiseFilter::isNoise)
+            candidate?.text?.ifBlank { candidate.desc }?.trim()?.ifBlank { null }
+        } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    // RUNDA SPEAK-1 (2026-10-04, user-directed, device-proven on highway) — "BENSON vorbește cu
+    // mine": YouTube needs to ANNOUNCE what it found and ask before playing, unlike Spotify's
+    // immediate-play MUSIC-2 flow. Same search steps as genericSearchAndPlay (activate/type/
+    // submit/wait/extract-first-result) but stops at the title, never clicks — the click, when
+    // confirmed, re-runs genericSearchAndPlay fresh (a node reference held across a spoken
+    // question + a "da"/"nu" answer would be stale by the time it's used).
+    suspend fun genericSearchLocateFirst(query: String): String? = withContext(Dispatchers.Default) {
+        val root = rootInActiveWindow ?: return@withContext null
+        val pkg = root.packageName?.toString().orEmpty()
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val searchNode = ControlLocator.findControl(ControlSynonyms.wordsFor("search"), tree)
+            if (searchNode == null) {
+                Log.i("BENSON_AUDIO", "SEARCH_LOCATE_STEP step=find_search ok=false pkg=$pkg")
+                return@withContext null
+            }
+            val directInput = searchNode.ref as? AccessibilityNodeInfo
+            val input = if (directInput?.isEditable == true) {
+                directInput
+            } else {
+                val clickTarget = ControlLocator.clickableTarget(searchNode, tree)?.ref as? AccessibilityNodeInfo
+                val tapped = clickTarget?.let { clickNodeOrAncestor(it) } ?: false
+                Log.i("BENSON_AUDIO", "SEARCH_LOCATE_STEP step=activate ok=$tapped pkg=$pkg")
+                if (!tapped) return@withContext null
+                var found = waitForNode(3000, 100, pkg, "search_locate_input") { it.isEditable }
+                if (found == null) {
+                    val retried = clickTarget?.let { clickNodeOrAncestor(it) } ?: false
+                    Log.i("BENSON_AUDIO", "SEARCH_LOCATE_STEP step=activate_retry ok=$retried pkg=$pkg")
+                    if (retried) found = waitForNode(3000, 100, pkg, "search_locate_input") { it.isEditable }
+                }
+                found
+            }
+            if (input == null) {
+                Log.i("BENSON_AUDIO", "SEARCH_LOCATE_STEP step=type ok=false pkg=$pkg reason=no_input_found")
+                return@withContext null
+            }
+            val typed = setTextOn(input, query)
+            Log.i("BENSON_AUDIO", "SEARCH_LOCATE_STEP step=type ok=$typed pkg=$pkg")
+            if (!typed) return@withContext null
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                        ?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+                }
+            } catch (_: Exception) {}
+            delay(1300)
+            val freshRoot = rootInActiveWindow
+                ?: run { Log.i("BENSON_AUDIO", "SEARCH_LOCATE_STEP step=extract ok=false pkg=$pkg reason=no_root"); return@withContext null }
+            val freshRefs = mutableListOf<AccessibilityNodeInfo>()
+            try {
+                val freshTree = snapshotTree(freshRoot, freshRefs, intArrayOf(0))
+                val candidate = ControlLocator.findFirstResult(query, freshTree, SearchResultNoiseFilter::isNoise)
+                val title = candidate?.text?.ifBlank { candidate.desc }?.trim()
+                Log.i("BENSON_AUDIO", "SEARCH_LOCATE_STEP step=extract ok=${title != null} pkg=$pkg title=\"${title?.take(60) ?: ""}\"")
+                title?.ifBlank { null }
+            } finally {
+                for (r in freshRefs) if (r !== freshRoot) try { r.recycle() } catch (_: Exception) {}
+            }
+        } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    // FIX_C1_TOUCH_SIGNAL_1 — stamped on every BENSON-driven click/text-set/global-nav action, so
+    // TouchInteractionClassifier can exclude the TYPE_VIEW_CLICKED/SCROLLED/TEXT_CHANGED echo of
+    // BENSON's own action from counting as "Rareș touched the screen".
+    @Volatile var lastSelfActionAt = 0L
+        private set
+
     private fun clickNodeOrAncestor(node: AccessibilityNodeInfo): Boolean {
+        lastSelfActionAt = System.currentTimeMillis()
         if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
         val anc = findClickableAncestor(node) ?: return false
         return anc.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -1993,6 +2369,21 @@ class BensonAccessibilityService : AccessibilityService() {
         val (fg, fgSrc, _) = foregroundIsPackage(WA_PKG)
         if (!fg) { Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=not_foreground src=$fgSrc"); return false }
 
+        // FIX_WA_STALE_CHAT_SCREEN_1 (2026-10-03, device-proven) — moved BEFORE the Chats-tab
+        // check, not after. Root cause (log + dumpScreenForDebug): WhatsApp resumed straight into
+        // an open individual conversation left over from the PREVIOUS call ("Benson, video cu
+        // Hannah", then "Benson, video cu baby" minutes later found WhatsApp still on Hannah's
+        // chat screen — viewId=com.whatsapp:id/entry, no bottom nav at all). On that screen
+        // waOnChatsTab()/waSelectChatsTab() both fail (no Chats label, no nav-bar fallback node
+        // exists on a conversation screen) and the old ordering returned false right there
+        // (reason=chats_tab_unreachable), so this escape path never ran. Exiting the open
+        // conversation FIRST makes the Chats-tab check below reliable again.
+        if (findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") } != null) {
+            val back = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/whatsapp_toolbar_home") && it.isClickable }
+            if (back != null) clickNodeOrAncestor(back) else performGlobalAction(GLOBAL_ACTION_BACK)
+            awaitCondition(2000, 150) { findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") } == null }
+        }
+
         // Chats tab
         var onChats = waOnChatsTab()
         Log.i("BENSON_AUDIO", "WA_CHATS_TAB state=${if (onChats) "active" else "inactive"}")
@@ -2002,13 +2393,6 @@ class BensonAccessibilityService : AccessibilityService() {
             awaitCondition(2500, 150) { waOnChatsTab() && findNodeMatching { (it.viewIdResourceName ?: "") == "android:id/list" } != null }
             onChats = waOnChatsTab()
             if (!onChats) { Log.i("BENSON_AUDIO", "WA_SEARCH_NORMALIZE_FAIL reason=chats_tab_unreachable"); return false }
-        }
-
-        // not stuck inside an individual chat
-        if (findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") } != null) {
-            val back = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/whatsapp_toolbar_home") && it.isClickable }
-            if (back != null) clickNodeOrAncestor(back) else performGlobalAction(GLOBAL_ACTION_BACK)
-            awaitCondition(2000, 150) { findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") } == null }
         }
 
         if (waSearchHeaderNode() != null) {
@@ -2085,10 +2469,12 @@ class BensonAccessibilityService : AccessibilityService() {
             ?.text?.toString()?.trim()
             ?.takeIf { it.isNotBlank() }
 
-    private fun setTextOn(node: AccessibilityNodeInfo, value: String): Boolean =
-        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, android.os.Bundle().apply {
+    private fun setTextOn(node: AccessibilityNodeInfo, value: String): Boolean {
+        lastSelfActionAt = System.currentTimeMillis()
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, android.os.Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
         })
+    }
 
     suspend fun runWhatsAppCallNative(contactRaw: String, callMode: String = "voice_call"): WhatsAppCallNativeResult =
         withContext(Dispatchers.Default) {
@@ -2110,6 +2496,7 @@ class BensonAccessibilityService : AccessibilityService() {
             waLog("WA_CALL_STATE state=CALL_STARTING mode=${if (wantsVideo) "video" else "voice"} contact=\"$contact\"")
             if (contact.isEmpty()) return@withContext fail("VALIDATE", "empty contact")
 
+            captureCleanupPrevPackage() // RUNDA C-1 — "unde eram" înainte să plece spre WhatsApp
             whatsappAutomationActive = true
             try {
                 // ── 1. LAUNCH ──────────────────────────────────────────────────────────────────
@@ -2554,6 +2941,7 @@ class BensonAccessibilityService : AccessibilityService() {
         if (phone.length < 6) return@withContext fail("RESOLVE_CONTACT", "phone too short after normalisation")
         if (want.isBlank()) return@withContext fail("TYPE_MESSAGE", "empty message")
 
+        captureCleanupPrevPackage() // RUNDA C-1 — "unde eram" înainte să plece spre WhatsApp
         // Idempotency across recovery / re-entry — never type twice for one mission.
         val prior = waWriteRead(this@BensonAccessibilityService)
         if (prior.missionId == missionId) {
@@ -2689,6 +3077,46 @@ class BensonAccessibilityService : AccessibilityService() {
     // entirely. Returns a JSON string:
     // {"ok":true,"header":"...","messages":[{"sender":"me"|"them","text":"..."}]} or
     // {"ok":false,"reason":"..."}.
+    /** Types into the already-open WhatsApp chat after observing its title and compose field.
+     * Never launches another chat, taps coordinates, or sends. */
+    suspend fun runWhatsAppTypeCurrentConversation(messageRaw: String, missionId: String): WhatsAppCallNativeResult =
+        withContext(Dispatchers.Default) {
+            val message = messageRaw.trim()
+            val t0 = System.currentTimeMillis()
+            fun ms() = System.currentTimeMillis() - t0
+            fun fail(step: String, why: String) = WhatsAppCallNativeResult(false, step, why, "current conversation", ms())
+            if (message.isBlank() || missionId.isBlank()) return@withContext fail("VALIDATE", "message or mission id missing")
+            val prior = waWriteRead(this@BensonAccessibilityService)
+            if (prior.missionId == missionId && prior.state in setOf(WA_WRITE_SEND_ATTEMPTED, WA_WRITE_SENT_VERIFIED))
+                return@withContext fail("TYPE_MESSAGE", "mission already sent")
+            if (!foregroundIsPackage(WA_PKG).first) return@withContext fail("VERIFY_CHAT", "WhatsApp is not foreground")
+            whatsappAutomationActive = true
+            try {
+                val header = conversationTitleText()?.trim().orEmpty()
+                if (header.isBlank()) return@withContext fail("VERIFY_CHAT", "visible conversation title unavailable")
+                val entry = waitForNode(2000, 150, WA_PKG, "wa_current_entry") {
+                    it.isEditable && (it.viewIdResourceName ?: "").endsWith("/entry")
+                } ?: return@withContext fail("FIND_MESSAGE_INPUT", "visible WhatsApp composer unavailable")
+                if (!setTextOn(entry, message)) return@withContext fail("TYPE_MESSAGE", "ACTION_SET_TEXT rejected")
+                var shown = ""
+                val deadline = System.currentTimeMillis() + 2500
+                while (System.currentTimeMillis() < deadline) {
+                    shown = findNodeMatching { it.isEditable && (it.viewIdResourceName ?: "").endsWith("/entry") }
+                        ?.also { try { it.refresh() } catch (_: Exception) {} }?.text?.toString()?.trim().orEmpty()
+                    if (shown == message) break
+                    delay(120)
+                }
+                if (shown != message) return@withContext fail("VERIFY_TYPED_TEXT", "composer text did not match")
+                waWritePersist(this@BensonAccessibilityService, missionId, WA_WRITE_WAITING_CONFIRMATION, message.hashCode())
+                Log.i("BENSON_AUDIO", "WA_WRITE_CURRENT_CHAT_VERIFIED header=\"${header.take(48)}\" chars=${message.length} sent=false")
+                WhatsAppCallNativeResult(true, "TYPED_VERIFIED", null, header, ms(), header, true)
+            } catch (e: Exception) {
+                fail("EXCEPTION", e.javaClass.simpleName)
+            } finally {
+                whatsappAutomationActive = false
+            }
+        }
+
     suspend fun readWhatsAppConversation(phoneRaw: String, expectedNameRaw: String, maxMessages: Int): String =
         withContext(Dispatchers.Default) {
             val phone = phoneRaw.filter { it.isDigit() }
@@ -2699,22 +3127,26 @@ class BensonAccessibilityService : AccessibilityService() {
                 return JSONObject().apply { put("ok", false); put("reason", reason) }.toString()
             }
 
-            if (phone.length < 6) return@withContext jsonFail("RESOLVE_CONTACT")
+            val currentChatOnly = phoneRaw == "CURRENT"
+            if (!currentChatOnly && phone.length < 6) return@withContext jsonFail("RESOLVE_CONTACT")
 
             whatsappAutomationActive = true
             try {
-                val launched = try {
-                    val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("whatsapp://send?phone=$phone")).apply {
-                        setPackage(WA_PKG); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (currentChatOnly) {
+                    if (!foregroundIsPackage(WA_PKG).first) return@withContext jsonFail("OPEN_CHAT")
+                } else {
+                    val launched = try {
+                        val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("whatsapp://send?phone=$phone")).apply {
+                            setPackage(WA_PKG); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(i); true
+                    } catch (e: Exception) {
+                        waLog("WA_CHAT_READ_EXC ${e.javaClass.simpleName}: ${e.message}"); false
                     }
-                    startActivity(i); true
-                } catch (e: Exception) {
-                    waLog("WA_CHAT_READ_EXC ${e.javaClass.simpleName}: ${e.message}"); false
+                    if (!launched) return@withContext jsonFail("OPEN_CHAT")
+                    val pkgOk = foregroundIsPackage(WA_PKG).first || awaitTargetReacquired(WA_PKG, 8000L)
+                    if (!pkgOk) return@withContext jsonFail("OPEN_CHAT")
                 }
-                if (!launched) return@withContext jsonFail("OPEN_CHAT")
-
-                val pkgOk = foregroundIsPackage(WA_PKG).first || awaitTargetReacquired(WA_PKG, 8000L)
-                if (!pkgOk) return@withContext jsonFail("OPEN_CHAT")
                 val entry0 = waitForNode(9000, 200, WA_PKG, "wa_read_entry") { (it.viewIdResourceName ?: "").endsWith("/entry") }
                 if (entry0 == null) return@withContext jsonFail("OPEN_CHAT")
 
@@ -2727,10 +3159,10 @@ class BensonAccessibilityService : AccessibilityService() {
                         val cur = conversationTitleText()?.trim().orEmpty()
                         if (cur.isNotBlank()) {
                             h = cur
-                            nameMatch = contact.isNotEmpty() && (
+                            nameMatch = currentChatOnly || (contact.isNotEmpty() && (
                                 normPhon(h) == normPhon(contact) ||
                                     wholeLabelPhoneticEquals(h, contact) ||
-                                    phoneticNameMatch(h, contact))
+                                    phoneticNameMatch(h, contact)))
                             val hd = h.filter { it.isDigit() }
                             digitsMatch = hd.length >= 6 &&
                                 (phone.endsWith(hd.takeLast(9)) || hd.endsWith(phone.takeLast(9)))
@@ -2824,7 +3256,7 @@ class BensonAccessibilityService : AccessibilityService() {
     // Called ONLY after an explicit YES. Presses Send at most once per missionId, then verifies
     // the exact outgoing message appears in the transcript. SEND_ATTEMPTED is persisted before the
     // tap: an interruption after it re-VERIFIES only, never re-presses.
-    suspend fun pressWhatsAppSendVerified(missionId: String, messageRaw: String): WhatsAppCallNativeResult =
+    suspend fun pressWhatsAppSendVerified(missionId: String, messageRaw: String, expectedChatRaw: String): WhatsAppCallNativeResult =
         withContext(Dispatchers.Default) {
             val want = messageRaw.trim()
             val t0 = System.currentTimeMillis()
@@ -2865,11 +3297,18 @@ class BensonAccessibilityService : AccessibilityService() {
             if (rec.msgHash != want.hashCode()) {
                 return@withContext fail("SEND_ON_YES", "message changed since it was typed & verified")
             }
+            val expectedChat = expectedChatRaw.trim()
+            if (expectedChat.isBlank()) return@withContext fail("VERIFY_CHAT", "confirmed recipient missing")
 
             whatsappAutomationActive = true
             try {
                 val fgOk = foregroundIsPackage(WA_PKG).first || awaitTargetReacquired(WA_PKG, 6000L)
                 if (!fgOk) return@withContext fail("SEND_ON_YES", "WhatsApp is not foreground")
+                val actualChat = conversationTitleText()?.trim().orEmpty()
+                // Confirmation is bound to the exact WhatsApp title that was shown to the user.
+                // A similar-looking chat must never inherit that authorization.
+                val sameChat = actualChat.isNotBlank() && normPhon(actualChat) == normPhon(expectedChat)
+                if (!sameChat) return@withContext fail("VERIFY_CHAT", "current conversation no longer matches the confirmed recipient")
 
                 val field = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") && it.isEditable }
                     ?.also { try { it.refresh() } catch (_: Exception) {} }
@@ -2911,6 +3350,7 @@ class BensonAccessibilityService : AccessibilityService() {
                     return@withContext fail("VERIFY_OUTGOING_MESSAGE", "tapped send but the message did not appear in the conversation")
                 }
                 waWritePersist(this@BensonAccessibilityService, missionId, WA_WRITE_SENT_VERIFIED, want.hashCode())
+                scheduleCallCleanup("msg_sent") // RUNDA C-1
                 return@withContext ok("SENT_VERIFIED")
             } catch (e: Exception) {
                 return@withContext fail("EXCEPTION", "${e.javaClass.simpleName}: ${e.message}")
@@ -2918,6 +3358,26 @@ class BensonAccessibilityService : AccessibilityService() {
                 whatsappAutomationActive = false
             }
         }
+
+    // ADAOS WA_VISIBLE_DRAFT (2026-10-03, user-directed) — the draft is typed and shown BEFORE
+    // "Trimit?" is asked (see BensonForegroundService.startWaDraftAndAsk); these two let that
+    // caller read back whatever is ACTUALLY in the field at confirm-time (manual edits respected,
+    // never silently overwritten) and clear it on "nu", without duplicating setTextOn/findNodeMatching.
+    suspend fun readWhatsAppComposeFieldText(): String? = withContext(Dispatchers.Default) {
+        try {
+            findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") && it.isEditable }
+                ?.also { try { it.refresh() } catch (_: Exception) {} }
+                ?.text?.toString()
+        } catch (_: Exception) { null }
+    }
+
+    suspend fun clearWhatsAppComposeField(): Boolean = withContext(Dispatchers.Default) {
+        try {
+            val field = findNodeMatching { (it.viewIdResourceName ?: "").endsWith("/entry") && it.isEditable }
+                ?: return@withContext false
+            setTextOn(field, "")
+        } catch (_: Exception) { false }
+    }
 
     // The exact message text present as a NON-editable node in the conversation transcript
     // (i.e. a sent/received bubble, not the compose field).
@@ -3066,6 +3526,173 @@ class BensonAccessibilityService : AccessibilityService() {
             return WhatsAppCallResult(true, "done")
         } finally {
             whatsappAutomationActive = false
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    // RUNDA G-1 (2026-10-03, user-directed) — "mâna universală": generic semantic press/search/
+    // scroll/read-screen over whatever app is in the foreground. ControlLocator (pure, JUnit-tested)
+    // does the matching against a bounded UiNode snapshot of the live tree; this just builds that
+    // snapshot and executes the real action. ACTION_CLICK only — no gestures, no coordinates
+    // (canPerformGestures=false). end_call is special-cased to the EXISTING endWhatsAppCall()
+    // (doctrina 2: nu înlocui ce funcționează) rather than a new generic click — see its own
+    // comment for why it currently cannot be reached by voice during a call.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════
+    data class ControlResult(
+        val ok: Boolean,
+        val message: String,
+        val needsConfirmation: Boolean = false,
+        val confirmLabel: String = "",
+    )
+
+    private fun snapshotTree(node: AccessibilityNodeInfo, refs: MutableList<AccessibilityNodeInfo>, counter: IntArray, depth: Int = 0): UiNode {
+        refs.add(node)
+        counter[0]++
+        val children = mutableListOf<UiNode>()
+        if (counter[0] < MAX_NODES && depth < MAX_DEPTH) {
+            for (i in 0 until node.childCount) {
+                if (counter[0] >= MAX_NODES) break
+                val child = node.getChild(i) ?: continue
+                children.add(snapshotTree(child, refs, counter, depth + 1))
+            }
+        }
+        return UiNode(
+            text = node.text?.toString().orEmpty(),
+            desc = node.contentDescription?.toString().orEmpty(),
+            viewId = node.viewIdResourceName.orEmpty(),
+            hint = node.hintText?.toString().orEmpty(),
+            className = node.className?.toString().orEmpty(),
+            clickable = node.isClickable,
+            editable = node.isEditable,
+            children = children,
+            ref = node,
+        )
+    }
+
+    private fun controlMatchLayer(n: UiNode): String = when {
+        n.desc.isNotBlank() -> "desc"; n.text.isNotBlank() -> "text"
+        n.viewId.isNotBlank() -> "id"; n.hint.isNotBlank() -> "hint"; else -> "class"
+    }
+
+    private fun findScrollable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? =
+        findNodeMatching { it.isScrollable }
+
+    private suspend fun runScroll(direction: String, pkg: String): ControlResult {
+        val node = findScrollable(rootInActiveWindow ?: return ControlResult(false, "Nu găsesc ecranul curent."))
+        Log.i("BENSON_AUDIO", "CONTROL_FIND intent=scroll_$direction pkg=$pkg layer=semantic match=id result=${if (node != null) "found" else "none"}")
+        if (node == null) return ControlResult(false, "Nu găsesc o listă pe ecran.")
+        val leftRightId = when (direction) {
+            "left" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
+            "right" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
+            else -> -1
+        }
+        val forwardBackId = if (direction == "up") AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD else AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        val ok = (leftRightId >= 0 && node.performAction(leftRightId)) || node.performAction(forwardBackId)
+        Log.i("BENSON_AUDIO", "CONTROL_ACT action=scroll_$direction ok=$ok")
+        return ControlResult(ok, if (ok) "" else "Nu am putut derula.")
+    }
+
+    private fun readScreenSummary(root: AccessibilityNodeInfo, pkg: String): ControlResult {
+        val texts = LinkedHashSet<String>()
+        fun walk(n: AccessibilityNodeInfo, depth: Int) {
+            if (depth > MAX_DEPTH || texts.size >= 6) return
+            val t = n.text?.toString()?.trim()
+            if (!t.isNullOrBlank() && !n.isEditable) texts.add(t)
+            for (i in 0 until n.childCount) {
+                if (texts.size >= 6) break
+                n.getChild(i)?.let { walk(it, depth + 1) }
+            }
+        }
+        walk(root, 0)
+        Log.i("BENSON_AUDIO", "CONTROL_FIND intent=read_screen pkg=$pkg layer=semantic match=text result=${if (texts.isEmpty()) "none" else "found"}")
+        Log.i("BENSON_AUDIO", "CONTROL_ACT action=read_screen ok=${texts.isNotEmpty()}")
+        return if (texts.isEmpty()) ControlResult(false, "Nu văd text pe ecran.") else ControlResult(true, texts.joinToString(". "))
+    }
+
+    // `skipConfirmGate` is true only on the SECOND call, after the user already said "da" to a
+    // CONFIRM-class button — re-finds the node fresh rather than reusing anything held across that
+    // wait (an AccessibilityNodeInfo held across a multi-second voice round-trip is not trustworthy;
+    // same discipline runWhatsAppCallNative already uses via waitForNode).
+    suspend fun runUniversalHandCommand(cmd: UniversalHandCommand, skipConfirmGate: Boolean = false): ControlResult = withContext(Dispatchers.Default) {
+        val root = rootInActiveWindow ?: return@withContext ControlResult(false, "Nu găsesc ecranul curent.")
+        val pkg = root.packageName?.toString().orEmpty()
+        when (cmd) {
+            is UniversalHandCommand.ReadScreen -> readScreenSummary(root, pkg)
+            is UniversalHandCommand.Scroll -> runScroll(cmd.direction, pkg)
+            is UniversalHandCommand.Search -> {
+                val refs = mutableListOf<AccessibilityNodeInfo>()
+                try {
+                    val tree = snapshotTree(root, refs, intArrayOf(0))
+                    val field = ControlLocator.findControl(ControlSynonyms.wordsFor("search"), tree)
+                    Log.i("BENSON_AUDIO", "CONTROL_FIND intent=search pkg=$pkg layer=semantic match=${field?.let { controlMatchLayer(it) } ?: "none"} result=${if (field != null) "found" else "none"}")
+                    if (field == null) return@withContext ControlResult(false, "Nu găsesc câmpul de căutare pe ecran.")
+                    val fieldRef = field.ref as? AccessibilityNodeInfo
+                    val input = if (fieldRef?.isEditable == true) {
+                        fieldRef
+                    } else {
+                        val clickTarget = ControlLocator.clickableTarget(field, tree)?.ref as? AccessibilityNodeInfo
+                        val tapped = clickTarget?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+                        Log.i("BENSON_AUDIO", "CONTROL_ACT action=search_open_tap ok=$tapped")
+                        if (!tapped) return@withContext ControlResult(false, "Nu am putut deschide căutarea.")
+                        waitForNode(2000, 120, pkg, "g1_search_input") { it.isEditable }
+                    }
+                    if (input == null) return@withContext ControlResult(false, "Nu găsesc câmpul de căutare pe ecran.")
+                    val ok = setTextOn(input, cmd.query)
+                    Log.i("BENSON_AUDIO", "CONTROL_ACT action=search_set_text ok=$ok text=\"${cmd.query}\"")
+                    ControlResult(ok, if (ok) "Caut ${cmd.query}." else "Nu am putut introduce textul.")
+                } finally {
+                    for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+                }
+            }
+            is UniversalHandCommand.Press -> {
+                if (cmd.knownIntent == "end_call") {
+                    // FEASIBILITY GATE (2026-10-03, user-directed) — armNativeWake() refuses to arm
+                    // the wake detector while isCallAudioActive()/micOwner=="CALL" (deliberate, to
+                    // stop call audio from false-triggering wake). endWhatsAppCall() already exists
+                    // and works (reused here, not reinvented) but a voice command can never REACH
+                    // this branch during an actual call until that gate is revisited — pending the
+                    // RMS feasibility probe the user asked for separately. Not wired to the gate yet.
+                    Log.i("BENSON_AUDIO", "CONTROL_FIND intent=end_call pkg=$pkg layer=semantic match=desc result=deferred")
+                    return@withContext ControlResult(false, "Comanda de închis apelul prin voce nu e încă activă în timpul unui apel.")
+                }
+                val refs = mutableListOf<AccessibilityNodeInfo>()
+                try {
+                    val words = cmd.knownIntent?.let { ControlSynonyms.wordsFor(it) } ?: listOf(cmd.target)
+                    val tree = snapshotTree(root, refs, intArrayOf(0))
+                    val found = ControlLocator.findControl(words, tree)
+                    val label = cmd.knownIntent ?: cmd.target
+                    if (found == null) {
+                        Log.i("BENSON_AUDIO", "CONTROL_FIND intent=$label pkg=$pkg layer=semantic match=none result=none")
+                        // Adaos G-1 (2026-10-04) — "săgeata X": fără nod cu descriere de săgeată,
+                        // recurge la scroll în acea direcție în loc să raporteze pur și simplu eșec.
+                        val scrollDir = when (cmd.knownIntent) {
+                            "arrow_left" -> "left"; "arrow_right" -> "right"
+                            "arrow_up" -> "up"; "arrow_down" -> "down"
+                            else -> null
+                        }
+                        if (scrollDir != null) return@withContext runScroll(scrollDir, pkg)
+                        return@withContext ControlResult(false, "Nu găsesc $label pe ecran.")
+                    }
+                    Log.i("BENSON_AUDIO", "CONTROL_FIND intent=$label pkg=$pkg layer=semantic match=${controlMatchLayer(found)} result=found")
+                    val verdict = ButtonSafetyClassifier.classify(found.text, found.desc, pkg)
+                    if (verdict == ButtonSafetyClassifier.Verdict.REFUSE) {
+                        Log.i("BENSON_AUDIO", "CONTROL_ACT action=press ok=false reason=refused_payment")
+                        return@withContext ControlResult(false, "Nu apăs pe plăți. Asta o faci tu.")
+                    }
+                    if (verdict == ButtonSafetyClassifier.Verdict.CONFIRM && !skipConfirmGate) {
+                        val confirmLabel = found.text.ifBlank { found.desc }.ifBlank { label }
+                        Log.i("BENSON_AUDIO", "CONTROL_ACT action=press ok=false reason=awaiting_confirm label=\"$confirmLabel\"")
+                        return@withContext ControlResult(false, "", needsConfirmation = true, confirmLabel = confirmLabel)
+                    }
+                    val clickTarget = ControlLocator.clickableTarget(found, tree)
+                    val realNode = clickTarget?.ref as? AccessibilityNodeInfo
+                    val ok = realNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+                    Log.i("BENSON_AUDIO", "CONTROL_ACT action=press ok=$ok")
+                    ControlResult(ok, if (ok) "" else "Nu am putut apăsa.")
+                } finally {
+                    for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+                }
+            }
         }
     }
 }

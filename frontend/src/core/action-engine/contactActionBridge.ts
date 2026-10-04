@@ -16,10 +16,11 @@ export interface ContactActionBridgeResult {
   message: string;
 }
 
-const HANDLED_INTENTS: ActionIntent[] = ['CALL_CONTACT', 'OPEN_WHATSAPP_CONTACT', 'MESSAGE_CONTACT', 'FAMILY_LOCATION'];
+const HANDLED_INTENTS: ActionIntent[] = ['CALL_CONTACT', 'OPEN_WHATSAPP_CONTACT', 'MESSAGE_CONTACT', 'FAMILY_LOCATION', 'EMAIL_ACTION', 'READ_MESSAGES'];
 
-function preferredChannelFor(request: ActionRequest): 'phone' | 'whatsapp' {
+function preferredChannelFor(request: ActionRequest): 'phone' | 'whatsapp' | 'email' {
   if (request.intent === 'CALL_CONTACT' || request.intent === 'FAMILY_LOCATION') return 'phone';
+  if (request.intent === 'EMAIL_ACTION') return 'email';
   // MESSAGE_CONTACT carries its own channel param (defaults to whatsapp in the Intent Engine).
   return request.parameters.channel === 'sms' ? 'phone' : 'whatsapp';
 }
@@ -29,7 +30,9 @@ export function enrichContactAction(request: ActionRequest, contacts: TrustedCon
     return { request, status: 'not_found', message: `contactActionBridge does not handle ${request.intent}.` };
   }
 
-  const contactName = typeof request.parameters.contactName === 'string' ? request.parameters.contactName : '';
+  const contactName = typeof request.parameters.contactName === 'string'
+    ? request.parameters.contactName
+    : typeof request.parameters.recipientName === 'string' ? request.parameters.recipientName : '';
   if (!contactName.trim()) {
     return { request, status: 'not_found', message: 'No contact name was given.' };
   }
@@ -68,6 +71,13 @@ export function enrichContactAction(request: ActionRequest, contacts: TrustedCon
       message: `${resolved.contact?.displayName ?? contactName} nu are un număr de telefon salvat.`,
     };
   }
+  if (resolved.status === 'missing_email') {
+    return {
+      request,
+      status: 'missing_email',
+      message: `${resolved.contact?.displayName ?? contactName} nu are o adresă de email salvată.`,
+    };
+  }
 
   // resolved — first phone number is used; TrustedContact allows more than one but there's no
   // signal here for picking a different one.
@@ -79,6 +89,10 @@ export function enrichContactAction(request: ActionRequest, contacts: TrustedCon
       contactName: contact.displayName,
       contactId: contact.id,
       phoneNumber: contact.phoneNumbers?.[0],
+      ...(request.intent === 'EMAIL_ACTION' ? {
+        recipientName: contact.displayName,
+        recipientEmail: contact.emailAddresses?.[0],
+      } : {}),
     },
   };
 

@@ -20,13 +20,27 @@ import kotlin.math.sqrt
 /** Native foreground-service runner for Heed's ONNX model and pinned 16 kHz preprocessor. */
 internal class HeedWakeWord(
   private val context: Context,
-  private val onDetected: (phrase: String, score: Float, wavPath: String) -> Unit,
+  // FIX_WAKE_SELF_ECHO_GUARD_2 (2026-10-03, device-proven) — triggeredAtMs is the acoustic trigger
+  // instant (phase=armed), not whenever this callback finally fires (phase=complete, which lags by
+  // however long trailing-silence collection takes — up to ~2s). A self-TTS guard checked against
+  // "now" at callback time, instead of this timestamp, missed a stray detection that fired 106ms
+  // after the ack's own TTS finished (guard window 1000ms) because the callback itself didn't run
+  // until ~1.9s later — by then "now" was already outside the window.
+  private val onDetected: (phrase: String, score: Float, wavPath: String, triggeredAtMs: Long) -> Unit,
   private val log: (stage: String, fields: String) -> Unit,
+  // RUNDA_N3 TASK D [WAKE_AEC] — fired once the AudioRecord is actually recording (right after
+  // recorder.startRecording(), same point HEED_MIC state=START already logs), so the caller can
+  // attach an AcousticEchoCanceler to the correct, currently-live session. Default no-op so every
+  // existing call site compiles unchanged.
+  private val onCaptureStarted: (sessionId: Int) -> Unit = {},
 ) {
   companion object {
     private const val RATE = 16_000
     private const val CHUNK_SAMPLES = 1_600 // 100 ms; Heed reference streaming interval
-    private const val PRE_ROLL_SAMPLES = RATE * 1_500 / 1_000
+    // FIX_WAKE_VERIFY_LATENCY_1 (2026-10-03) — non-private: BensonForegroundService.wakeVerifyTranscribe
+    // trims its upload to a window around this exact offset (the trigger instant inside the WAV),
+    // instead of duplicating the 1500ms constant.
+    const val PRE_ROLL_SAMPLES = RATE * 1_500 / 1_000
     private const val MAX_COMMAND_SAMPLES = RATE * 8
     private const val TAIL_SILENCE_SAMPLES = RATE * 1_200 / 1_000
     private const val MODEL_ASSET = "wakeword/heed_candidate.onnx"
@@ -178,9 +192,21 @@ internal class HeedWakeWord(
     var aboveCount = 0
     var detected = false
     var trailingSilence = 0
+    // PROBA RMS ÎN MAȘINĂ (2026-10-04, user-directed) — doar măsurare, nicio schimbare de
+    // comportament pe wake: nivelul brut al canalului de ascultare, logat o dată pe secundă, ca
+    // să corelăm "Benson" nedetectat cu zgomotul real din mașină. Nu alimentează threshold/score.
+    var lastLevelLogAt = 0L
+    // RUNDA_N3/N5 — the trigger score, frozen at the instant of detection. `score` below keeps
+    // getting reassigned every chunk for the REST of the capture (while `detected` stays true), so
+    // using it at onDetected() time returned whatever the LAST chunk inferred, not what actually
+    // triggered — device-confirmed this session (WAKE_SCORE logged 0.09-0.62 while the real
+    // HEED_DETECTED line, seconds earlier, showed 0.83-0.97 for the same wake). This is the fix.
+    var triggerScore = 0f
+    var triggerAtMs = 0L
     try {
       recorder.startRecording()
       log("HEED_MIC", "state=START src=VOICE_RECOGNITION rate=$RATE chunkMs=100")
+      try { onCaptureStarted(recorder.audioSessionId) } catch (_: Exception) {}
       while (running) {
         val read = recorder.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
         if (read <= 0) {
@@ -188,6 +214,14 @@ internal class HeedWakeWord(
           continue
         }
         val audio = if (read == chunk.size) chunk.copyOf() else chunk.copyOfRange(0, read)
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastLevelLogAt >= 1000) {
+          lastLevelLogAt = nowMs
+          var sumSquares = 0.0
+          for (s in audio) sumSquares += s.toDouble() * s.toDouble()
+          val rms = kotlin.math.sqrt(sumSquares / audio.size)
+          log("WAKE_MIC_LEVEL", "rms=${"%.0f".format(rms)}")
+        }
         if (!detected) {
           preRoll.addLast(audio)
           preRollCount += audio.size
@@ -204,6 +238,8 @@ internal class HeedWakeWord(
           if (now - lastTriggerAt >= refractoryMs) {
             lastTriggerAt = now
             detected = true
+            triggerScore = score
+            triggerAtMs = now
             preRoll.forEach { capture.add(it) }
             capturedCount = capture.sumOf { it.size }
             log("HEED_DETECTED", "phrase=${phrase.replace(' ', '_')} score=${"%.3f".format(score)}")
@@ -219,7 +255,7 @@ internal class HeedWakeWord(
             val wav = writeWav(capture)
             log("HEED_COMMAND_BUFFER", "phase=complete samples=$capturedCount path=${File(wav).name}")
             running = false
-            try { onDetected(phrase, (score ?: threshold), wav) }
+            try { onDetected(phrase, triggerScore, wav, triggerAtMs) }
             catch (e: Exception) { log("HEED_ERROR", "reason=detected_callback type=${e.javaClass.simpleName}") }
             break
           }

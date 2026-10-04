@@ -83,6 +83,7 @@ function buildTaskForGoal(goal: Goal): MissionTask {
           'messaging',
           {
             contactName: goal.entities.contact,
+            currentChat: goal.entities.currentChat === true,
             message: goal.entities.message ?? '',
             mode: goal.entities.mode,
             intent: goal.sourceIntent,

@@ -12,6 +12,7 @@
 import { executeCommand, getScreenSnapshot } from 'benson-accessibility';
 import { logAudioDiag } from 'benson-foreground-service';
 import { isPackageInstalled, launchPackage, waitForPackageForeground } from '../core/action-engine/androidActionExecutor';
+import { activateObservedSearchControl } from '../core/accessibility/activateObservedSearchControl';
 
 const LOG_TAG = '[YouTubeExecutor]';
 function devLog(...args: unknown[]): void {
@@ -195,23 +196,29 @@ export async function searchYouTube(query: string): Promise<YtSearchOutcome> {
   // Let YouTube's own UI finish laying out before probing for the search icon.
   await nativeWait(700);
 
-  const clickSearch = await safeExecuteCommand({ steps: [{ action: 'click', match: SEARCH_ICON_MATCH, timeoutMs: 5000 }] });
+  const clickSearch = await safeExecuteCommand({ steps: [{ action: 'click', match: SEARCH_ICON_MATCH, timeoutMs: 5000, requirePackage: YOUTUBE_PACKAGE }] });
+  let searchInputMatch: Record<string, unknown> = { editable: true };
   if (!clickSearch.success) {
+    const generic = await activateObservedSearchControl(YOUTUBE_PACKAGE);
+    if (generic.status !== 'ready') {
     const stage = clickSearch.status === 'not_found' ? 'YT_SEARCH_CONTROL_NOT_FOUND' : 'YT_SEARCH_CLICK_FAIL';
     logAudioDiag(stage, `status=${clickSearch.status} detail=${JSON.stringify(clickSearch.detail ?? '')}`);
     return { ok: false, message: 'Nu am găsit butonul de căutare în YouTube.' };
+    }
+    searchInputMatch = generic.inputMatch;
+    logAudioDiag('YT_SEARCH_GENERIC_FALLBACK', `used=${generic.used}`);
   }
   logAudioDiag('YT_SEARCH_FOUND', '');
   logAudioDiag('YT_SEARCH_CLICKED', '');
 
-  const inputPresent = await safeExecuteCommand({ steps: [{ action: 'assert_present', match: { editable: true }, timeoutMs: 3000 }] });
+  const inputPresent = await safeExecuteCommand({ steps: [{ action: 'assert_present', match: searchInputMatch, timeoutMs: 3000, requirePackage: YOUTUBE_PACKAGE }] });
   if (!inputPresent.success) {
     logAudioDiag('YT_INPUT_NOT_FOUND', `status=${inputPresent.status}`);
     return { ok: false, message: 'Am deschis căutarea, dar nu găsesc câmpul de scris.' };
   }
   logAudioDiag('YT_INPUT_FOUND', '');
 
-  const typed = await safeExecuteCommand({ steps: [{ action: 'set_text', match: { editable: true }, text: query, timeoutMs: 3000 }] });
+  const typed = await safeExecuteCommand({ steps: [{ action: 'set_text', match: searchInputMatch, text: query, timeoutMs: 3000, requirePackage: YOUTUBE_PACKAGE }] });
   if (!typed.success) {
     logAudioDiag('YT_TYPE_FAIL', `status=${typed.status}`);
     return { ok: false, message: `N-am putut scrie „${query}" în căutare.` };

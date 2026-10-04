@@ -10,7 +10,8 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "bump-build": "node ./scripts/bump-build.js",
-    "postinstall": "patch-package"
+    "sync-modules": "node ./scripts/sync-local-modules.cjs",
+    "postinstall": "patch-package && node ./scripts/sync-local-modules.cjs"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
@@ -22,6 +23,7 @@
     "benson-accessibility": "file:./modules/benson-accessibility",
     "benson-app-registry": "file:./modules/benson-app-registry",
     "benson-audio-capture": "file:./modules/benson-audio-capture",
+    "benson-car": "file:./modules/benson-car",
     "benson-car-bluetooth": "file:./modules/benson-car-bluetooth",
     "benson-foreground-service": "file:./modules/benson-foreground-service",
     "benson-notification-listener": "file:./modules/benson-notification-listener",

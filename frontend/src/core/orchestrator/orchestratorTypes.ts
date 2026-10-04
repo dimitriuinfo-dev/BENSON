@@ -16,6 +16,7 @@ export type GoalType =
 export interface GoalEntities {
   destination?: string;
   contact?: string;
+  currentChat?: boolean;
   message?: string;
   time?: string;
   app?: string;

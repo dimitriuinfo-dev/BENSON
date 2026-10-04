@@ -5,7 +5,7 @@
 // reimplementing matching — per instruction, extend what exists, don't parallel-build it.
 
 import * as Contacts from 'expo-contacts';
-import { endWhatsAppCall, muteWhatsAppCall, executeCommand, setWhatsAppAutomationActive, getForegroundPackage, runWhatsAppCallNative, runWhatsAppOpenConversationCall, runWhatsAppOpenConversationType, pressWhatsAppSendVerified, getWhatsAppWriteState, readWhatsAppConversation as readWhatsAppConversationNative } from 'benson-accessibility';
+import { endWhatsAppCall, muteWhatsAppCall, executeCommand, setWhatsAppAutomationActive, getForegroundPackage, goBack as accessibilityGoBack, runWhatsAppOpenConversationCall, runWhatsAppOpenConversationType, runWhatsAppTypeCurrentConversation, pressWhatsAppSendVerified, getWhatsAppWriteState, readWhatsAppConversation as readWhatsAppConversationNative } from 'benson-accessibility';
 import type { CommandStep, CommandResult, CommandMatch, BensonNode } from 'benson-accessibility';
 import { logAudioDiag } from 'benson-foreground-service';
 import { getLastScreenSnapshot, getScreenSnapshot } from '../../../../lib/screenBridge';
@@ -16,6 +16,8 @@ import { enterPipMode } from 'benson-app-registry';
 import { hasOverlayPermission, showBubble, updateBubbleStatus } from 'benson-overlay';
 import { waitForBackground } from '../appStateSignal';
 import type { ToolCallResult } from '../missionTypes';
+import { resolveVisibleWhatsAppTarget } from './whatsappVisibleTarget';
+import { activateObservedSearchControl } from '../../accessibility/activateObservedSearchControl';
 import { ensureAccessibilityReady, ACCESSIBILITY_DISCONNECTED_ERROR } from '../../safety';
 import { recordVerifiedIdentity } from '../../contacts/verifiedIdentityStore';
 
@@ -25,6 +27,30 @@ function devLog(...args: unknown[]): void {
 }
 
 const WHATSAPP_PACKAGE = 'com.whatsapp';
+const CALL_SCREEN_IDS = ['call_screen', 'end_call_button', 'audio_route_button', 'call_screen_header_view', 'call_controls_card'];
+
+/** A user-facing WhatsApp label must never expose the internal phone-number field. */
+export function safeWhatsAppDisplayName(value: string): string {
+  return value
+    .replace(/\s*\(\s*(?:\+|00)?\d[\d\s().-]{5,}\d\s*\)\s*/g, ' ')
+    .replace(/(?:\+|00)?\d[\d\s().-]{5,}\d/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function isObservedCallScreen(viewIds: string[]): boolean {
+  return viewIds.some((id) => CALL_SCREEN_IDS.some((marker) => id.endsWith(`/${marker}`) || id.includes(`/${marker}_`) || id.includes('/voip_')));
+}
+
+/** Require active-call controls plus WhatsApp's camera-switch control; a chat camera or an
+ * audio-call screen alone is deliberately insufficient. On-device observation must still
+ * confirm this exact surface before reporting a video call as verified. */
+export function hasObservedVideoCallState(nodes: Array<{ viewId?: string | null }>): boolean {
+  const ids = nodes.map(({ viewId }) => viewId ?? '');
+  const activeCallControls = ids.some((id) => /\/(?:end_call_button|call_controls_card)$/.test(id));
+  const cameraSwitch = ids.some((id) => /\/switch_camera$/.test(id));
+  return activeCallControls && cameraSwitch;
+}
 
 // Linking.canOpenURL('whatsapp://send') was used here originally and reported a false negative
 // on a real device with WhatsApp actually installed — Android's package-visibility rules treat
@@ -220,7 +246,7 @@ const WHATSAPP_ENTRY_VIEW_ID = 'com.whatsapp:id/entry';
 // placeCall (search by name string, tap first result, [type+send]). false restores the exact old
 // path below (openConversation/sendMessage, wa.me deep link, phoneNumber from resolved device
 // contacts) — untouched, still present, still exported. Flip this one constant to go back.
-export const WHATSAPP_MESSAGE_VIA_ACCESSIBILITY = true;
+export const WHATSAPP_MESSAGE_VIA_ACCESSIBILITY = false;
 
 // Strips leading Romanian clitic pronouns/prepositions that attach to a spoken name (sună-O PE
 // Hannah, caută-L Ion) so the governance recipe below searches WhatsApp for a clean name, never a
@@ -281,115 +307,9 @@ function matchCandidates(query: string, candidates: string[]): { strategy: Match
   return null;
 }
 
-// ── B-fix2 (2026-09-07) — potrivire fonetică pe rândurile din ecran ───────────────────────────
-// Cauza din log: `textContains:"HANA"` exact nu găsea rândul „HANNAH". Reia algoritmul din
-// lib/appIndex.ts (consonantSkeleton + boundedLevenshtein) — copiat aici verbatim fiindcă acolo
-// nu e exportat, iar lib/appIndex.ts nu e în scope. „HANA" → skeleton „N" (fără h, fără vocale),
-// „HANNAH" → „NN" → distanță 1 → potrivire. Se scorează TOATE rândurile vizibile, câștigă scorul
-// maxim; la egalitate, primul rând din listă.
-function consonantSkeleton(s: string): string {
-  return (s || '').replace(/[aeiou]/g, '');
-}
-function boundedLevenshtein(a: string, b: string, max: number): number {
-  if (a === b) return 0;
-  if (Math.abs(a.length - b.length) > max) return max + 1;
-  const m = a.length;
-  const n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  let prev = new Array<number>(n + 1);
-  let cur = new Array<number>(n + 1);
-  for (let j = 0; j <= n; j++) prev[j] = j;
-  for (let i = 1; i <= m; i++) {
-    cur[0] = i;
-    let rowMin = cur[0];
-    for (let j = 1; j <= n; j++) {
-      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
-      cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
-      if (cur[j] < rowMin) rowMin = cur[j];
-    }
-    if (rowMin > max) return max + 1;
-    const tmp = prev;
-    prev = cur;
-    cur = tmp;
-  }
-  return prev[n];
-}
+// Exact name comparison; similar-looking WhatsApp contacts are never selected automatically.
 function normNameLoose(s: string): string {
-  return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
-}
-// consonant skeleton with 'h' dropped first — 'h' is a weak/silent consonant across RO/DE/EN, so
-// "HANA" and "HANNAH" land on comparable skeletons ("n" vs "nn", edit distance 1).
-function skelKey(s: string): string {
-  return consonantSkeleton(normNameLoose(s).replace(/h/g, ''));
-}
-// Higher = better. exact → 1000; otherwise a blend of consonant-skeleton distance, full-string
-// distance, and a prefix bonus (a first-name query can surface a longer "First Last" row).
-function phoneticContactScore(query: string, cand: string): number {
-  const q = normNameLoose(query);
-  const c = normNameLoose(cand);
-  if (!q || !c) return 0;
-  if (q === c) return 1000;
-  const qs = skelKey(query);
-  const cs = skelKey(cand);
-  const dSkel = boundedLevenshtein(qs, cs, 4);
-  const dFull = boundedLevenshtein(q, c, 4);
-  let s = 0;
-  if (qs && qs === cs) s += 450;
-  s += Math.max(0, 380 - dSkel * 150);
-  s += Math.max(0, 200 - dFull * 45);
-  if (c.startsWith(q) && q.length >= 3) s += 260;
-  else if (q.startsWith(c) && c.length >= 3) s += 140;
-  return s;
-}
-const CONTACT_SCORE_FLOOR = 260;
-function pickBestPhonetic(query: string, candidates: string[]): { name: string; score: number } | null {
-  let best: { name: string; score: number } | null = null;
-  for (const cand of candidates) {
-    const score = phoneticContactScore(query, cand);
-    // strict '>' so that on a tie the FIRST row in the list wins.
-    if (score > (best?.score ?? -1)) best = { name: cand, score };
-  }
-  if (!best || best.score < CONTACT_SCORE_FLOOR) return null;
-  return best;
-}
-
-const WHATSAPP_SECTION_HEADERS =
-  /^(chats?|mesaje|messages|contacte|contacts|contacts on whatsapp|contacte pe whatsapp|kontakte|nachrichten|status|apeluri|calls)$/i;
-
-// Best-effort: native gives a flat node list, no tree. A result-row name is a short, non-editable
-// `text` that isn't the search field and isn't a section header. The exact/prefix/phonetic
-// cascade above filters out whatever noise (message previews, timestamps) slips through. Empty
-// return -> caller falls back to a loose native substring match.
-function readWhatsAppResultNames(snapshot?: { packageName: string; timestamp: number; nodes: BensonNode[] } | null): string[] {
-  const snap = snapshot ?? getLastScreenSnapshot();
-  if (!snap || snap.packageName !== WHATSAPP_PACKAGE) return [];
-  // Age check only applies to the passive pushed cache; an on-demand snapshot passed in is fresh
-  // by construction (its timestamp is "now").
-  if (!snapshot && Date.now() - snap.timestamp > 6000) return [];
-  const names: string[] = [];
-  for (const n of snap.nodes) {
-    if (n.editable) continue;
-    if ((n.viewId || '').toLowerCase().includes('search')) continue;
-    // B-fix2: harvest from BOTH `text` AND `contentDescription` (first segment). On this WhatsApp
-    // build the result-row name lives on the row container's contentDescription ("Hannah, 2 unread
-    // messages"), not a `text` node — which is why `candidates=0` in the failing log.
-    const raw = [
-      (n.text || '').trim(),
-      (n.contentDescription || '').split(/[,\n·|•]/)[0].trim(),
-    ];
-    for (const t of raw) {
-      if (!t || t.length > 40) continue;
-      if (WHATSAPP_SECTION_HEADERS.test(t)) continue;
-      names.push(t);
-    }
-  }
-  return names;
-}
-
-function buildChoiceQuestion(_choices: string[]): string {
-  // BENSON_STABILIZATION_1 — no enumeration.
-  return 'Nu sunt sigur de nume. Spune numele din nou.';
+  return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 type ResultPick =
@@ -397,20 +317,12 @@ type ResultPick =
   | { kind: 'ask'; question: string };
 
 function resolveResultPick(query: string, snapshot?: { packageName: string; timestamp: number; nodes: BensonNode[] } | null): ResultPick {
-  const candidates = [...new Set(readWhatsAppResultNames(snapshot).map((c) => c.trim()).filter(Boolean))];
-  if (candidates.length === 0) {
-    logAudioDiag('CONTACT_MATCH', `query=${JSON.stringify(query)} candidates=0 matched="" score=0`);
-    return { kind: 'pick', clickText: null };
-  }
-  // B-fix2: score EVERY visible row phonetically, take the highest; tie → first row (pickBestPhonetic
-  // uses strict '>'). No "which one?" — the product-owner-directed rule is highest score wins.
-  const best = pickBestPhonetic(query, candidates);
-  if (!best) {
-    logAudioDiag('CONTACT_MATCH', `query=${JSON.stringify(query)} candidates=${candidates.length} matched="" score=0`);
-    return { kind: 'pick', clickText: null };
-  }
-  logAudioDiag('CONTACT_MATCH', `query=${JSON.stringify(query)} candidates=${candidates.length} matched=${JSON.stringify(best.name)} score=${best.score}`);
-  return { kind: 'pick', clickText: best.name };
+  const resolved = resolveVisibleWhatsAppTarget(query, snapshot ?? null);
+  logAudioDiag('CONTACT_MATCH', `source=whatsapp_ui query=${JSON.stringify(query)} status=${resolved.status} target=${JSON.stringify(resolved.status === 'resolved' ? resolved.title : '')} mode=exact_unique_row`);
+  if (resolved.status === 'resolved') return { kind: 'pick', clickText: resolved.title };
+  return { kind: 'ask', question: resolved.status === 'ambiguous'
+    ? 'V\u0103d mai multe conversa\u021bii WhatsApp cu acest nume. Spune-mi numele complet a\u0219a cum apare.'
+    : 'Nu g\u0103sesc o conversa\u021bie cu acest nume exact \u00een WhatsApp. Spune-mi numele a\u0219a cum apare.' };
 }
 
 // ── Resource-id-first step execution (2026-08-28) ──────────────────────────────────────────────
@@ -508,7 +420,7 @@ function failAt(result: CommandResult, phase: string, name: string): ToolCallRes
   return { outcome: 'opened_manual_action_required', error: userError };
 }
 
-type TailKind = { kind: 'call' } | { kind: 'open' } | { kind: 'send'; message: string };
+type TailKind = { kind: 'call'; callMode?: 'voice_call' | 'video_call' } | { kind: 'open' } | { kind: 'send'; message: string };
 
 // Open WhatsApp → search icon (resilient) → type the name (viewId) → pick a result row in JS →
 // tap it → confirm chat open → run the tail (call / open / send). Every step logs RECIPE_STEP;
@@ -523,16 +435,23 @@ async function runTwoPhase(name: string, _uiLang: string, tail: TailKind): Promi
   if (!open.success) return failAt(open, 'launch', name);
 
   const searchClick = await clickResilient(SEARCH_STRATEGIES, 'butonul de căutare', 4, 4000);
-  if (!searchClick.success) return failAt(searchClick, 'search', name);
+  let searchInputMatch: any = { viewId: WA_ID.searchInput };
+  if (!searchClick.success) {
+    const generic = await activateObservedSearchControl(WHATSAPP_PACKAGE);
+    if (generic.status !== 'ready') return failAt(searchClick, 'search', name);
+    searchInputMatch = generic.inputMatch;
+    logAudioDiag('WA_SEARCH_GENERIC_FALLBACK', `used=${generic.used}`);
+  }
 
   const typed = await runPlainSteps([
     { label: 'așteptare câmp de căutare', step: { action: 'wait', ms: 500 } },
-    { label: 'câmpul de căutare', step: { action: 'set_text', match: { viewId: WA_ID.searchInput }, text: name, timeoutMs: 3000, requirePackage: WHATSAPP_PACKAGE } },
+    { label: 'câmpul de căutare', step: { action: 'set_text', match: searchInputMatch, text: name, timeoutMs: 3000, requirePackage: WHATSAPP_PACKAGE } },
     { label: 'așteptare rezultate', step: { action: 'wait', ms: 1000 } },
   ], 5);
   if (!typed.success) return failAt(typed, 'search_input', name);
 
-  const pick = resolveResultPick(name);
+  const liveResults = await cappedSnapshot(1500);
+  const pick = resolveResultPick(name, liveResults);
   if (pick.kind === 'ask') return { outcome: 'opened_manual_action_required', error: pick.question };
   const rowText = pick.clickText ?? name;
 
@@ -548,20 +467,32 @@ async function runTwoPhase(name: string, _uiLang: string, tail: TailKind): Promi
     { label: 'confirmare părăsire ecran de căutare', step: { action: 'assert_gone', match: { viewIdContains: 'search_input' }, timeoutMs: 3000 } },
   ], 9);
   if (!chatOpen.success) return failAt(chatOpen, 'chat_open', name);
+  const chatSnapshot = await getScreenSnapshot();
+  const visibleTitle = chatSnapshot?.packageName === WHATSAPP_PACKAGE
+    ? chatSnapshot.nodes.find((n) => (n.viewId ?? '').endsWith('/conversation_contact_name'))?.text?.trim() ?? ''
+    : '';
+  if (!visibleTitle || normNameLoose(visibleTitle) !== normNameLoose(rowText)) {
+    logAudioDiag('WA_CHAT_OPEN_VERIFY_FAIL', `source=whatsapp_ui query=${JSON.stringify(name)} selected=${JSON.stringify(rowText)} header=${JSON.stringify(visibleTitle)}`);
+    return { outcome: 'opened_manual_action_required', error: 'WhatsApp a deschis un chat, dar numele din antet nu corespunde exact. Nu am continuat acțiunea.' };
+  }
+  logAudioDiag('WA_CHAT_OPEN_VERIFIED', `source=whatsapp_ui query=${JSON.stringify(name)} header=${JSON.stringify(visibleTitle)} exact=true`);
 
   if (tail.kind === 'open') {
-    await runPlainSteps([{ label: 'revenire la BENSON', step: { action: 'return_to_benson' } }], 11);
-    return { outcome: 'app_switch_observed', via: 'accessibility_command_executor' };
+    // Keep WhatsApp and the verified conversation in the foreground.
+    return { outcome: 'app_switch_observed', via: 'accessibility_command_executor', verifiedTarget: visibleTitle };
   }
 
   if (tail.kind === 'call') {
-    const callClick = await clickResilient(VOICECALL_STRATEGIES, 'butonul de apel vocal', 11, 3000);
+    const isVideo = tail.callMode === 'video_call';
+    const videoStrategies: SelStrategy[] = [
+      { by: 'viewId', match: { viewIdContains: 'menuitem_video_call' }, note: 'viewIdContains:menuitem_video_call' },
+      { by: 'viewId', match: { viewIdContains: 'video_call' }, note: 'viewIdContains:video_call' },
+      ...['video call', 'videoanruf', 'apel video'].map((label) => ({ by: 'text' as const, match: { textContains: label, clickable: true }, note: `text:${label}` })),
+    ];
+    const callClick = await clickResilient(isVideo ? videoStrategies : VOICECALL_STRATEGIES, isVideo ? 'butonul de apel video' : 'butonul de apel vocal', 11, 3000);
     if (!callClick.success) return failAt(callClick, 'voice_call', name);
-    await runPlainSteps([
-      { label: 'așteptare pornire apel', step: { action: 'wait', ms: 600 } },
-      { label: 'revenire la BENSON', step: { action: 'return_to_benson' } },
-    ], 12);
-    return { outcome: 'app_switch_observed', via: 'accessibility_command_executor' };
+    logAudioDiag('WA_CALL_CONTROL_TAPPED', `mode=${isVideo ? 'video_call' : 'voice_call'} verifiedChat=${JSON.stringify(visibleTitle)}`);
+    return verifyCallScreenAfterTap(visibleTitle, isVideo ? 'video_call' : 'voice_call');
   }
 
   const msgField = await runPlainSteps([
@@ -786,7 +717,6 @@ const USE_LEGACY_CALL_RECIPE = false;
 // the JS step-by-step executor (runCallRecipe) from the placeCall path entirely — the audit
 // proved runCallRecipe stalls because its waitForNode/setTimeout freeze when WhatsApp opens and
 // BENSON backgrounds. Revert: set false → falls back to the runCallRecipe / runTwoPhase path.
-const USE_NATIVE_CALL_RECIPE = true;
 
 // Map the native executor's { success, step, error, contact, elapsedMs } to a ToolCallResult.
 function mapNativeCallResult(r: { success: boolean; step: string; error: string | null; contact: string; elapsedMs: number }): ToolCallResult {
@@ -829,8 +759,7 @@ async function runCallRecipe(name: string): Promise<ToolCallResult> {
 
   // 3 — search field appears, type a 3-CHAR PREFIX of the name (B3): "Han" surfaces "Hannah"
   // without depending on WhatsApp's own fuzzy tolerance for the full string. Row matching below
-  // (resolveResultPick → pickBestPhonetic: consonantSkeleton + boundedLevenshtein over every
-  // visible row, diacritic-insensitive) still runs against the FULL spoken name.
+  // Unique exact UI target required; fuzzy/similar rows do not advance.
   const field = await waitForNode(SEARCH_INPUT_ANCHOR, 3000, 100);
   logRecipeStep(3, 'câmpul de căutare', JSON.stringify(SEARCH_INPUT_ANCHOR), field.found, field.elapsedMs);
   if (!field.found) return stopNotFound('câmpul de căutare');
@@ -923,7 +852,7 @@ async function tryDirectContactCall(name: string, callMode: 'voice_call' | 'vide
   try { perm = await getContactsPermissionState(); } catch { perm = 'undetermined'; }
   if (perm !== 'granted') {
     logAudioDiag('WA_DIRECT_FALLBACK', `reason=contacts_permission state=${perm}`);
-    return { handled: false };
+    return { handled: true, result: { outcome: 'opened_manual_action_required', error: 'Am nevoie de acces la agendă ca să identific sigur persoana. Nu am inițiat apelul.' } };
   }
 
   let contacts: TrustedContact[] = [];
@@ -938,12 +867,12 @@ async function tryDirectContactCall(name: string, callMode: 'voice_call' | 'vide
       error: 'Nu sunt sigur de nume. Spune numele din nou.' } };
   }
   if (res.status === 'not_found') {
-    logAudioDiag('WA_DIRECT_FALLBACK', 'reason=contact_not_found');
-    return { handled: false };
+    logAudioDiag('WA_DIRECT_FALLBACK', 'reason=contact_not_found action=blocked_raw_stt_search');
+    return { handled: true, result: { outcome: 'opened_manual_action_required', error: `Nu găsesc „${name}” în agendă. Spune numele din nou; nu am căutat un rezultat aproximativ în WhatsApp.` } };
   }
   if (res.status === 'missing_phone') {
-    logAudioDiag('WA_DIRECT_FALLBACK', 'reason=contact_phone_unavailable');
-    return { handled: false };
+    logAudioDiag('WA_DIRECT_FALLBACK', 'reason=contact_phone_unavailable action=blocked_raw_stt_search');
+    return { handled: true, result: { outcome: 'opened_manual_action_required', error: `Nu am un număr salvat pentru „${name}”. Nu am inițiat apelul.` } };
   }
 
   const contact = res.contact!;
@@ -1084,42 +1013,25 @@ export async function prepareMessageDirect(searchString: string, message: string
   const guard = await ensureAccessibilityReady();
   if (!guard.ready) return { handled: true, result: { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR } };
 
-  const resolved = await resolveWaNumber(name);
-  if (!resolved.ok) {
-    if (resolved.result) return { handled: true, result: resolved.result };
-    logAudioDiag('WA_WRITE_FAIL', `stage=RESOLVE_CONTACT reason=${resolved.reason}`);
-    return { handled: false, reason: resolved.reason };
-  }
-  logAudioDiag('WA_WRITE_NUMBER_READY', `name=${JSON.stringify(resolved.displayName)} tail=${resolved.phone.slice(-4)}`);
-
   try {
+    const opened = await openContactByName(name);
+    if (opened.outcome !== 'app_switch_observed') return { handled: true, result: opened };
     // ROUND_WA_WRITE_MESSAGE_PAYLOAD — the EXACT text handed across the JS→native bridge as the
     // message to type. Must equal the user's body verbatim; never the contact / wake word / STT
     // partial. BENSON_STABILIZATION_1: by construction `msg` came through handleIncomingText,
     // which only receives USER_MIC-gated transcripts or typed submits.
     logAudioDiag('WA_MESSAGE_BODY_ORIGIN', `turnId=${missionId} origin=user_mic_or_typed len=${msg.length}`);
-    logAudioDiag('WA_PAYLOAD_NATIVE_TYPE', `text=${JSON.stringify(msg)} contact=${JSON.stringify(resolved.displayName)}`);
-    const r = await runWhatsAppOpenConversationType(resolved.phone, resolved.displayName, msg, missionId);
-    logAudioDiag('WA_WRITE_RESULT', `phase=A success=${r.success} step=${r.step} elapsedMs=${r.elapsedMs}`);
+    logAudioDiag('WA_PAYLOAD_NATIVE_TYPE', `text=${JSON.stringify(msg)} targetSource=whatsapp_ui`);
+    const r = await runWhatsAppTypeCurrentConversation(msg, missionId);
+    logAudioDiag('WA_WRITE_RESULT', `phase=A_CURRENT success=${r.success} step=${r.step} elapsedMs=${r.elapsedMs}`);
     if (r.success) {
-      // ROUND_VERIFIED_IDENTITY_BRIDGE_1 — save ONLY when native reports a real header read that
-      // matched (r.nameMatch); `name` (line 1048) is exactly what the user said ("Hana"), never
-      // corrected — that's the point of the store. Never called on failure/abort/ambiguity.
-      if (r.nameMatch && r.verifiedHeaderText) {
-        recordVerifiedIdentity({
-          normalizedPhoneNumber: resolved.phone,
-          verifiedDisplayName: r.verifiedHeaderText,
-          spokenAlias: name,
-          verificationSource: 'write_header',
-        }).catch(() => {});
-      }
-      return { handled: true, displayName: resolved.displayName, result: { outcome: 'app_switch_observed', via: 'wa_write_typed_verified' } };
+      return { handled: true, displayName: r.verifiedHeaderText ?? r.contact, result: { outcome: 'app_switch_observed', via: 'wa_write_typed_verified' } };
     }
-    if (r.step === 'SERVICE') return { handled: true, displayName: resolved.displayName, result: { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR } };
-    return { handled: true, displayName: resolved.displayName, result: { outcome: 'opened_manual_action_required', error: mapWriteFailure(r.step, resolved.displayName) } };
+    if (r.step === 'SERVICE') return { handled: true, result: { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR } };
+    return { handled: true, result: { outcome: 'opened_manual_action_required', error: mapWriteFailure(r.step, name) } };
   } catch (e) {
-    devLog('runWhatsAppOpenConversationType threw', e);
-    return { handled: true, displayName: resolved.displayName, result: { outcome: 'opened_manual_action_required', error: mapWriteFailure('EXCEPTION', resolved.displayName) } };
+    devLog('WhatsApp UI message preparation threw', e);
+    return { handled: true, result: { outcome: 'opened_manual_action_required', error: mapWriteFailure('EXCEPTION', name) } };
   }
 }
 
@@ -1131,7 +1043,7 @@ export async function confirmSendMessageDirect(missionId: string, message: strin
   const state = getWhatsAppWriteState();
   logAudioDiag('WA_WRITE_SEND_ATTEMPT', `mission=${missionId} state=${JSON.stringify(state)}`);
   try {
-    const r = await pressWhatsAppSendVerified(missionId, (message ?? '').trim());
+    const r = await pressWhatsAppSendVerified(missionId, (message ?? '').trim(), displayName);
     logAudioDiag('WA_WRITE_RESULT', `phase=B success=${r.success} step=${r.step} elapsedMs=${r.elapsedMs}`);
     if (r.success) return { outcome: 'app_switch_observed', via: 'wa_write_sent_verified' };
     if (r.step === 'SERVICE') return { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR };
@@ -1166,20 +1078,16 @@ export async function readChatMessages(searchString: string, maxMessages = 10): 
   const guard = await ensureAccessibilityReady();
   if (!guard.ready) return { ok: false, reason: 'accessibility_disconnected' };
 
-  const resolved = await resolveWaNumber(name);
-  if (!resolved.ok) {
-    logAudioDiag('WA_CHAT_READ_FAIL', `stage=RESOLVE_CONTACT reason=${resolved.reason}`);
-    return resolved;
-  }
-  logAudioDiag('CONTACT_RESOLVE_SELECTED', `value=${JSON.stringify(resolved.displayName)} status=resolved method=WA2_READ`);
+  const opened = await openContactByName(name);
+  if (opened.outcome !== 'app_switch_observed') return { ok: false, reason: 'whatsapp_search', result: opened };
 
   let raw: string;
   try {
-    raw = await readWhatsAppConversationNative(resolved.phone, resolved.displayName, maxMessages);
+    raw = await readWhatsAppConversationNative('CURRENT', '', maxMessages);
   } catch (e) {
     devLog('readWhatsAppConversation threw', e);
     return { ok: false, reason: 'native_exception',
-      result: { outcome: 'opened_manual_action_required', error: `Nu am reușit să citesc conversația cu „${resolved.displayName}”.` } };
+      result: { outcome: 'opened_manual_action_required', error: 'Nu am reușit să citesc conversația WhatsApp afișată.' } };
   }
 
   let parsed: { ok: boolean; header?: string; messages?: ChatMessage[]; reason?: string };
@@ -1192,23 +1100,18 @@ export async function readChatMessages(searchString: string, maxMessages = 10): 
   if (!parsed.ok) {
     const reason = parsed.reason ?? 'unknown';
     const friendly = reason === 'OPEN_CHAT'
-      ? `Nu am reușit să deschid conversația cu „${resolved.displayName}”.`
+      ? 'Nu am reușit să deschid conversația WhatsApp.'
       : reason === 'VERIFY_CHAT'
-        ? `Am deschis WhatsApp dar nu am putut confirma conversația cu „${resolved.displayName}”.`
-        : `Nu am reușit să citesc conversația cu „${resolved.displayName}” (${reason}).`;
+        ? 'Am deschis WhatsApp dar nu am putut confirma conversația afișată.'
+        : `Nu am reușit să citesc conversația WhatsApp (${reason}).`;
     return { ok: false, reason: reason.toLowerCase(), result: { outcome: 'opened_manual_action_required', error: friendly } };
   }
 
-  return { ok: true, displayName: resolved.displayName, messages: parsed.messages ?? [] };
+  return { ok: true, displayName: parsed.header ?? 'conversația WhatsApp', messages: parsed.messages ?? [] };
 }
 
 export async function placeCall(searchString: string, uiLang: string = DEFAULT_WHATSAPP_UI_LANG, callMode: 'voice_call' | 'video_call' = 'voice_call'): Promise<ToolCallResult> {
   const name = searchString.trim();
-  // WA-CONTACT-TRACE — the value handed to the native executor. `searchString` is exactly the
-  // parsed transcript name after buildCallSearchString() clitic-strip in missionValidator (no
-  // contact-list resolution, no fuzzy match, no fallback for placeCall). `name` is what
-  // runWhatsAppCallNative receives and types into WhatsApp's own search. WhatsApp then does its
-  // OWN fuzzy row match ("Hana" -> the "Hannah" row), logged natively as WA_NATIVE_CONTACT_MATCH.
   logAudioDiag('WA_CONTACT_INPUT', `stage=placeCall received=${JSON.stringify(searchString)} native=${JSON.stringify(name)}`);
   if (!name) return { outcome: 'launch_failed', error: 'Nu mi-ai spus pe cine să caut.' };
 
@@ -1218,43 +1121,114 @@ export async function placeCall(searchString: string, uiLang: string = DEFAULT_W
     return { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR };
   }
 
-  // WA-FIX-4 — PRIMARY: resolve the name locally and open the exact conversation directly. Only
-  // when local resolution is unavailable (no permission / not found / no number) does this return
-  // { handled: false } and control drops through to the UI-search route below.
-  const direct = await tryDirectContactCall(name, callMode);
-  if (direct.handled) return direct.result;
-  logAudioDiag('WA_DIRECT_FALLBACK', 'reason=falling_back_to_ui_search');
+  return runTwoPhase(name, uiLang, { kind: 'call', callMode });
+}
 
-  // WA-NATIVE-FINAL — one native call runs the whole sequence, background-proof. No JS
-  // step-by-step executor, no enterPipMode (the native flow owns the foreground now).
-  if (USE_NATIVE_CALL_RECIPE) {
-    try {
-      const r = await runWhatsAppCallNative(name, callMode);
-      // ROUND_VERIFIED_IDENTITY_BRIDGE_1 — no phone/contactId known on this fallback (UI-search)
-      // route by definition; still worth recording the verified display name <-> spoken alias so
-      // resolvePerson()'s alias match works next time, even without a stable merge key.
-      if (r.success && r.nameMatch && r.verifiedHeaderText) {
-        recordVerifiedIdentity({
-          verifiedDisplayName: r.verifiedHeaderText,
-          spokenAlias: name,
-          verificationSource: 'call_header',
-        }).catch(() => {});
+/** Phase A: navigate to a unique exact WhatsApp result and return its observed chat title. */
+export async function prepareCallTarget(searchString: string, uiLang: string = DEFAULT_WHATSAPP_UI_LANG): Promise<ToolCallResult> {
+  return openContactByName(searchString, uiLang);
+}
+
+async function verifyCallScreenAfterTap(expectedTitle: string, mode: 'voice_call' | 'video_call'): Promise<ToolCallResult> {
+  const deadline = Date.now() + 6500;
+  let lastPackage = getForegroundPackage() ?? undefined;
+  let lastViewIds: string[] = [];
+  let lastName = '';
+  while (Date.now() < deadline) {
+    const snap = await getScreenSnapshot();
+    if (snap) {
+      lastPackage = snap.packageName;
+      lastViewIds = snap.nodes.map((n) => n.viewId ?? '').filter(Boolean);
+      lastName = snap.nodes.find((n) => {
+        const id = n.viewId ?? '';
+        return /\/(?:call_screen_contact_name|contact_name|call_screen_header_view|subtitle|name|title)$/.test(id) && !!n.text?.trim();
+      })?.text?.trim() ?? '';
+      const callScreen = snap.packageName === WHATSAPP_PACKAGE && isObservedCallScreen(lastViewIds);
+      const nameMatches = !!lastName && normNameLoose(lastName) === normNameLoose(expectedTitle);
+      const videoState = mode !== 'video_call' || hasObservedVideoCallState(snap.nodes);
+      logAudioDiag('WA_CALL_POST_TAP_OBSERVE', `mode=${mode} package=${JSON.stringify(snap.packageName)} callScreen=${callScreen} videoState=${videoState} nameMatch=${nameMatches} callViewIds=${JSON.stringify(lastViewIds.filter((id) => isObservedCallScreen([id])).slice(0, 8))}`);
+      if (callScreen && lastName && !nameMatches) {
+        return { outcome: 'opened_manual_action_required', via: 'whatsapp_call_screen_wrong_target', error: 'WhatsApp a afișat un ecran de apel cu alt nume. Nu continui.', observedPackage: snap.packageName, observedViewIds: lastViewIds };
       }
-      return mapNativeCallResult(r);
-    } catch (e) {
-      devLog('placeCall: native executor threw', e);
-      return { outcome: 'opened_manual_action_required', error: 'Nu am reușit să duc apelul la capăt în WhatsApp.' };
+      if (callScreen && mode === 'video_call' && !videoState) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 250));
+        continue;
+      }
+      if (callScreen && nameMatches) {
+        return { outcome: 'app_switch_observed', via: `whatsapp_verified_${mode}_screen`, verifiedTarget: expectedTitle, observedPackage: snap.packageName, observedViewIds: lastViewIds };
+      }
     }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
   }
+  logAudioDiag('WA_CALL_POST_TAP_UNVERIFIED', `mode=${mode} package=${JSON.stringify(lastPackage ?? '')} observedIds=${JSON.stringify(lastViewIds.slice(0, 24))}`);
+  return { outcome: 'opened_manual_action_required', via: 'whatsapp_call_screen_not_verified', error: 'Am apăsat controlul de apel, dar nu pot verifica ecranul apelului WhatsApp. Nu voi repeta apăsarea.', observedPackage: lastPackage, observedViewIds: lastViewIds };
+}
 
-  enterPipBeforeWhatsApp();
-  setWhatsAppAutomationActive(true);
+/** Phase B: after explicit confirmation, call only the still-visible, title-matched WhatsApp chat. */
+export async function placeCallInCurrentConversation(expectedTitle: string, callMode: 'voice_call' | 'video_call' = 'voice_call'): Promise<ToolCallResult> {
+  const expected = expectedTitle.trim();
+  if (!expected) return { outcome: 'opened_manual_action_required', error: 'Nu am un chat WhatsApp verificat pentru apel.' };
+  const guard = await ensureAccessibilityReady();
+  if (!guard.ready) return { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR };
+  if (getForegroundPackage() !== WHATSAPP_PACKAGE) return { outcome: 'opened_manual_action_required', error: 'WhatsApp nu mai este în conversația confirmată. Nu am inițiat apelul.' };
+  const snap = await getScreenSnapshot();
+  const title = snap?.packageName === WHATSAPP_PACKAGE
+    ? snap.nodes.find((n) => (n.viewId ?? '').endsWith('/conversation_contact_name'))?.text?.trim() ?? ''
+    : '';
+  if (!title || normNameLoose(title) !== normNameLoose(expected)) return { outcome: 'opened_manual_action_required', error: 'Conversația WhatsApp nu mai corespunde țintei confirmate. Nu am inițiat apelul.' };
+  const isVideo = callMode === 'video_call';
+  const videoStrategies: SelStrategy[] = [
+    { by: 'viewId', match: { viewIdContains: 'menuitem_video_call' }, note: 'viewIdContains:menuitem_video_call' },
+    { by: 'viewId', match: { viewIdContains: 'video_call' }, note: 'viewIdContains:video_call' },
+    ...['video call', 'videoanruf', 'apel video'].map((label) => ({ by: 'text' as const, match: { textContains: label, clickable: true }, note: `text:${label}` })),
+  ];
+  const call = await clickResilient(isVideo ? videoStrategies : VOICECALL_STRATEGIES, isVideo ? 'butonul de apel video' : 'butonul de apel vocal', 11, 3000);
+  if (!call.success) return { outcome: 'opened_manual_action_required', error: `Nu am găsit sigur butonul de apel în conversația cu ${title}.` };
+  logAudioDiag('WA_CALL_CONTROL_TAPPED', `mode=${isVideo ? 'video_call' : 'voice_call'} verifiedChat=${JSON.stringify(title)}`);
+  return verifyCallScreenAfterTap(title, callMode);
+}
+
+/** A correction may back out one observed app screen. Never force-stop and never back out of a
+ * WhatsApp call screen, because the user has not explicitly asked to end that call. */
+export async function backFromObservedMissionScreen(observedPackage?: string): Promise<ToolCallResult> {
+  const guard = await ensureAccessibilityReady();
+  if (!guard.ready) return { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR };
+  const beforePackage = getForegroundPackage() ?? '';
+  if (!beforePackage || !observedPackage || beforePackage !== observedPackage || beforePackage === 'com.benson.butler') {
+    return { outcome: 'opened_manual_action_required', error: 'Ecranul curent nu mai corespunde acțiunii precedente; nu am navigat înapoi.' };
+  }
+  const before = await getScreenSnapshot();
+  if (!before || before.packageName !== beforePackage) return { outcome: 'opened_manual_action_required', error: 'Nu pot verifica ecranul curent; nu am navigat înapoi.' };
+  const beforeIds = before.nodes.map((n) => n.viewId ?? '').filter(Boolean);
+  if (beforePackage === WHATSAPP_PACKAGE && isObservedCallScreen(beforeIds)) {
+    return { outcome: 'opened_manual_action_required', error: 'Ecranul arată un apel WhatsApp activ. Nu îl închei prin „înapoi”; spune explicit „încheie apelul” dacă asta dorești.', observedPackage: beforePackage, observedViewIds: beforeIds };
+  }
+  const didBack = await accessibilityGoBack().catch(() => false);
+  if (!didBack) return { outcome: 'opened_manual_action_required', error: 'Nu am reușit să revin de la ecranul deschis.' };
+  await new Promise<void>((resolve) => setTimeout(resolve, 450));
+  const after = await getScreenSnapshot();
+  const afterPackage = getForegroundPackage() ?? after?.packageName ?? '';
+  const afterIds = after?.nodes.map((n) => n.viewId ?? '').filter(Boolean) ?? [];
+  const changed = !!after && (afterPackage !== beforePackage || afterIds.join('|') !== beforeIds.join('|'));
+  logAudioDiag('MISSION_CONTEXT_BACK_VERIFY', `beforePackage=${JSON.stringify(beforePackage)} afterPackage=${JSON.stringify(afterPackage)} changed=${changed}`);
+  return changed
+    ? { outcome: 'app_switch_observed', via: 'verified_accessibility_back', observedPackage: afterPackage, observedViewIds: afterIds }
+    : { outcome: 'opened_manual_action_required', error: 'Am cerut revenirea, dar ecranul nu s-a schimbat verificabil.', observedPackage: afterPackage, observedViewIds: afterIds };
+}
+
+/** Writes only into the visible WhatsApp conversation, preserving the user's current target. */
+export async function prepareMessageInCurrentConversation(message: string, missionId: string): Promise<WriteAttempt> {
+  if (!WA_WRITE_DIRECT) return { handled: false, reason: 'wa_write_direct_disabled' };
+  const guard = await ensureAccessibilityReady();
+  if (!guard.ready) return { handled: true, result: { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR } };
   try {
-    return USE_LEGACY_CALL_RECIPE
-      ? await runTwoPhase(name, uiLang, { kind: 'call' })
-      : await runCallRecipe(name);
-  } finally {
-    setWhatsAppAutomationActive(false);
+    const r = await runWhatsAppTypeCurrentConversation(message, missionId);
+    if (r.success && r.step === 'TYPED_VERIFIED') return { handled: true, displayName: r.verifiedHeaderText ?? r.contact, result: { outcome: 'app_switch_observed', via: 'wa_write_typed_verified' } };
+    if (r.step === 'SERVICE') return { handled: true, result: { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR } };
+    return { handled: true, result: { outcome: 'opened_manual_action_required', error: `Nu am scris: ${r.step}. ${r.error ?? ''}`.trim() } };
+  } catch (e) {
+    devLog('runWhatsAppTypeCurrentConversation threw', e);
+    return { handled: true, result: { outcome: 'opened_manual_action_required', error: 'Nu am putut verifica conversația WhatsApp curentă.' } };
   }
 }
 
@@ -1269,12 +1243,7 @@ export async function openContactByName(searchString: string, uiLang: string = D
     return { outcome: 'launch_failed', error: ACCESSIBILITY_DISCONNECTED_ERROR };
   }
   enterPipBeforeWhatsApp();
-  setWhatsAppAutomationActive(true);
-  try {
-    return await runTwoPhase(name, uiLang, { kind: 'open' });
-  } finally {
-    setWhatsAppAutomationActive(false);
-  }
+  return runTwoPhase(name, uiLang, { kind: 'open' });
 }
 
 // ROUND_WA_GOVERNANCE_ROUTING — `sendMessageByName` REMOVED (see the note where `sendMessage`

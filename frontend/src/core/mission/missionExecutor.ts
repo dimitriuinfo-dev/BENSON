@@ -57,7 +57,9 @@ function requiredConfirmationFor(tool: ToolName, action: MissionAction): boolean
     // WhatsApp. Confirmi?") — that's the user's chance to catch a wrong match before it dials,
     // which "no confirmation for calls" traded away. A sent message stays gated for the same
     // reason it always was: it can't be recalled the way an unanswered call can be hung up.
-    return action === 'openContact' || action === 'prepareMessage' || action === 'placeCall';
+    // Opening a chat is reversible navigation, so execute it after validation without a
+    // confirmation round-trip. Sending and calls remain explicitly gated.
+    return action === 'prepareMessage' || action === 'placeCall';
   }
   return false; // waze: navigation is never gated behind confirmation in this phase
 }
@@ -153,7 +155,24 @@ export async function execute(request: ActionRequest, options: { confirmed?: boo
 
     let gateRequest: ActionRequest = enrichedRequest;
     let confirmMessage: string;
-    if (phaseA.kind === 'typed') {
+    if (enrichedRequest.tool === 'whatsapp' && enrichedRequest.action === 'placeCall') {
+      const uiLang = typeof enrichedRequest.params.uiLang === 'string' ? enrichedRequest.params.uiLang : undefined;
+      const prepared = await whatsappTool.prepareCallTarget(String(enrichedRequest.params.contactName ?? ''), uiLang);
+      if (prepared.outcome !== 'app_switch_observed' || !prepared.verifiedTarget) {
+        const message = prepared.error ?? 'Nu am putut verifica numele conversației în WhatsApp. Nu am inițiat apelul.';
+        mission = (await transitionMission('Failed', { reason: message, userMessage: message }))!;
+        await clearIfTerminal();
+        return { mission, message };
+      }
+      const mode = enrichedRequest.params.mode === 'video_call' ? 'video_call' : 'voice_call';
+      const target = prepared.verifiedTarget;
+      const spokenTarget = whatsappTool.safeWhatsAppDisplayName(target) || 'contactul ales';
+      gateRequest = {
+        ...enrichedRequest,
+        params: { ...enrichedRequest.params, waCallPrepared: true, waCallVerifiedTarget: target },
+      };
+      confirmMessage = `Am găsit conversația „${spokenTarget}” în WhatsApp. Pornesc apelul ${mode === 'video_call' ? 'video' : 'audio'} cu ${spokenTarget} pe WhatsApp?`;
+    } else if (phaseA.kind === 'typed') {
       // Carry the send parameters through the confirmation round-trip on the persisted request.
       gateRequest = {
         ...enrichedRequest,
@@ -184,7 +203,7 @@ export async function execute(request: ActionRequest, options: { confirmed?: boo
   // & verified at mission-create: this is the SEND. confirmSendMessageDirect is idempotent in
   // native (SEND_ATTEMPTED persisted before the tap → a re-entry re-VERIFIES, never re-presses),
   // and refuses to send unless identity + typed text were verified earlier.
-  let result: { outcome: LaunchOutcome; via?: string; error?: string };
+  let result: { outcome: LaunchOutcome; via?: string; error?: string; observedPackage?: string; observedViewIds?: string[] };
   if (enrichedRequest.params.waWriteTyped === true) {
     const missionId = String(enrichedRequest.params.waWriteMissionId ?? enrichedRequest.id);
     const message = String(enrichedRequest.params.waWriteMessage ?? enrichedRequest.params.message ?? '');
@@ -211,11 +230,27 @@ export async function execute(request: ActionRequest, options: { confirmed?: boo
   }
 
   const waitingMessage = buildWaitingUserMessage(enrichedRequest, result);
-  mission = (await transitionMission('WaitingUser', { userMessage: waitingMessage }))!;
-  return { mission, message: waitingMessage };
+  const userSafeWaitingMessage = enrichedRequest.tool === 'whatsapp'
+    ? whatsappTool.safeWhatsAppDisplayName(waitingMessage)
+    : waitingMessage;
+  mission = (await transitionMission('WaitingUser', {
+    userMessage: userSafeWaitingMessage,
+    lastAction: {
+      tool: enrichedRequest.tool,
+      action: enrichedRequest.action,
+      target: typeof enrichedRequest.params.waCallVerifiedTarget === 'string'
+        ? enrichedRequest.params.waCallVerifiedTarget
+        : typeof enrichedRequest.params.contactName === 'string' ? enrichedRequest.params.contactName : undefined,
+      mode: typeof enrichedRequest.params.mode === 'string' ? enrichedRequest.params.mode : undefined,
+      outcome: result.outcome,
+      observedPackage: result.observedPackage,
+      observedViewIds: result.observedViewIds,
+    },
+  }))!;
+  return { mission, message: userSafeWaitingMessage };
 }
 
-async function runTool(request: ActionRequest): Promise<{ outcome: LaunchOutcome; via?: string; error?: string }> {
+async function runTool(request: ActionRequest): Promise<{ outcome: LaunchOutcome; via?: string; error?: string; observedPackage?: string; observedViewIds?: string[] }> {
   if (request.tool === 'waze') {
     if (request.action === 'openApp') return wazeTool.openApp();
     const destination = String(request.params.destination ?? '');
@@ -223,6 +258,12 @@ async function runTool(request: ActionRequest): Promise<{ outcome: LaunchOutcome
   }
   if (request.action === 'openApp') return whatsappTool.openApp();
   if (request.action === 'placeCall') {
+    if (request.params.waCallPrepared === true) {
+      return whatsappTool.placeCallInCurrentConversation(
+        String(request.params.waCallVerifiedTarget ?? ''),
+        request.params.mode === 'video_call' ? 'video_call' : 'voice_call',
+      );
+    }
     // No phone number: WhatsApp's own search is used by name, same as a human would. uiLang
     // (WhatsApp's own display language, not BENSON's app language — the two can differ, as
     // confirmed on this device) isn't populated by any caller yet; whatsappTool.placeCall
@@ -308,7 +349,9 @@ async function maybeRunWhatsAppWritePhaseA(request: ActionRequest): Promise<Phas
   if (!message) {
     logAudioDiag('WA_MSG_ROUTE_FAIL', 'reason=MESSAGE_BODY_MISSING');
     logAudioDiag('WA_MSG_OLD_FALLBACK_BLOCKED', 'reason=message_body_missing');
-    return { kind: 'failed', reason: 'MESSAGE_BODY_MISSING', userMessage: `Ce să-i scriu lui ${contact || 'acel contact'}?` };
+    return { kind: 'failed', reason: 'MESSAGE_BODY_MISSING', userMessage: request.params.currentChat === true
+      ? 'Ce să scriu în conversația WhatsApp deschisă?'
+      : `Ce să-i scriu lui ${contact || 'acel contact'}?` };
   }
 
   if (!whatsappTool.WA_WRITE_DIRECT) {
@@ -316,7 +359,9 @@ async function maybeRunWhatsAppWritePhaseA(request: ActionRequest): Promise<Phas
     return { kind: 'failed', reason: 'WA_WRITE_DISABLED', userMessage: 'Scrierea de mesaje pe WhatsApp e dezactivată momentan.' };
   }
 
-  const attempt = await whatsappTool.prepareMessageDirect(contact, message, request.id);
+  const attempt = request.params.currentChat === true
+    ? await whatsappTool.prepareMessageInCurrentConversation(message, request.id)
+    : await whatsappTool.prepareMessageDirect(contact, message, request.id);
 
   // Local contact resolution failed → CONTACT_UNRESOLVED / CONTACTS_PERMISSION. NO fallback to
   // the old open/search flow. ContactResolver's own ambiguity question (if any) is surfaced as-is.
@@ -358,22 +403,8 @@ function buildConfirmationPrompt(request: ActionRequest): string {
     return `Deschid WhatsApp și deschid conversația cu "${searchString}". Confirmi?`;
   }
   if (request.tool === 'whatsapp' && request.action === 'placeCall') {
-    // BENSON CONTACT+CALL round (2026-09-23) — missionValidator.ts now resolves the contact BEFORE
-    // this prompt is built (doctrine reversal, see its own comment); phoneNumber present means a
-    // real address-book match, shown here per the round's explicit requirement. Its absence means
-    // local resolution genuinely failed and WhatsApp's own search is about to run as an UNCONFIRMED
-    // fallback — said honestly, never phrased as if a specific contact were already found.
     const contactName = String(request.params.contactName ?? '');
-    const phoneNumber = typeof request.params.phoneNumber === 'string' ? request.params.phoneNumber : '';
-    if (phoneNumber) {
-      return `Îl/o sun pe ${contactName} (${phoneNumber}) pe WhatsApp. Confirmi?`;
-    }
-    // HONEST LIMIT (see this round's report, "remaining gap"): the fallback below still can't show
-    // the WhatsApp-found name before dialing (that needs a native search/confirm split not built
-    // this round) — it only verifies AFTER the call connects, via the call-screen header, and says
-    // so plainly if the name doesn't match. This prompt asks consent for THAT search-and-call, not
-    // a shown candidate.
-    return `Nu găsesc "${contactName}" în agenda telefonului. Caut direct în WhatsApp și sun primul rezultat — nu pot confirma numele înainte de apel, doar după ce răspunde. Confirmi?`;
+    return `Caut „${contactName}” în WhatsApp și inițiez apelul numai către conversația cu numele exact. Confirmi?`;
   }
   return 'Confirmi?';
 }
@@ -411,7 +442,7 @@ function buildWaitingUserMessage(
       : 'Am solicitat deschiderea traseului în Waze.';
   }
   if (request.action === 'placeCall') {
-    const contact = String(request.params.contactName ?? 'contact');
+    const contact = whatsappTool.safeWhatsAppDisplayName(String(request.params.contactName ?? 'contact')) || 'contactul ales';
     if (result.via === 'chat_opened') {
       // Honest fallback (Item 3): the call-button couldn't be verified safely, so nothing was
       // tapped — the chat is left open exactly as found, for the user to tap manually.
@@ -423,7 +454,7 @@ function buildWaitingUserMessage(
       // reason as-is; only fall back to a generic line if it somehow didn't set one.
       return result.error ?? `Nu am reușit să sun pe ${contact} pe WhatsApp.`;
     }
-    return `L-am sunat pe ${contact} pe WhatsApp.`;
+    return `WhatsApp a preluat comanda de apel pentru ${contact}. Verifică în aplicație dacă apelul a fost conectat.`;
   }
   if (request.action === 'endCall') {
     if (result.outcome === 'opened_manual_action_required') {
@@ -499,6 +530,21 @@ const CANCEL_PATTERN = /\b(anuleaz[ăa]|cancel|renun[țt])\b/i;
 export async function resolveActiveMissionFromUtterance(text: string): Promise<ExecuteOutcome | null> {
   const mission = getActiveMission();
   if (!mission || mission.state !== 'WaitingUser') return null;
+
+  const correction = /^(?:nu\s+(?:asta|aia|acela|aceea)|nu\s+asta|înapoi|inapoi|revino|închide(?:-o|\s+o|\s+asta|\s+ecranul)?|inchide(?:-o|\s+o|\s+asta|\s+ecranul)?|back|close\s+it|not\s+that)[.!?\s]*$/i.test(text.trim());
+  if (correction && mission.lastAction?.tool === 'whatsapp' && mission.lastAction.action === 'placeCall') {
+    const back = await whatsappTool.backFromObservedMissionScreen(mission.lastAction.observedPackage);
+    logAudioDiag('MISSION_CONTEXT_CORRECTION', `missionId=${mission.id} action=${mission.lastAction.action} mode=${mission.lastAction.mode ?? ''} back=${back.via ?? back.outcome}`);
+    if (back.outcome === 'opened_manual_action_required' && /apel WhatsApp activ/i.test(back.error ?? '')) {
+      return { mission, message: back.error! };
+    }
+    const cancelled = await transitionMission('Cancelled', {
+      userMessage: back.outcome === 'app_switch_observed' ? 'Am revenit de la ecranul acțiunii anterioare și am anulat pașii rămași.' : (back.error ?? 'Am anulat pașii rămași ai misiunii.'),
+      lastAction: { ...mission.lastAction, observedPackage: back.observedPackage ?? mission.lastAction.observedPackage, observedViewIds: back.observedViewIds ?? mission.lastAction.observedViewIds },
+    });
+    await clearIfTerminal();
+    return cancelled ? { mission: cancelled, message: cancelled.userMessage } : null;
+  }
 
   if (CANCEL_PATTERN.test(text)) {
     const cancelled = await transitionMission('Cancelled', { userMessage: 'Am anulat misiunea.' });

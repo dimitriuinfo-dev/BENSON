@@ -1,4 +1,4 @@
-// BENSON Action Engine — Intent Engine (Module 3).
+﻿// BENSON Action Engine — Intent Engine (Module 3).
 // Deterministic regex cascade (Romanian/German/English), converting raw text into an
 // ActionRequest. No contact resolution, no saved-place resolution, no executor calls, no
 // Claude — all of that happens downstream of this, later. Anything unmatched becomes CHAT.
@@ -64,6 +64,7 @@ const OPEN_WHATSAPP_PATTERN = /\b(?:deschide|porne[șs]te|intr[ăa]\s+pe|vreau|p
 // (?:[- ]?i\b)? not (?:-i)?: this device's STT drops the clitic hyphen ("scrie-i" → "scrie i").
 const WHATSAPP_MESSAGE_NOBODY_PATTERNS: RegExp[] = [
   new RegExp(`\\btrimite\\s+whatsapp\\s+lui\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: trimite WhatsApp lui Hannah
+  new RegExp(`\\btrimite\\s+(?:un\\s+)?mesaj\\s+(?:lui\\s+)?(.+?)\\s+pe\\s+whats(?:app)?[.!?]?${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: trimite mesaj lui Hannah pe WhatsApp
   /\bscrie(?:[- ]?i\b)?\s+(?:lui\s+)?(.+?)\s+(?:un\s+mesaj\s+)?pe\s+whats(?:app)?\b/i, // RO: scrie-i lui Hannah pe WhatsApp
   /\bschreib\s+(.+?)\s+auf\s+whatsapp\b/i, // DE: schreib Hannah auf WhatsApp
 ];
@@ -72,6 +73,13 @@ const WHATSAPP_MESSAGE_NOBODY_PATTERNS: RegExp[] = [
 // WhatsApp", "open the chat with Hannah on WhatsApp", "WhatsApp with Hannah". A distinct
 // capability from messaging; NEVER produced as a fallback from a failed message parse.
 const WHATSAPP_OPEN_CHAT_PATTERNS: RegExp[] = [
+  // Voice proof 2026-09-30: STT rendered “WhatsApp” as “what's up” in
+  // “open the WhatsApp chat with Baby”. Keep this in the WhatsApp/contact route; otherwise the
+  // generic app resolver sees the unrelated word “chat” and can select DeepSeek by package name.
+  new RegExp(
+    `\\b(?:open|show|launch|öffne|deschide)\\s+(?:the\\s+)?(?:whats\\s*app|what['’]?s\\s+up)\\s+(?:chat|conversation)\\s+(?:with|cu)\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`,
+    'i',
+  ),
   new RegExp(
     `\\b(?:deschide|deschide-?mi|arat[ăa]-?mi|open|show|öffne)\\s+(?:-?mi\\s+)?(?:conversa[țt]ia|conversatia|discu[țt]ia|discutia|chat(?:ul)?|the\\s+chat)\\s+(?:cu\\s+|with\\s+)?(.+?)(?:\\s+(?:pe|auf|on)\\s+whats(?:app)?)?${NEXT_CLAUSE_BOUNDARY}`,
     'i',
@@ -130,6 +138,7 @@ const WHATSAPP_VIDEO_CALL_PATTERNS: RegExp[] = [
   new RegExp(`\\bsun.?-?[oli]?\\s+(?:(?:o|l|le|il)\\s+)?video\\s+(?:pe\\s+)?(.+?)\\s+pe\\s+whats(?:app)?\\b`, 'i'),
   new RegExp(`\\bsun.?-?[oli]?\\s+(?:(?:o|l|le|il)\\s+)?(?:pe\\s+|la\\s+|lui\\s+)?(.+?)\\s+pe\\s+whats(?:app)?\\s+video\\b`, 'i'),
   new RegExp(`\\bvideoanruf\\s+(?:mit\\s+)?(.+?)\\s+(?:ueber|auf)\\s+whats(?:app)?\\b`, 'i'),
+  new RegExp(`\\bf[ăa]\\s+(?:un\\s+)?video\\s*call\\s+(?:cu|mit)\\s+(.+?)[.!?]?${NEXT_CLAUSE_BOUNDARY}`, 'i'), // natural speech: fă videocall cu Hannah (WhatsApp default)
 ];
 
 // Channel-ambiguous "send this message to X" — no app named at all ("scrie-i lui Hannah că
@@ -164,7 +173,7 @@ const NAVIGATE_PATTERNS: RegExp[] = [
   // bug already fixed elsewhere in this file (WHATSAPP_CONTACT_PATTERNS, CONTACTS_SEARCH_PATTERNS)
   // but missed here.
   new RegExp(`\\bdu[- ]?m[ăa]\\s+(?:la\\s+|spre\\s+)?(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: du-mă acasă / du-mă la Sibiu / du-mă spre Sibiu
-  new RegExp(`\\bnavigheaz[ăa]\\s+(?:la\\s+|spre\\s+)?(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: navighează la Sibiu
+  new RegExp(`\\bnavigheaz[ăa]\\s+(?:la\\s+|spre\\s+)(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: navighează la Sibiu; “cu Waze” alone is an app cue, not a destination
   new RegExp(`\\b(?:merg|plec|vreau\\s+s[ăa]\\s+merg|hai)\\s+(?:la\\s+|spre\\s+)(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: merg la Sibiu / plec la Sibiu / hai spre Sibiu
   new RegExp(`\\bcaut[ăa]-?mi\\s+drumul\\s+spre\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: caută-mi drumul spre cabinet
   new RegExp(`\\bfahr\\s+(?:nach|zu)\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // DE: fahr nach Sibiu
@@ -212,6 +221,7 @@ const CONTACTS_LIST_PATTERN =
 // enough to avoid the plain NAVIGATE/OPEN_APP phrasings elsewhere in this file.
 const CONTACTS_SEARCH_PATTERNS: RegExp[] = [
   new RegExp(`\\bcine\\s+e(?:ste)?\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'), // RO: cine e Hannah / cine este Hannah
+  new RegExp(`\\bcaut(?:a|\\u0103)\\s+(?:contactul|persoana)\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`, 'i'),
   // [- ]? not a bare literal hyphen: confirmed live 2026-07-17 — this device's STT drops the
   // clitic hyphen entirely ("caută-l" transcribed as "caută l"), and a required literal "-"
   // here made the whole pattern fail to match at all, falling through to Claude instead of the
@@ -284,6 +294,11 @@ const OPEN_APP_PATTERN = new RegExp(
 const HELP_PATTERN =
   /\b(?:ce\s+[șs]tii\s+(?:s[ăa]\s+)?faci|ce\s+faci\b|ce\s+func[țt]ii\s+ai|cum\s+m[ăa]\s+ajut[ăa]|ajutor|help|capabilities)\b/i;
 
+const EMAIL_RECIPIENT_PATTERN = new RegExp(
+  `\\b(?:trimite|scrie|send|write)\\s+(?:un\\s+)?(?:e-?mail|email)\\s+(?:lui|c[ăa]tre|to|an)\\s+(.+?)${NEXT_CLAUSE_BOUNDARY}`,
+  'i',
+);
+
 // Trailing sentence punctuation left over from STT/typed text ("Hannah.", "Munich Airport,")
 // is never meaningful in a captured name/destination — stripped here once so every pattern's
 // capture benefits instead of leaking a stray period into a contact-match or map query.
@@ -334,6 +349,11 @@ function classify(text: string): ParseResult {
 
   if (HELP_PATTERN.test(text)) {
     return { intent: 'HELP', parameters: {}, confidence: 1.0 };
+  }
+
+  const emailRecipient = text.match(EMAIL_RECIPIENT_PATTERN)?.[1]?.trim();
+  if (emailRecipient) {
+    return { intent: 'EMAIL_ACTION', parameters: { recipientName: stripTrailingPunctuation(emailRecipient), channel: 'email' }, confidence: 0.9 };
   }
 
   // WhatsApp voice-call phrasing — checked before plain CALL_CONTACT_PATTERNS so "pe whatsapp"
@@ -427,6 +447,13 @@ function classify(text: string): ParseResult {
     return { intent: 'MESSAGE_CONTACT', parameters: { contactName, message, channel: 'whatsapp' }, confidence };
   };
 
+  // Explicit "scrie aici" targets only the currently visible WhatsApp conversation; the native
+  // executor later requires both WhatsApp foreground and an observed chat title + composer.
+  const writeHere = text.match(/^\s*(?:scrie|write)\s+aici\s*[:,]?\s*(.*?)\s*[.!?]*\s*$/i);
+  if (writeHere) {
+    return { intent: 'MESSAGE_CONTACT', parameters: { contactName: 'current conversation', currentChat: true, message: sanitizeMessageBody(writeHere[1] ?? ''), channel: 'whatsapp' }, confidence: 1.0 };
+  }
+
   // 1a. "write X on whatsapp Y"
   const whatsappMessageEn = text.match(WHATSAPP_MESSAGE_EN_PATTERN);
   if (whatsappMessageEn && whatsappMessageEn[1]?.trim()) {
@@ -516,6 +543,7 @@ const CONFIRMATION_REQUIRED_INTENTS: ActionIntent[] = [
   'OPEN_WHATSAPP_CONTACT',
   'MESSAGE_CONTACT',
   'FAMILY_LOCATION',
+  'EMAIL_ACTION',
 ];
 
 export function parseCommandToActionRequest(rawText: string, source: ActionSource): ActionRequest {

@@ -45,58 +45,14 @@ async function validateWhatsAppParams(
   if (request.action === 'openApp' || request.action === 'endCall' || request.action === 'muteCall') return null;
 
   const contactName = typeof request.params.contactName === 'string' ? request.params.contactName.trim() : '';
+  if (request.action === 'prepareMessage' && request.params.currentChat === true) {
+    const message = typeof request.params.message === 'string' ? request.params.message : '';
+    if (!message.trim()) return null; // executor asks for the body and retains this target context
+    return { valid: true, enrichedParams: { contactName: 'current conversation', currentChat: true } };
+  }
   if (!contactName) return { valid: false, reason: 'Contact name is missing.' };
 
-  // Doctrine REVERSED (2026-09-23, BENSON CONTACT+CALL round, explicitly authorized for both call
-  // paths — see missionPlanner.ts's own matching note): the 2026-07-31 decision below disconnected
-  // device-contacts resolution from placeCall entirely, so BENSON never knew who it was actually
-  // calling before dialing — it just typed a cleaned name into WhatsApp's own search and trusted
-  // whichever row WhatsApp matched first. Real resolution now runs HERE, so the confirmation prompt
-  // (missionExecutor.ts's buildConfirmationPrompt) can show the real name + number, and dialing
-  // uses a real E.164 number instead of a blind name search. WhatsApp's own in-app search is kept
-  // ONLY as a fallback for a name genuinely not in the device address book — that remains a
-  // best-effort, NOT a confirmed identity (see whatsappTool.ts's tryDirectContactCall, which still
-  // independently re-resolves and verifies the on-screen call header before treating it as done).
-  //
-  // Prior text (2026-07-31, product-owner-directed, now superseded): "the WhatsApp call route no
-  // longer reads the phone's contact list at all — BENSON governs WhatsApp's own UI (search by
-  // name, tap the first result, tap call), the same way a human would." buildCallSearchString still
-  // exists and is still used for the fallback (it only strips leaked Romanian clitics/prepositions,
-  // never touches contacts).
-  if (request.action === 'placeCall') {
-    const resolved = await whatsappTool.resolveContact(contactName, contacts);
-    if (resolved.status === 'resolved' && resolved.contact) {
-      const e164 = whatsappTool.toE164(resolved.contact.phoneNumbers?.[0] ?? '');
-      if (e164) {
-        return {
-          valid: true,
-          enrichedParams: {
-            contactName: resolved.contact.displayName,
-            phoneNumber: e164,
-            contactId: resolved.contact.id,
-            channel: 'whatsapp',
-          },
-        };
-      }
-      // Resolved locally but no country-code-qualified number — can't confirm a real E.164, fall
-      // through to the name-search fallback rather than guess at a dial-able number.
-    }
-    if (resolved.status === 'ambiguous') {
-      // BENSON CONTACT+CALL round (2026-09-23) fix, found on-device: this used to build its own
-      // "Multiple contacts match X: <names>" message — but resolveContact() (contactResolver.ts,
-      // BENSON_STABILIZATION_1) deliberately caps `candidates` to ONE entry and never enumerates
-      // names to the user, so that message always showed exactly one name (not "multiple", and not
-      // necessarily the one the caller meant) alongside a confusing "multiple" claim. Use its own,
-      // correct, already-bounded prompt instead of re-deriving a misleading one here.
-      return { valid: false, reason: resolved.message };
-    }
-    // not_found / missing_phone / no-qualified-number — WhatsApp's own search, as an EXPLICITLY
-    // unconfirmed fallback (per user instruction: never auto-select the first result silently).
-    const searchString = whatsappTool.buildCallSearchString(contactName);
-    if (!searchString) return { valid: false, reason: 'No name was given to search for.' };
-    return { valid: true, enrichedParams: { contactName: searchString } };
-  }
-
+  // Resolve WhatsApp targets using its live search results and verified conversation header.
   // ROUND_WHATSAPP_REPLY_REGRESSION_1 — an empty message for prepareMessage is NOT a validation
   // failure: missionExecutor.ts's maybeRunWhatsAppWritePhaseA already handles this case by design
   // (asks "Ce să-i scriu lui X?" and keeps the mission alive for the reply — see its own "Hard
@@ -105,55 +61,16 @@ async function validateWhatsAppParams(
   // still runs unconditionally for prepareMessage; message (even empty) survives untouched in the
   // enrichedParams merge (missionExecutor.ts only overlays contactName here, never message).
 
-  // Doctrine (product-owner-directed 2026-08-01): openContact/prepareMessage now follow the same
-  // no-device-contacts-read pattern as placeCall by default — search string only, WhatsApp's own
-  // UI resolves it. See whatsappTool.ts's WHATSAPP_MESSAGE_VIA_ACCESSIBILITY doc comment for the
-  // single-constant revert switch back to the resolveContact()/E.164 path below.
-  if (whatsappTool.WHATSAPP_MESSAGE_VIA_ACCESSIBILITY) {
+  // WhatsApp is the authority for every WhatsApp target. Preserve the requested name as a search
+  // query; the tool must identify a unique exact result in WhatsApp's live UI before acting.
+  if (request.action === 'openContact' || request.action === 'placeCall' ||
+      request.action === 'prepareMessage' || whatsappTool.WHATSAPP_MESSAGE_VIA_ACCESSIBILITY) {
     const searchString = whatsappTool.buildCallSearchString(contactName);
     if (!searchString) return { valid: false, reason: 'No name was given to search for.' };
-    return { valid: true, enrichedParams: { contactName: searchString } };
+    return { valid: true, enrichedParams: { ...request.params, contactName: searchString, channel: 'whatsapp' } };
   }
 
-  const resolved = await whatsappTool.resolveContact(contactName, contacts);
-
-  if (resolved.status === 'ambiguous') {
-    const names = (resolved.candidates ?? [])
-      .map((c) => `${c.displayName} (${whatsappTool.maskPhone(c.phoneNumbers?.[0] ?? '')})`)
-      .join(', ');
-    return { valid: false, reason: `Multiple contacts match "${contactName}": ${names}. Which one?` };
-  }
-  if (resolved.status === 'not_found') {
-    // Device contacts couldn't be searched (permission not granted) AND the caller-supplied
-    // stand-in list (contacts param — e.g. TEST_CONTACTS today, real trusted contacts later)
-    // didn't have a match either — surface the permission gap as the likely cause instead of a
-    // bare "not found", since granting it is the actionable fix. If a stand-in match WOULD have
-    // resolved it, permission was never actually needed and this branch isn't reached.
-    const hasPermission = await whatsappTool.hasContactsPermission();
-    const reason = hasPermission
-      ? `No contact matching "${contactName}" was found.`
-      : `No contact matching "${contactName}" was found, and Contacts permission is not granted (device contacts couldn't be searched).`;
-    return { valid: false, reason };
-  }
-  if (resolved.status === 'missing_phone') {
-    return { valid: false, reason: `${resolved.contact?.displayName ?? contactName} has no phone number saved.` };
-  }
-
-  const rawPhone = resolved.contact?.phoneNumbers?.[0] ?? '';
-  const e164 = whatsappTool.toE164(rawPhone);
-  if (!e164) {
-    return {
-      valid: false,
-      reason: `${resolved.contact?.displayName ?? contactName}'s number isn't saved with a country code — can't confirm it reliably.`,
-    };
-  }
-
-  const enrichedParams: Record<string, unknown> = {
-    ...request.params,
-    contactName: resolved.contact?.displayName ?? contactName,
-    phoneNumber: e164,
-  };
-  return { valid: true, enrichedParams };
+  return { valid: false, reason: 'WhatsApp target context is incomplete.' };
 }
 
 async function preflight(request: ActionRequest): Promise<ValidationResult | null> {

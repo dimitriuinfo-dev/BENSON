@@ -50,6 +50,24 @@ android {
 }
 
 dependencies {
+  // NATIVE_CMD_1 (2026-10-02) — BensonForegroundService.kt calls CaptureEngine directly (reuse,
+  // not reimplementation, of the already-proven VAD/pre-roll/WAV capture in that module). This is
+  // the one mechanical Gradle wire-up a cross-module Kotlin call requires; not itself a code
+  // change to either module's logic. Revert: remove this line (and the CaptureEngine call sites).
+  implementation project(":benson-audio-capture")
+
+  // RUNDA_N3 (2026-10-02) — same mechanical cross-module wire-up as benson-audio-capture above.
+  // benson-accessibility: reads BensonAccessibilityService.lastForegroundPackage/instance (Task A).
+  // benson-notification-listener: calls MediaTransport.control, extracted from that module's own
+  // Expo Function (Task C). Revert: remove these two lines and their call sites.
+  implementation project(":benson-accessibility")
+  implementation project(":benson-notification-listener")
+
+  // RUNDA CAR-3a (2026-10-04) — pushes state/dialog updates to BensonCarScreen.instance when
+  // Android Auto is showing Benson's own screen. Revert: remove this line and the push call sites
+  // in updateBubbleNative/closeSession.
+  implementation project(":benson-car")
+
   // NATIVE_JS_RELIABLE_HANDOFF_FIX_1 (2026-09-19) — BensonWakeHeadlessTaskService extends RN's
   // own com.facebook.react.HeadlessJsTaskService; useCoreDependencies() above only brings in
   // expo-modules-core's own Promise/Function abstractions, not the raw RN bridge classes. Same
@@ -84,4 +102,7 @@ dependencies {
   // exact version already present everywhere else in the app to avoid duplicate-class/version
   // skew. Used for the native cloud wake loop's STT request (Groq's OpenAI-compatible endpoint).
   implementation "com.squareup.okhttp3:okhttp:4.9.2"
+
+  // RUNDA TEST-1 (2026-10-03) — WakeVerifyMatcherTest, plain JVM unit test, no device/instrumentation.
+  testImplementation "junit:junit:4.13.2"
 }

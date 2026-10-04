@@ -45,6 +45,27 @@ incomplet care se accepta "de data asta" — e o runda care nu s-a terminat.**
 
 ---
 
+## 0.5 REGULA UX: BENSON PESTE APLICAȚIA REALĂ (adăugată runda WA1, 2026-09-23)
+
+Când BENSON lucrează într-o aplicație țintă, utilizatorul vede și folosește aplicația reală;
+BENSON se retrage în bula existentă (`benson-overlay`, "Benson stays a bubble" — aceeași bulă
+dovedită deja pentru apeluri, nu un overlay nou per aplicație). Adaptorul aplicației (ex.
+`whatsappTool.ts`) furnizează starea misiunii și acțiunile permise; bula însăși rămâne
+independentă de aplicația țintă.
+
+Fără text dublat: cât interfața BENSON e vizibilă, bula dispare; cât aplicația țintă e în
+prim-plan și BENSON nu se vede, bula poate arăta dialogul activ. La final de misiune, bula
+dispare complet. Bula nu arată și nu rostește niciodată date sensibile care nu sunt deja
+vizibile pe ecranul real (ex. numărul de telefon).
+
+Reutilizează contractele existente pentru afișare/progres, clarificare, confirmare/anulare,
+rezultat — nu construi un al doilea mecanism de overlay/confirmare per aplicație. Implementarea
+de referință: `src/core/mission/tools/whatsappTool.ts` (`showWaMessageBubble`/
+`hideWaMessageBubble`) + `src/core/mission/missionExecutor.ts` (punctele de apel), detaliate în
+`WA1_REPORT.md`.
+
+---
+
 ## 1. HARNESS-UL DE REGRESIE — ce este, si de ce e obligatoriu, nu optional
 
 Pana la construirea lui (Runda H1, mai jos), acest punct din canon se marcheaza

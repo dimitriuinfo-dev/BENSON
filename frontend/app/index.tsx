@@ -21,7 +21,7 @@ import {
   pauseHotword, resumeHotword, setSystemSoundsMuted, consumeRecoveryFlag, logAudioDiag,
   setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
   setPorcupineAccessKey, getPorcupineStatus, getActiveWakeEngine,
-  nativeWakeSetOwner, isNativeWakeAvailable, setWakeName, setNativeWakeCredentials,
+  nativeWakeSetOwner, isNativeWakeAvailable, setWakeName, setNativeWakeCredentials, setBrainCredentials,
   setConfirmationSttCredentials, setWakeDeepgramCredentials,
   armSttSessionWatchdog, cancelSttSessionWatchdog, addSttWatchdogTimeoutListener,
   armTtsWatchdog, cancelTtsWatchdog, addTtsWatchdogTimeoutListener,
@@ -90,6 +90,7 @@ import { stopCapture as stopNativeCapture } from 'benson-audio-capture';
 import { buildVoiceInstructions, currentTimeOfDay } from '../lib/agents/voiceInstructions';
 import { startScreenBridge, getLastScreenSnapshot } from '../lib/screenBridge';
 import { runMission, resumePendingTask, clearPendingDisambiguation, matchDisambiguationPick } from '../src/core/orchestrator';
+import { editWhatsAppDraft } from '../src/core/mission/whatsappDraftEdit';
 import type { MissionPlan } from '../src/core/orchestrator';
 import type { TrustedContact } from '../src/core/contacts';
 import { loadDeviceContacts as loadRealDeviceContacts, getContactsPermissionState, requestContactsPermission, detectChannelCue } from '../src/core/contacts';
@@ -97,6 +98,7 @@ import {
   hydrateActiveMission, getActiveMission, confirmActiveMission, cancelActiveMission,
   supersedeActiveMission, resolveActiveMissionFromUtterance,
 } from '../src/core/mission';
+import { isWhatsAppRecipientCorrection } from '../src/core/mission/missionUtteranceGuards';
 import { getBondedDevices, type BluetoothDeviceInfo } from 'benson-car-bluetooth';
 import { addPipModeListener } from 'benson-app-registry';
 import {
@@ -287,6 +289,15 @@ const WAKE_LISTENING_PROMPT: Record<string, string> = {
   'en-GB': "I'm listening.",
   'ro-RO': 'Te ascult.',
   'de-DE': 'Ich höre.',
+};
+// RUNDA_W0 — explicit audible confirmation on a BARE wake ("Benson" alone, no command in the
+// same breath): user-directed 2026-10-02, a liveness signal — without it the user cannot tell
+// BENSON heard them. {name} is getAddress() (Master, or the configured first name). Only for the
+// bare-wake path; "Benson, <command>" never speaks this (executes directly, per spec).
+const WAKE_ACK_PROMPT: Record<string, string> = {
+  'en-GB': 'Yes, {name}.',
+  'ro-RO': 'Da, {name}.',
+  'de-DE': 'Ja, {name}.',
 };
 
 // ── Voice-only Settings control (2026-07-14) ────────────────────────────────
@@ -665,6 +676,14 @@ export default function BensonApp() {
   const TTS_TAIL_MS = 500;
   const micResumeAtRef = useRef(0); // Date.now() before which no capture may start
   const ttsEndedAtRef = useRef(0);  // when the last TTS utterance finished (for MIC_RESUMED afterMs)
+  // RUNDA_W0 TASK A [CONVERSATION_REQUIRES_ADDRESS] — a voice utterance only reaches the brain/TTS
+  // if it came from a session opened by an accepted wake or a manual tap, AND it is still within
+  // FOLLOW_UP_WINDOW_MS of that open or of BENSON's last response (whichever is later). Stamped at
+  // the three legitimate open points (handleWakeDetected, doStartListening, endTtsBlock) and read
+  // once, at the single funnel into the brain (handleIncomingText). Revert: delete the read-side
+  // check in handleIncomingText to restore pre-W0 behaviour (every stamp site is harmless alone).
+  const FOLLOW_UP_WINDOW_MS = 8000;
+  const addressedAtRef = useRef(0);
   // ── BENSON_STABILIZATION_1 — self-audio turn gate. INVARIANT: BENSON_OUTPUT can NEVER become
   // USER_INPUT. A transcript is only accepted if its capture started AFTER TTS fully ended + a
   // bounded audio-tail guard, BENSON is not speaking now, and the session id is current. ───────
@@ -859,6 +878,12 @@ export default function BensonApp() {
   const E1_USER_ONLY = true;
   const E1_NO_SELF_FOREGROUND = true;
   const USER_ACTION_WINDOW_MS = 90000;
+  // RUNDA_W0 [WAKE_ACK] — user-directed 2026-10-02: a bare "Benson" wake must speak an audible
+  // "Da, Master."/name before listening (a liveness signal, not E1's "BENSON initiates" case — the
+  // user just spoke first). Deliberately a SEPARATE flag from E1_USER_ONLY: flipping E1_USER_ONLY
+  // itself would reopen every OTHER unsolicited-speech path it guards. Revert: false restores the
+  // silent/chime transition (E1_USER_ONLY's WAKE_LISTENING_PROMPT branch, untouched below).
+  const WAKE_ACK_ENABLED = true;
 
   // ── Runda E2 (2026-09-07) ────────────────────────────────────────────────────────────────────
   // E2_LISTEN_ON_OPEN: deschiderea aplicației / atingerea bulei = USER_TOUCH → ascultarea pornește
@@ -954,8 +979,8 @@ export default function BensonApp() {
   // the moment the user could start reading it). Native then owns the actual countdown
   // (BensonBubbleService's Handler.postDelayed, survives JS suspension) — this only decides WHEN
   // to start it and how long, not whether it fires.
-  const RESULT_DWELL_AFTER_TTS_MS = 3000;
-  const RESULT_DWELL_NO_TTS_MS = 4500;
+  const RESULT_DWELL_AFTER_TTS_MS = 8000;
+  const RESULT_DWELL_NO_TTS_MS = 8000;
   function scheduleResultDismiss(dwellMs: number) {
     const state = bensonStateRef.current;
     if (state !== 'DONE' && state !== 'ERROR') return; // nothing to dwell — not a result turn
@@ -2331,6 +2356,14 @@ export default function BensonApp() {
         try { setWakeDeepgramCredentials(cfg.apiKey); } catch {}
       }
     }).catch(() => {});
+    // ADAOS WA-3 / WA_COMPOSE (2026-10-03) — same runtime-push idiom as the STT credentials just
+    // above, for the brain: native (BensonForegroundService.composeWaMessage) needs a copy of the
+    // OpenAI key on app launch too, not only after a Settings save (see the save-time push below).
+    resolveLlmConfig().then((resolved) => {
+      if (resolved?.config?.apiKey) {
+        try { setBrainCredentials(resolved.config.apiKey, resolved.config.baseUrl || 'https://api.openai.com/v1', resolved.config.model || 'gpt-4o-mini'); } catch {}
+      }
+    }).catch(() => {});
     // Persisted vehicle context is never allowed to trigger app/audio behavior on startup.
     if (cm === 'true') {
       setCarMode(false); carModeRef.current = false;
@@ -2648,6 +2681,7 @@ export default function BensonApp() {
     try { cancelTtsWatchdog(); } catch {}
     speakingRef.current = false; setSpeaking(false);
     ttsEndedAtRef.current = Date.now();
+    addressedAtRef.current = ttsEndedAtRef.current; // W0 TASK A — a response re-opens the follow-up window
     micResumeAtRef.current = ttsEndedAtRef.current + TTS_TAIL_MS;
     ttsBlockStartedAtRef.current = 0;
     if (C1_TTS_END_ALL_PATHS && wasBlocking) { logAudioDiag('TTS_BLOCK_END', `reason=${reason}`); logAudioDiag('AUDIO_STATE', 'from=TTS_SPEAKING to=WAITING_USER_REPLY'); }
@@ -3096,6 +3130,10 @@ export default function BensonApp() {
           baseUrl: 'https://api.openai.com/v1',
           model: 'gpt-4o-mini',
         });
+        // ADAOS WA-3 / WA_COMPOSE — re-push to native immediately, same convention as the Groq
+        // push above: a key entered/rotated while the app is open takes effect on the native
+        // WA_COMPOSE path's very next call, without needing an app restart.
+        try { setBrainCredentials(ok, 'https://api.openai.com/v1', 'gpt-4o-mini'); } catch {}
       } catch {}
     }
     // DEV_STT_DEEPGRAM_1 — a SEPARATE credential push (own SharedPreferences key) from the Groq
@@ -3396,33 +3434,15 @@ export default function BensonApp() {
   // problem after wake word remains open (see openaiTTS.ts / handleIncomingText history for what
   // was already tried and ruled out).
   // ── Local Whisper wake word (Option A — free, on-device, no new deps) ─────────
-  // detectWakeWord: does the transcript contain "Benson"? Whisper commonly mis-hears the name, so
-  // we accept a small set of near-spellings plus a fuzzy check on each token.
-  const WAKE_VARIANTS = ['benson', 'bensen', 'benzon', 'bension', 'pension', 'penson', 'benton', 'bensons'];
-  // "wake up" as a standalone alternative wake phrase (product-owner-directed 2026-08-25) \u2014 until
-  // now it only ever worked as a no-op SUFFIX after "Benson" (see WAKE_NOOP_SUFFIXES below); it
-  // never worked alone as its own activation trigger. Same fuzzy tolerance rationale as "Benson"
-  // above \u2014 this local Whisper setup regularly mis-hears short phrases.
-  const WAKE_UP_VARIANTS = ['wake up', 'wakeup', 'weyk up', 'weck up'];
+  // detectWakeWord: is "Benson" (or a literal spelling-variant) the FIRST word of the transcript?
+  const WAKE_VARIANTS = ['benson', 'bensen', 'benzon', 'bension', 'bensons'];
   function detectWakeWord(text: string): boolean {
-    const norm = (text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const norm = (text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/^[^a-z]+/, '');
     if (!norm.trim()) return false;
-    if (WAKE_VARIANTS.some((w) => norm.includes(w))) return true;
-    if (WAKE_UP_VARIANTS.some((w) => norm.includes(w))) return true;
-    // fuzzy: mirrors NativeCloudWake.kt's matchWake() tolerance (2026-09-18, device-confirmed:
-    // real "benson" transcripts came back distance-2, e.g. "bensăm"/"benzan" — see that file).
-    return norm.split(/[^a-z]+/).some((tok) => tok.length >= 6 ? lev(tok, 'benson') <= 2 : tok.length >= 5 && lev(tok, 'benson') <= 1);
-  }
-  function lev(a: string, b: string): number {
-    const m = a.length, n = b.length;
-    if (!m) return n; if (!n) return m;
-    let prev = Array.from({ length: n + 1 }, (_, i) => i);
-    for (let i = 1; i <= m; i++) {
-      const cur = [i];
-      for (let j = 1; j <= n; j++) cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-      prev = cur;
-    }
-    return prev[n];
+    const words = norm.trim().split(/\s+/);
+    if (WAKE_VARIANTS.includes(words[0])) return true;
+    const firstTwo = words.slice(0, 2).join(' ');
+    return firstTwo === 'hey benson' || firstTwo === 'hei benson';
   }
   // "Benson wake up" (product-owner-directed 2026-08-23) is meant to behave EXACTLY like bare
   // "Benson" \u2014 a pure activation phrase, not a command. Without this list, stripWakeWord would
@@ -3441,13 +3461,19 @@ export default function BensonApp() {
     const norm = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[,.:;!?-]+$/, '').trim();
     return WAKE_NOOP_SUFFIXES.includes(norm);
   }
-  // stripWakeWord: return whatever the user said AFTER "Benson" as the command tail (so
-  // "Benson, deschide Waze" runs "deschide Waze" in one breath); empty if only the wake word (or a
-  // no-op activation suffix like "wake up" \u2014 see WAKE_NOOP_SUFFIXES above).
+  // stripWakeWord: return whatever the user said AFTER "Benson" (or "hey/hei Benson") as the
+  // command tail; empty if only the wake word (or a no-op activation suffix like "wake up" \u2014
+  // see WAKE_NOOP_SUFFIXES above). RUNDA_W0 TASK B \u2014 position-anchored (first word, or first two
+  // for "hey/hei benson") to match detectWakeWord()'s stricter acceptance.
   function stripWakeWord(text: string): string {
-    const idx = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').search(/bens|benz|bent|pens/);
-    if (idx < 0) return '';
-    const after = text.slice(idx).replace(/^[^\s]+[\s,.:;!?-]*/, '').trim(); // drop the wake token itself
+    const rawWords = (text || '').trim().split(/\s+/);
+    const norm = (text || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/^[^a-z]+/, '');
+    const normWords = norm.trim().split(/\s+/);
+    const firstTwo = normWords.slice(0, 2).join(' ');
+    const dropCount = (firstTwo === 'hey benson' || firstTwo === 'hei benson') ? 2
+      : WAKE_VARIANTS.includes(normWords[0]) ? 1 : 0;
+    if (dropCount === 0) return '';
+    const after = rawWords.slice(dropCount).join(' ').trim();
     if (isWakeControlPhrase(after)) return '';
     return after;
   }
@@ -3480,14 +3506,32 @@ export default function BensonApp() {
       try {
         logAudioDiag('WAKE_AUDIO_BUFFER_RECEIVED', `file=${audioFilePath.split(/[\\/]/).pop()}`);
         const transcript = await transcribeCapturedWakeAudio(audioFilePath, replyLangRef.current);
-        const activeWake = (commandTail || 'Benson').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const command = transcript.replace(new RegExp(`^\\s*${activeWake}[\\s,.:;!?-]*`, 'i'), '').trim();
+        // RUNDA_W1 [WAKE_ACK_BUFFERED] — the old literal regex stripped only an exact "Benson"
+        // echoed back via commandTail (itself always just the trigger word, never real STT of the
+        // tail — confirmed live, commandTail="Benson" on every wake regardless of what was said).
+        // A mis-heard wake word (e.g. Deepgram "benzan") then survived as leftover "command" text
+        // and was dispatched straight to Brain, which always timed out for it (device-proven
+        // 2026-10-02, three separate incidents, each ~10010ms). stripWakeWord() is the same
+        // fuzzy-variant matcher already proven for the local-engine path; reusing it here means a
+        // mis-heard bare wake now correctly resolves to "no command" instead of noise. Revert:
+        // restore the literal activeWake regex above this line.
+        const command = stripWakeWord(transcript);
         logAudioDiag('WAKE_AUDIO_TRANSCRIPT', `chars=${transcript.length} commandChars=${command.length}`);
         if (!command) {
-          logAudioDiag('WAKE_AUDIO_EMPTY_COMMAND', 'executor=not_called');
-          wakeTriggeredRef.current = false;
-          setBensonState('IDLE', 'wake_audio_empty');
-          nativeWakeSetOwner('NONE');
+          if (WAKE_ACK_ENABLED) {
+            // FIX_NATIVE_WAKE_ACK_1 (2026-10-02) — "Da, Master" is now spoken natively in
+            // BensonForegroundService.kt, before this JS code ever runs (proven: JS-side ack only
+            // ever fired within seconds of the user manually foregrounding the app; every
+            // backgrounded wake got zero ack). Speaking it again here would double it. Revert:
+            // restore the speakText(ackMsg, ...) call around this doStartListening().
+            logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=bare_wake_word_ack_then_listen_buffered source=native_ack');
+            doStartListening();
+          } else {
+            logAudioDiag('WAKE_AUDIO_EMPTY_COMMAND', 'executor=not_called');
+            wakeTriggeredRef.current = false;
+            setBensonState('IDLE', 'wake_audio_empty');
+            nativeWakeSetOwner('NONE');
+          }
           return;
         }
         handleIncomingText(command, { viaVoice: true, utteranceBytes: -1 });
@@ -3510,11 +3554,16 @@ export default function BensonApp() {
       // E1-0: bare "Benson" (or "Benson wake up") gets the non-verbal chime above and goes
       // straight to listening — no spoken "Te ascult." (that reads as BENSON initiating
       // conversation; "Tăcerea e implicită"). Revert: E1_USER_ONLY = false restores the prompt.
-      logAudioDiag('WAKE_HANDOFF_TO_STT', E1_USER_ONLY ? 'mode=bare_wake_word_chime_then_listen' : 'mode=bare_wake_word_prompt_then_listen');
       logAudioDiag('WAKE_COMMAND_ARMED', `reason=${isControlOnly ? 'control_phrase_consumed' : 'bare_wake_word'}`);
-      if (E1_USER_ONLY) {
+      if (WAKE_ACK_ENABLED) {
+        // FIX_NATIVE_WAKE_ACK_1 — see the matching note above; native already spoke the ack.
+        logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=bare_wake_word_ack_then_listen source=native_ack');
+        doStartListening();
+      } else if (E1_USER_ONLY) {
+        logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=bare_wake_word_chime_then_listen');
         doStartListening();
       } else {
+        logAudioDiag('WAKE_HANDOFF_TO_STT', 'mode=bare_wake_word_prompt_then_listen');
         const msg = WAKE_LISTENING_PROMPT[replyLangRef.current] || WAKE_LISTENING_PROMPT['en-GB'];
         speakText(msg, () => doStartListening());
       }
@@ -3625,6 +3674,10 @@ export default function BensonApp() {
   // capture, TTS, or an in-flight session.
   function startLocalWakeLoop() {
     if (silencedRef.current) return;
+    // RUNDA_W0 TASK C [WAKE_OFF_HARD] — this JS fallback scan loop never checked the Wake Word
+    // switch at all; with it OFF but no local TFLite model present, passive capture + cloud STT
+    // kept running regardless. Revert: delete this check to restore the pre-W0 (unconditional) scan.
+    if (!wakeWordEnabledRef.current) { logAudioDiag('WAKE_SCAN_SKIPPED', 'reason=wake_word_disabled'); return; }
     if (whatsappCallMicHoldUntilRef.current > Date.now() || waCallMicHoldActiveSafe()) { logAudioDiag('MIC_BLOCKED', 'reason=whatsapp_call_live'); return; }
     if (wakeEngineRef.current !== 'local') return;
     if (!serviceActiveRef.current) return;
@@ -3667,6 +3720,7 @@ export default function BensonApp() {
         wakeScanningRef.current = false;
         if (detectWakeWord(text)) {
           logAudioDiag('WAKE_SCAN_HIT', `text="${text}"`);
+          logAudioDiag('WAKE_CANDIDATE', `text="${text}" verdict=accepted reason=first_word_match`);
           handleWakeDetected(stripWakeWord(text));
         } else {
           // Diagnostic (product-owner-confirmed live 2026-08-25): a MISS here previously logged
@@ -3676,6 +3730,7 @@ export default function BensonApp() {
           // word simply wasn't said in that window. Logging the actual transcribed text on every
           // miss (not just every hit) turns that black box into real evidence.
           logAudioDiag('WAKE_SCAN_MISS', `text="${text}"`);
+          logAudioDiag('WAKE_CANDIDATE', `text="${text}" verdict=rejected reason=no_first_word_match`);
           setTimeout(startLocalWakeLoop, 150); // not the wake word — keep listening
         }
       },
@@ -3790,6 +3845,7 @@ export default function BensonApp() {
     wakeScanningRef.current = false;
     bumpSessionKeepAwake();
     const trigger = wakeTriggeredRef.current ? 'wake_word' : convModeRef.current ? 'conversation_mode' : 'manual_tap';
+    addressedAtRef.current = Date.now(); // W0 TASK A — this capture session is an explicit open (wake/conv/tap)
     const sessionId = `js-${Date.now()}`;
     jsSttSessionIdRef.current = sessionId;
     sttCaptureStartedAtRef.current = Date.now(); // BENSON_STABILIZATION_1 — capture-window start
@@ -4008,7 +4064,7 @@ export default function BensonApp() {
       const nativeEngineActive = !!nw?.model;
       nativeWakeRef.current = nativeEngineActive;
       wakeModelAvailableRef.current = !!nw?.model;
-      logAudioDiag('WAKE_ENGINE', `select=${nw?.model ? (nw?.engine ?? 'LOCAL_MODEL') : 'UNAVAILABLE'} nativeModel=${!!nw?.model} cloudConfigured=${!!nw?.cloud} ambientCloudFallback=false`);
+      logAudioDiag('WAKE_ENGINE', `select=${nw?.model ? 'LOCAL_MODEL' : 'UNAVAILABLE'} nativeModel=${!!nw?.model} cloudConfigured=${!!nw?.cloud} ambientCloudFallback=false`);
       if (nativeEngineActive) {
         wakeEngineRef.current = 'native';
         try { stopWakeScan(); } catch {}
@@ -4356,6 +4412,14 @@ export default function BensonApp() {
   // ── Central message handler — routes through the Benson Core Orchestrator ──
   async function handleIncomingText(msg: string, opts?: { viaVoice?: boolean; utteranceBytes?: number; requestId?: string }) {
     if (!msg) return;
+    // W0 TASK A [CONVERSATION_REQUIRES_ADDRESS] — a spoken utterance reaches the brain/TTS only if
+    // it is still within FOLLOW_UP_WINDOW_MS of an explicit open (wake/tap/conv-mode session start)
+    // or BENSON's last response. Typed/chat input (viaVoice=false) is inherently addressed — the
+    // user tapped to type — and is never gated here.
+    if (opts?.viaVoice && Date.now() - addressedAtRef.current > FOLLOW_UP_WINDOW_MS) {
+      logAudioDiag('SPEAK_SUPPRESSED', `reason=not_addressed text="${msg.slice(0, 80)}"`);
+      return;
+    }
     if (callAudioSuppressed() && opts?.viaVoice) { logAudioDiag('VOICE_COMMAND_DROPPED', 'reason=call_audio_active'); return; }
     const callEpochAtDispatch = callAudioEpochRef.current;
     const voiceDispatchStillCurrent = () => !opts?.viaVoice ||
@@ -4659,6 +4723,24 @@ export default function BensonApp() {
       // misread a body like "nu mai vin" as a cancellation.
       const pendingTaskForBody = pendingMissionTaskRef.current.plan.tasks[pendingMissionTaskRef.current.taskIndex];
       const isAwaitingMessageBody = !!pendingTaskForBody?.input?.waAwaitingMessageBody;
+      const isPendingWhatsAppCall = pendingTaskForBody?.type === 'PREPARE_MESSAGE'
+        && ['voice_call', 'video_call'].includes(String(pendingTaskForBody?.input?.mode ?? ''));
+      if (isPendingWhatsAppCall && isWhatsAppRecipientCorrection(msg)) {
+        const pending = pendingMissionTaskRef.current;
+        pendingMissionTaskRef.current = null;
+        pendingNoteActionRef.current = null;
+        pendingVignetteRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        gateArmedAtRef.current = 0;
+        try { if (getActiveMission()) await cancelActiveMission(); } catch {}
+        logAudioDiag('WA_CALL_CONFIRM_INVALIDATED', `missionId=${pending.plan.id} reason=recipient_correction mode=${String(pendingTaskForBody?.input?.mode ?? '')}`);
+        const reply = 'Am anulat apelul pregătit. Spune din nou numele contactului corect.';
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'wa_call_recipient_correction');
+        addMessage('benson', reply);
+        speakText(reply, () => afterPromptRearm(true));
+        return;
+      }
       // RECOVERY_L9 (2026-09-13, IMPLEMENTED_ONLY — not device-tested) — a reply to "Îl trimit?"
       // that names a DIFFERENT contact ("nu Baby, Hannah" / "am spus Hannah") is a correction of the
       // recipient slot, not a yes/no. Only recognized when this task already typed a message and is
@@ -4670,7 +4752,41 @@ export default function BensonApp() {
         ? msg.match(/\bnu\b[^,]*,\s*(.+)$/i) ?? msg.match(/\bam spus\b\s+(.+)$/i) ?? msg.match(/\bm[ăa] refer la\b\s+(.+)$/i)
         : null;
       const correctedContact = correctionMatch?.[1]?.trim().replace(/[.!?]+$/, '') || null;
+      const stagedDraft = typeof pendingTaskForBody?.input?.waWriteMessage === 'string'
+        ? pendingTaskForBody.input.waWriteMessage : '';
+      const draftEdit = isTypedAwaitingSend ? editWhatsAppDraft(stagedDraft, msg) : { kind: 'none' as const };
       logAudioDiag('WA_REPLY_RAW_STT', `missionId=${pendingMissionTaskRef.current.plan.id} expectedReplyType=${isAwaitingMessageBody ? 'MESSAGE_BODY' : (correctedContact ? 'CONTACT_CORRECTION' : 'CONFIRMATION')} rawText=${JSON.stringify(msg)}`);
+      if (draftEdit.kind === 'updated') {
+        const pending = pendingMissionTaskRef.current;
+        pendingMissionTaskRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        logAudioDiag('WA_DRAFT_EDIT', `missionId=${pending.plan.id} operation=${draftEdit.operation} oldLen=${stagedDraft.length} newLen=${draftEdit.message.length}`);
+        setBensonState('EXECUTING', 'wa_draft_edit');
+        let editResult: Awaited<ReturnType<typeof resumePendingTask>>;
+        try {
+          editResult = await resumePendingTask(pending, await getLiveContacts(), onMissionAck, undefined, undefined, draftEdit.message);
+        } catch (e) {
+          logAudioDiag('WA_DRAFT_EDIT_FAILED', `reason=exception detail=${JSON.stringify(String(e)).slice(0, 120)}`);
+          setLoading(false); loadingRef.current = false;
+          setBensonState('IDLE', 'wa_draft_edit_recover');
+          resumeListeningAfterUnblock();
+          return;
+        }
+        setLoading(false); loadingRef.current = false;
+        if (editResult.pendingTask) { pendingMissionTaskRef.current = editResult.pendingTask; gateArmedAtRef.current = Date.now(); }
+        setBensonState(editResult.pendingTask ? 'CONFIRMING' : (isFailureReply(editResult.message) ? 'ERROR' : 'DONE'), 'wa_draft_edit_result');
+        addMessage('benson', editResult.message);
+        speakText(editResult.message, () => { if (editResult.pendingTask) doStartListening(); });
+        return;
+      }
+      if (draftEdit.kind === 'clarify') {
+        const reason = draftEdit.reason === 'fragment_missing' ? 'Nu găsesc fragmentul în mesaj.'
+          : draftEdit.reason === 'fragment_repeated' ? 'Fragmentul apare de mai multe ori. Spune mai precis ce să înlocuiesc.'
+          : 'Nu am primit textul pentru modificare.';
+        logAudioDiag('WA_DRAFT_EDIT_CLARIFY', `missionId=${pendingMissionTaskRef.current.plan.id} reason=${draftEdit.reason}`);
+        speakOrShow(`${reason} Mesajul pregătit a rămas neschimbat și netrimis.`);
+        return;
+      }
       if (correctedContact) {
         const pending = pendingMissionTaskRef.current;
         pendingMissionTaskRef.current = null;
@@ -4866,6 +4982,21 @@ export default function BensonApp() {
     // ORCH-FIX-1: same YES / NO / UNKNOWN classifier as the pending-* gates above.
     const governedMission = getActiveMission();
     if (governedMission?.state === 'WaitingConfirmation') {
+      if (governedMission.request.tool === 'whatsapp' && governedMission.request.action === 'placeCall' && isWhatsAppRecipientCorrection(msg)) {
+        pendingMissionTaskRef.current = null;
+        pendingNoteActionRef.current = null;
+        pendingVignetteRef.current = null;
+        confirmRepromptCountRef.current = 0;
+        gateArmedAtRef.current = 0;
+        await cancelActiveMission();
+        logAudioDiag('WA_CALL_CONFIRM_INVALIDATED', `missionId=${governedMission.id} reason=recipient_correction mode=${String(governedMission.request.params.mode ?? '')}`);
+        const reply = 'Am anulat apelul pregătit. Spune din nou numele contactului corect.';
+        setLoading(false); loadingRef.current = false;
+        setBensonState('IDLE', 'wa_call_recipient_correction');
+        addMessage('benson', reply);
+        speakText(reply, () => afterPromptRearm(true));
+        return;
+      }
       const verdict = classifyConfirmation(msg);
       logAudioDiag('CONFIRM_CLASSIFY', `text="${msg}" result=${verdict}`);
       logAudioDiag('CONFIRM_PENDING', 'type=governed present=true');

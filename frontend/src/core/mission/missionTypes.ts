@@ -53,6 +53,10 @@ export interface ToolCallResult {
   outcome: LaunchOutcome;
   via?: string;
   error?: string;
+  /** Exact target read from the live target-app UI; never a phone number. */
+  verifiedTarget?: string;
+  observedPackage?: string;
+  observedViewIds?: string[];
 }
 
 export interface Mission {
@@ -61,6 +65,16 @@ export interface Mission {
   state: MissionState;
   reason?: string; // structured, honest — shown to the user, never raw JSON
   userMessage: string;
+  /** Last verified foreground effect for contextual corrections such as “back/close it”. */
+  lastAction?: {
+    tool: ToolName;
+    action: MissionAction;
+    target?: string;
+    mode?: string;
+    outcome: LaunchOutcome;
+    observedPackage?: string;
+    observedViewIds?: string[];
+  };
   createdAt: number;
   updatedAt: number;
 }

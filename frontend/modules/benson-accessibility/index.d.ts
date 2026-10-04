@@ -3,6 +3,7 @@ export interface BensonNode {
   viewId: string | null;
   text: string;
   contentDescription: string;
+  hintText?: string;
   className: string;
   clickable: boolean;
   editable: boolean;
@@ -75,9 +76,11 @@ export function runWhatsAppOpenConversationCall(phone: string, expectedName: str
 export function runWhatsAppOpenConversationType(
   phone: string, expectedName: string, message: string, missionId: string,
 ): Promise<WhatsAppCallNativeResult>;
+/** Types and verifies text only in an observed current chat; does not open a chat or send. */
+export function runWhatsAppTypeCurrentConversation(message: string, missionId: string): Promise<WhatsAppCallNativeResult>;
 /** PHASE B — call ONLY after explicit YES. Presses Send at most once for `missionId`, then verifies
  * the exact outgoing message appears. step === 'SENT_VERIFIED' on success. */
-export function pressWhatsAppSendVerified(missionId: string, message: string): Promise<WhatsAppCallNativeResult>;
+export function pressWhatsAppSendVerified(missionId: string, message: string, expectedChat: string): Promise<WhatsAppCallNativeResult>;
 /** "<missionId>|<state>" of the pending WhatsApp write, or "|NOT_TYPED". */
 export function getWhatsAppWriteState(): string;
 /** ROUND_WA2_MESSAGE_READING_1 — opens the exact conversation for `phone` (same deep link as
@@ -131,6 +134,7 @@ export interface CommandMatch {
 export type CommandStep =
   | { action: 'launch_app'; package: string }
   | { action: 'wait'; ms?: number }
+  | { action: 'scroll'; direction?: 'forward' | 'backward' | 'down' | 'up' | 'left' | 'right'; requirePackage?: string }
   | { action: 'click'; match: CommandMatch; timeoutMs?: number; requirePackage?: string }
   | { action: 'set_text'; match: CommandMatch; text: string; timeoutMs?: number; requirePackage?: string }
   | { action: 'assert_present'; match: CommandMatch; timeoutMs?: number }

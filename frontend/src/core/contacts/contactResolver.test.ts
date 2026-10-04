@@ -32,14 +32,18 @@ test('Baby: exact display-name match resolves directly', () => {
   assert.equal(r.contact?.id, '2');
 });
 
-test('an exact match is never overridden by a fuzzy match elsewhere in the list', () => {
-  // "Hanna" (a contact whose name is fuzzy-close to the query "Hana") must not beat an exact
-  // "Hana" contact if one exists.
+test('an exact short name and a phonetic neighbor remain ambiguous', () => {
+  // STT may turn "Hannah" into the exact name "Hana"; do not silently select either real person.
   const exactHana = contact({ id: '3', displayName: 'Hana' });
-  const fuzzyHanna = contact({ id: '4', displayName: 'Hanna' });
-  const r = resolveContact({ rawName: 'Hana', preferredChannel: 'whatsapp', contacts: [fuzzyHanna, exactHana] });
-  assert.equal(r.status, 'resolved');
-  assert.equal(r.contact?.id, '3');
+  const phoneticHannah = contact({ id: '4', displayName: 'Hannah' });
+  const r = resolveContact({ rawName: 'Hana', preferredChannel: 'whatsapp', contacts: [phoneticHannah, exactHana] });
+  assert.equal(r.status, 'ambiguous');
+});
+
+test('a short unrelated substring such as Pane never matches Hana', () => {
+  const unrelated = contact({ id: '10', displayName: 'Peter Pane Johannes Gunzel' });
+  const r = resolveContact({ rawName: 'Hana', preferredChannel: 'whatsapp', contacts: [unrelated] });
+  assert.equal(r.status, 'not_found');
 });
 
 test('two real contacts fuzzy-matching the same query produce ambiguous, not a silent pick', () => {

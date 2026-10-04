@@ -119,10 +119,15 @@ export function runWhatsAppOpenConversationType(phone, expectedName, message, mi
   return NativeModule.runWhatsAppOpenConversationType(phone, expectedName, message, missionId);
 }
 
+// Types only into a currently visible, identity-labelled WhatsApp conversation; never opens or sends.
+export function runWhatsAppTypeCurrentConversation(message, missionId) {
+  return NativeModule.runWhatsAppTypeCurrentConversation(message, missionId);
+}
+
 // PHASE B — call ONLY after an explicit YES. Presses Send at most once for `missionId`, then
 // verifies the exact outgoing message is in the conversation. Never sends twice for one mission.
-export function pressWhatsAppSendVerified(missionId, message) {
-  return NativeModule.pressWhatsAppSendVerified(missionId, message);
+export function pressWhatsAppSendVerified(missionId, message, expectedChat) {
+  return NativeModule.pressWhatsAppSendVerified(missionId, message, expectedChat);
 }
 
 // "<missionId>|<state>" for the current pending WhatsApp write (NOT_TYPED / TYPED_VERIFIED /

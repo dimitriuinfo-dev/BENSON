@@ -173,6 +173,11 @@ export function setNativeWakeCredentials(apiKey, baseUrl, model) {
   try { return NativeModule.setNativeWakeCredentials(apiKey, baseUrl, model); } catch { return undefined; }
 }
 
+// ADAOS WA-3 / WA_COMPOSE — same idiom, for the brain (WA_COMPOSE's GPT-4o-mini call).
+export function setBrainCredentials(apiKey, baseUrl, model) {
+  try { return NativeModule.setBrainCredentials(apiKey, baseUrl, model); } catch { return undefined; }
+}
+
 // DEV_STT_DEEPGRAM_1 — separate push, own SharedPreferences key, for the native confirmation
 // listener only (see NativeConfirmationListener.kt / BensonForegroundServiceModule.kt).
 export function setConfirmationSttCredentials(apiKey) {

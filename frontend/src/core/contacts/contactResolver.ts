@@ -25,7 +25,12 @@ function matchesExact(candidate: string, normalizedQuery: string): boolean {
 
 function matchesPartial(candidate: string, normalizedQuery: string): boolean {
   const normalizedCandidate = normalizeName(candidate);
-  return normalizedCandidate.includes(normalizedQuery) || normalizedQuery.includes(normalizedCandidate);
+  if (normalizedQuery.length < 3 || normalizedCandidate.length < 3) return false;
+  // A short contact name embedded in a longer STT transcript is not a confident identity:
+  // “Hana” contains the distinct contact “Ana”, and previously won the partial tier before the
+  // fuzzy Hannah candidate could be considered. Allow a longer contact to contain a query
+  // fragment, or a full query token to equal a shorter contact, but never arbitrary containment.
+  return normalizedCandidate.includes(normalizedQuery) || normalizedQuery.split(/\s+/).includes(normalizedCandidate);
 }
 
 // Levenshtein edit distance — small, dependency-free. Used only in the fuzzy tier below.
@@ -69,6 +74,7 @@ function levenshtein(a: string, b: string): number {
 // rejecting same-length short-word collisions.
 function fuzzyClose(a: string, b: string): boolean {
   if (a.length < 3 || b.length < 3) return false;
+  if (phoneticClose(a, b)) return true;
   const threshold = Math.floor(Math.max(a.length, b.length) / 3);
   const dist = levenshtein(a, b);
   if (dist > threshold) return false;
@@ -81,7 +87,68 @@ function fuzzyClose(a: string, b: string): boolean {
 function matchesFuzzy(candidate: string, normalizedQuery: string): boolean {
   const nc = normalizeName(candidate);
   if (fuzzyClose(nc, normalizedQuery)) return true;
-  return nc.split(/\s+/).some((tok) => fuzzyClose(tok, normalizedQuery));
+  if (phoneticClose(nc, normalizedQuery)) return true;
+  return nc.split(/\s+/).some((tok) => fuzzyClose(tok, normalizedQuery) || phoneticClose(tok, normalizedQuery));
+}
+
+// When a spoken query is an exact saved display name, only retain a second candidate if its
+// individual name token is a plausible STT length-change of that exact name. The broad phonetic
+// key intentionally proposes candidates for fuzzy-only queries, but short keys ("baby" → "bebe",
+// "bass") are too collision-prone to veto a unique exact hit. Preserve real STT collisions such as
+// Hana/Hannah, where the token differs by a dropped/added ending sound.
+function plausibleExactNameCollision(candidate: TrustedContact, query: string): boolean {
+  const q = normalizeName(query);
+  const names = [candidate.displayName, ...(candidate.aliases ?? [])];
+  return names.some((name) => normalizeName(name).split(/\s+/).some((token) => {
+    if (!token || token === q) return true;
+    const lengthDelta = Math.abs(token.length - q.length);
+    if (lengthDelta === 0 || lengthDelta > 2 || Math.max(token.length, q.length) < 5) return false;
+    const distance = levenshtein(token, q);
+    return lengthDelta === 1 ? distance <= 1 : distance <= 2;
+  }));
+}
+
+/** Shared phonetic comparison for device contacts and verified identity aliases. */
+export function namesPhoneticallyMatch(a: string, b: string): boolean {
+  const left = normalizeName(a), right = normalizeName(b);
+  return Boolean(left && right && matchesFuzzy(left, right));
+}
+
+// Lightweight multilingual pronunciation key for common Romanian/German/English STT slips.
+// This only generates candidates; it never authorizes an action. Multiple candidates remain
+// ambiguous and externally visible actions still pass their existing explicit confirmation gate.
+function phoneticKey(value: string): string {
+  return normalizeName(value).split(/\s+/).filter(Boolean).map((raw) => {
+    let token = raw
+      .replace(/^michael$/, 'maikel')
+      .replace(/^maichel$/, 'maikel')
+      .replace(/^chr(?=[a-z])/, 'kr')
+      .replace(/sch/g, 's')
+      .replace(/gh(?=[ei])/g, 'g')
+      .replace(/ph/g, 'f')
+      .replace(/th/g, 't')
+      .replace(/ck/g, 'k')
+      .replace(/x/g, 'ks')
+      .replace(/dt$/g, 't')
+      .replace(/sh$/g, 's')
+      .replace(/h/g, '')
+      .replace(/(.)\1+/g, '$1');
+    token = token.replace(/^[jy]/, 'i').replace(/[aeiy]$/, '');
+    return token;
+  }).join(' ');
+}
+
+function phoneticClose(a: string, b: string): boolean {
+  const ka = phoneticKey(a), kb = phoneticKey(b);
+  if (ka === kb) return true;
+  if (ka.length < 3 || kb.length < 3) {
+    // Permit a short key only when the transcript/contact lengths show a real truncation or
+    // expansion (Ana/Hannah, Hanei/Hannah); equal-length short names such as Hana/Pane stay distinct.
+    if (Math.max(a.length, b.length) < 5 || a.length === b.length) return false;
+    return levenshtein(ka, kb) <= 1;
+  }
+  const distance = levenshtein(ka, kb);
+  return distance <= (Math.max(ka.length, kb.length) >= 5 ? 2 : 1);
 }
 
 // ROUND_CONTACT_AMBIGUITY_DIAG_1 — read-only, for the CONTACT_AMBIGUOUS_CANDIDATES log below only.
@@ -120,7 +187,7 @@ function describeMatchReason(candidate: TrustedContact, normalizedQuery: string)
 function dedupeContacts(contacts: TrustedContact[]): TrustedContact[] {
   const seen = new Map<string, TrustedContact>();
   for (const c of contacts) {
-    const key = `${normalizeName(c.displayName)}|${(c.phoneNumbers ?? []).join(',')}`;
+    const key = `${normalizeName(c.displayName)}|${(c.phoneNumbers ?? []).join(',')}|${(c.emailAddresses ?? []).map((e) => e.toLowerCase()).join(',')}`;
     if (!seen.has(key)) seen.set(key, c);
   }
   return [...seen.values()];
@@ -131,10 +198,19 @@ function dedupeContacts(contacts: TrustedContact[]): TrustedContact[] {
 // right there — it doesn't matter whether a weaker tier might have found fewer/other matches.
 function findMatches(normalizedQuery: string, contacts: TrustedContact[]): TrustedContact[] {
   const exactDisplayName = dedupeContacts(contacts.filter((c) => matchesExact(c.displayName, normalizedQuery)));
-  if (exactDisplayName.length > 0) return exactDisplayName;
+  if (exactDisplayName.length > 0) {
+    // A short STT result can exactly spell a different contact while also sounding like the
+    // intended longer name (e.g. “Ana” for Hannah). Preserve the exact hit, but surface nearby
+    // phonetic identities too so the caller asks instead of silently selecting the wrong person.
+    const close = dedupeContacts(contacts.filter((c) => !exactDisplayName.includes(c) && plausibleExactNameCollision(c, normalizedQuery)));
+    return close.length ? dedupeContacts([...exactDisplayName, ...close]) : exactDisplayName;
+  }
 
   const exactAlias = dedupeContacts(contacts.filter((c) => (c.aliases ?? []).some((a) => matchesExact(a, normalizedQuery))));
-  if (exactAlias.length > 0) return exactAlias;
+  if (exactAlias.length > 0) {
+    const close = dedupeContacts(contacts.filter((c) => !exactAlias.includes(c) && matchesFuzzy(c.displayName, normalizedQuery)));
+    return close.length ? dedupeContacts([...exactAlias, ...close]) : exactAlias;
+  }
 
   const partialDisplayName = dedupeContacts(contacts.filter((c) => matchesPartial(c.displayName, normalizedQuery)));
   if (partialDisplayName.length > 0) return partialDisplayName;
@@ -199,6 +275,15 @@ export function resolveContact(request: ContactResolveRequest): ContactResolveRe
 
   const contact = matches[0];
   const channel = request.preferredChannel;
+  if (channel === 'email' && (!contact.emailAddresses || contact.emailAddresses.length === 0)) {
+    return {
+      status: 'missing_email',
+      contact,
+      normalizedQuery,
+      message: `${contact.displayName} has no email address saved.`,
+    };
+  }
+
   const needsPhone = channel === 'phone' || channel === 'whatsapp' || channel === 'sms';
 
   if (needsPhone && (!contact.phoneNumbers || contact.phoneNumbers.length === 0)) {

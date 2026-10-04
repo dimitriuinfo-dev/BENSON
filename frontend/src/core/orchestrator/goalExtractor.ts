@@ -56,6 +56,7 @@ function toGoal(rawText: string, clauseText: string, request: ActionRequest): Go
     entities: {
       destination: typeof request.parameters.destinationLabel === 'string' ? request.parameters.destinationLabel : undefined,
       contact: typeof request.parameters.contactName === 'string' ? request.parameters.contactName : undefined,
+      currentChat: request.parameters.currentChat === true,
       message: typeof request.parameters.message === 'string' ? request.parameters.message : undefined,
       app: typeof request.parameters.targetApp === 'string' ? request.parameters.targetApp : undefined,
       mediaType: typeof request.parameters.mediaType === 'string' ? request.parameters.mediaType : undefined,

@@ -1,6 +1,9 @@
 package expo.modules.accessibility
 
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.graphics.Path
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
@@ -237,20 +240,69 @@ class BensonCommandExecutor(
 
     // Scroll the current screen so content that isn't visible yet can be reached (Faza 2 — the
     // "operator" can only tap what's on screen otherwise). Finds the first scrollable container
-    // from the active window root and asks it to scroll. direction: "forward"/"down" (default) or
-    // "backward"/"up". A rejected action usually just means we're already at the edge of the list.
-    private fun doScroll(i: Int, step: JSONObject): CommandResult {
+    // from the active window root and asks it to scroll. Vertical direction: forward/down or
+    // backward/up. Horizontal direction: right/left, only on a node that reports horizontal scroll.
+    private suspend fun doScroll(i: Int, step: JSONObject): CommandResult {
         val direction = step.optString("direction", "forward").lowercase()
-        val scrollAction = if (direction == "backward" || direction == "up")
+        val requirePackage = step.optString("requirePackage", "").ifEmpty { null }
+        val horizontal = direction == "left" || direction == "right"
+        val horizontalDirection = when (direction) {
+            "right" -> -1 // Finger swipe left reveals content further to the right.
+            "left" -> 1
+            else -> 0
+        }
+        val scrollAction = if (direction == "backward" || direction == "up" || direction == "left")
             AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
         else
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
         val root = service.rootInActiveWindow
             ?: return fail(i, "scroll", "not_found", "No active window to scroll.")
-        val scrollable = findScrollable(root, IntArray(1), 0)
+        if (requirePackage != null && root.packageName?.toString() != requirePackage) {
+            return fail(i, "scroll", "wrong_package", "The foreground app changed before scrolling.")
+        }
+        // Targeted current-app scrolling uses the largest observed scroll region (usually the
+        // content/results feed), avoiding accidental movement of a small chip row or outer wrapper.
+        // Keep the legacy first-scrollable behavior for older callers that do not specify a package.
+        val scrollable = (if (requirePackage != null) findLargestScrollable(root)
+            else findScrollable(root, IntArray(1), 0))
             ?: return fail(i, "scroll", "not_found", "No scrollable node on screen.")
+        if (horizontal) {
+            val bounds = Rect().also { scrollable.getBoundsInScreen(it) }
+            if (bounds.width() < 80 || bounds.height() < 80) return fail(i, "scroll", "not_found", "Observed scroll region is too small for a horizontal gesture.")
+            return if (dispatchHorizontalSwipe(bounds, horizontalDirection)) ok(i, "scroll")
+            else rejected(i, "scroll", "Horizontal swipe was not accepted by the observed scroll region.")
+        }
         return if (scrollable.performAction(scrollAction)) ok(i, "scroll")
         else rejected(i, "scroll", "Scrollable node found but scroll was not accepted (already at the edge?).")
+    }
+
+    private suspend fun dispatchHorizontalSwipe(bounds: Rect, fingerDirection: Int): Boolean {
+        return try {
+            val y = bounds.centerY().toFloat()
+            val inset = (bounds.width() * 0.15f).coerceAtLeast(30f)
+            val left = bounds.left + inset
+            val right = bounds.right - inset
+            val path = Path().apply {
+                if (fingerDirection < 0) { moveTo(right, y); lineTo(left, y) }
+                else { moveTo(left, y); lineTo(right, y) }
+            }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
+                .build()
+            var done = false
+            var completed = false
+            val posted = service.dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) { completed = true; done = true }
+                override fun onCancelled(gestureDescription: GestureDescription?) { completed = false; done = true }
+            }, null)
+            if (!posted) return false
+            var waited = 0
+            while (!done && waited < 1200) { delay(50); waited += 50 }
+            completed
+        } catch (e: Exception) {
+            Log.i("BENSON_AUDIO", "HORIZONTAL_SCROLL_GESTURE_FAIL reason=${e.javaClass.simpleName}")
+            false
+        }
     }
 
     private fun findScrollable(node: AccessibilityNodeInfo, counter: IntArray, depth: Int): AccessibilityNodeInfo? {

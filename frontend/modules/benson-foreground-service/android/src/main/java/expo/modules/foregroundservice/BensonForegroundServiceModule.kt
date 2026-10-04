@@ -293,6 +293,21 @@ class BensonForegroundServiceModule : Module() {
         .apply()
     }
 
+    // ADAOS WA-3 / WA_COMPOSE (2026-10-03, user-directed) — same runtime-push idiom as
+    // setNativeWakeCredentials above: the brain's real key lives in expo-secure-store
+    // (settingsStore.ts, 'llm'/'openai-compatible'), native has no access to that store's
+    // encrypted format. JS pushes a copy here (on load and on Settings save) so
+    // BensonForegroundService.composeWaMessage can reach OpenAI directly, without JS needing to be
+    // alive. Never logged.
+    Function("setBrainCredentials") { apiKey: String, baseUrl: String, model: String ->
+      val context = appContext.reactContext ?: return@Function
+      context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE).edit()
+        .putString("brain_api_key", apiKey)
+        .putString("brain_base_url", baseUrl)
+        .putString("brain_model", model)
+        .apply()
+    }
+
     Function("isNativeCloudWakeConfigured") {
       val context = appContext.reactContext ?: return@Function false
       NativeCloudWake.available(context)

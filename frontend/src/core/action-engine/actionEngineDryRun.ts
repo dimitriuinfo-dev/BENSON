@@ -25,7 +25,7 @@ export interface ActionEngineDryRunResult {
   result: ActionResult;
 }
 
-const CONTACT_INTENTS = ['CALL_CONTACT', 'OPEN_WHATSAPP_CONTACT', 'MESSAGE_CONTACT', 'FAMILY_LOCATION'];
+const CONTACT_INTENTS = ['CALL_CONTACT', 'OPEN_WHATSAPP_CONTACT', 'MESSAGE_CONTACT', 'FAMILY_LOCATION', 'EMAIL_ACTION', 'READ_MESSAGES'];
 
 export async function runActionEngineDryRun(
   rawText: string,
@@ -52,7 +52,7 @@ export async function runActionEngineDryRun(
       };
     }
 
-    if (bridgeResult.status === 'not_found' || bridgeResult.status === 'missing_phone') {
+    if (bridgeResult.status === 'not_found' || bridgeResult.status === 'missing_phone' || bridgeResult.status === 'missing_email') {
       return {
         request,
         enrichedRequest,

@@ -20,6 +20,7 @@ import { isPackageInstalled, launchPackage, waitForPackageForeground } from '../
 // (read-only import; mediaGovernor.ts itself has zero diff this round, per the round's explicit
 // "do not modify the generic MediaSession transport layer" instruction).
 import { verifyPlaying } from './mediaGovernor';
+import { activateObservedSearchControl } from '../core/accessibility/activateObservedSearchControl';
 
 export interface MediaProvider {
   id: string;
@@ -257,11 +258,18 @@ export async function searchMedia(provider: MediaProvider, query: string): Promi
   // for WhatsApp contact rows / YouTube result titles) generalizes across both tab-bar and
   // top-bar search entry points. No maxTopPercent either — a safe default for YouTube, not generic.
   const clickSearch = await safeExecuteCommand({
-    steps: [{ action: 'click', match: { textContainsAny: provider.searchIconHints, clickableAncestor: true }, timeoutMs: 5000 }],
+    steps: [{ action: 'click', match: { textContainsAny: provider.searchIconHints, clickableAncestor: true }, timeoutMs: 5000, requirePackage: provider.packageName }],
   });
+  let searchInputMatch: Record<string, unknown> = { editable: true };
   if (!clickSearch.success) {
+    const generic = await activateObservedSearchControl(provider.packageName);
+    if (generic.status === 'ready') {
+      searchInputMatch = generic.inputMatch;
+      logAudioDiag('MEDIA_SEARCH_GENERIC_FALLBACK', `provider=${provider.id} used=${generic.used}`);
+    } else {
     logAudioDiag('MEDIA_SEARCH_FAIL', `provider=${provider.id} reason=search_control_not_found status=${clickSearch.status}`);
     return { ok: false, message: `Nu am găsit butonul de căutare în ${provider.displayName}.` };
+    }
   }
 
   // ROUND_SPOTIFY_GOVERNANCE_1 — CONFIRMED LIVE: Spotify's search box is a tap-through
@@ -281,7 +289,7 @@ export async function searchMedia(provider: MediaProvider, query: string): Promi
 
   const usesFocusInput = !!provider.searchActivationHints;
   if (!usesFocusInput) {
-    const inputPresent = await safeExecuteCommand({ steps: [{ action: 'assert_present', match: { editable: true }, timeoutMs: 3000 }] });
+    const inputPresent = await safeExecuteCommand({ steps: [{ action: 'assert_present', match: searchInputMatch, timeoutMs: 3000, requirePackage: provider.packageName }] });
     if (!inputPresent.success) {
       logAudioDiag('MEDIA_SEARCH_FAIL', `provider=${provider.id} reason=input_not_found`);
       return { ok: false, message: `Am deschis căutarea, dar nu găsesc câmpul de scris în ${provider.displayName}.` };
@@ -294,7 +302,7 @@ export async function searchMedia(provider: MediaProvider, query: string): Promi
   // proven match-based set_text, unchanged.
   const typed = usesFocusInput
     ? await safeExecuteCommand({ steps: [{ action: 'set_text_on_focus', text: query }] })
-    : await safeExecuteCommand({ steps: [{ action: 'set_text', match: { editable: true }, text: query, timeoutMs: 3000 }] });
+    : await safeExecuteCommand({ steps: [{ action: 'set_text', match: searchInputMatch, text: query, timeoutMs: 3000, requirePackage: provider.packageName }] });
   if (!typed.success) {
     logAudioDiag('MEDIA_SEARCH_FAIL', `provider=${provider.id} reason=type_fail`);
     return { ok: false, message: `N-am putut scrie „${query}" în căutare.` };

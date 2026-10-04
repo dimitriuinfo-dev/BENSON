@@ -62,6 +62,8 @@ export declare function setWakeName(name: string): void;
 export declare function getWakeName(): string | Promise<string>;
 /** Pushes the active STT provider's credentials to the native cloud wake loop. Never logged. */
 export declare function setNativeWakeCredentials(apiKey: string, baseUrl: string, model: string): void;
+/** ADAOS WA-3 / WA_COMPOSE — pushes the brain's (GPT-4o-mini) credentials for native message composition. Never logged. */
+export declare function setBrainCredentials(apiKey: string, baseUrl: string, model: string): void;
 /** DEV_STT_DEEPGRAM_1 — separate Deepgram key push for the native confirmation listener only; never touches the wake loop's Groq credentials above. Never logged. */
 export declare function setConfirmationSttCredentials(apiKey: string): void;
 /** DEV_STT_DEEPGRAM_WAKE_1 — separate Deepgram key push for the native wake loop only; own SharedPreferences key, independent of the confirmation listener's. Never logged. */
