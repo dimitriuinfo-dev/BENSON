@@ -156,10 +156,32 @@ whisper-models/**  porcupine-model/**
 lib/tools/whatsappTool.ts
 lib/agents/missionValidator.ts
 lib/agents/missionExecutor.ts
+modules/benson-foreground-service/android/src/main/java/expo/modules/foregroundservice/HeedWakeWord.kt
 ```
 
 `android/` e în `.gitignore` și se regenerează. `whisper-models/` și `porcupine-model/` există
 doar pe acest disc — nu sunt versionate nicăieri.
+
+### WAKE-UL E PROTEJAT (04.10.2026, decizia Rareș, permanent)
+
+**Modelul**: `modules/benson-foreground-service/android/src/main/assets/wakeword/heed_candidate.onnx`
+— sha256 `57e18401d6c146907ee669b17b82c79fed1c2d94c593ff949f6f36fe591b4779`. Intră în git (deja
+tracked). Un test la build verifică acest hash; dacă diferă, build-ul pică.
+
+**Parametrii** (schimbarea lor cere aprobarea explicită a lui Rareș, numită în prompt-ul rundei):
+- Pragul HEED: `0.789` (`heed_candidate.json`, câmpul `threshold`; `consecutive_frames=2`,
+  `refractory_seconds=0.7`, `energy_gate.rms_threshold_dbfs=-55.0`).
+- Fereastra anti-ecou (`SelfTtsGuard.GUARD_MS`): `1000` ms — cât TTS-ul propriu vorbește, plus 1s
+  după, HEED ignoră o detecție (altfel se aude pe sine zicând „Da, Master" și se redeclanșează).
+- Ack-ul nativ: textul exact `"Da, Master."`, rostit din `BensonForegroundService.speakNativeAckThenCapture`.
+
+**Comportamentul**: „Benson" din fundal → „Da, Master" nativ, fără aplicația deschisă — deja în
+„Comportamente dovedite" (02.10.2026). Devine test obligatoriu la finalul ORICĂREI runde, nu doar
+al celor de pe drumul vocal — dacă pică, runda e respinsă, oricât de bine merge restul.
+
+`HeedWakeWord.kt` și blocul de wake/ack din `BensonForegroundService.kt`
+(`onHeedWakeDetected`/`speakNativeAckThenCapture`/`SelfTtsGuard`-ul lor): fișiere protejate — se
+ating doar cu permisiune explicită, numită în prompt, per rundă.
 
 ---
 
