@@ -72,3 +72,53 @@ sună plat, asta e cauza — nu text lipsă — și se rezolvă doar la runda VO
 5 confirmări rostite (apel/video/mesaj WhatsApp, deschidere aplicație ambiguă, YouTube) — verifică
 în logcat (`TTS_NATIVE_REQUEST`) că fiecare text se termină cu „?"; confirmă după ureche dacă sună
 ca întrebare sau plat (în al doilea caz, notat deja mai sus — e limita vocii, nu text).
+
+---
+
+## ADĂUGARE — ÎNTREBĂRILE LUI BENSON ÎNCEP CU CUVÂNT INTEROGATIV (06.10.2026)
+
+Soluție de formulare, nu de voce — merge imediat, cu orice motor TTS, fără cost. În română, o
+întrebare da/nu se deosebește de o afirmație DOAR prin intonație; dacă vocea nu urcă tonul, „O sun
+pe X?" sună ca „O sun pe X." BENSON pune acum întrebări care încep cu un cuvânt interogativ,
+neambiguu indiferent de pronunție.
+
+### Șabloanele, înainte → acum
+
+| Tip | Înainte | Acum |
+|---|---|---|
+| WA_CALL | „O sun pe X pe WhatsApp?" | „Dorești apel WhatsApp cu X?" |
+| WA_VIDEO | „Video cu X?" | „Dorești apel video WhatsApp cu X?" |
+| WA_MESSAGE | „Îi scriu lui X: «mesaj». Trimit?" | „Dorești să trimit mesajul către X?" |
+| Clarificare (RO) | „Pe cine să sun, {adresare}?" | „Pe cine dorești să sun, {adresare}?" |
+
+**DE/EN neatinse** — „Wen soll ich anrufen?"/„Who should I call?" încep deja cu cuvânt interogativ,
+nu au ambiguitatea română. Bonus observat: „apel cu X" evită acordul de gen („o sun"/„îl sun") care
+depindea de genul contactului.
+
+**Notă onestă, nu ascunsă**: WA_MESSAGE nu mai rostește conținutul mesajului înainte de „Trimit?"
+(înainte: „Îi scriu lui X: «mesaj». Trimit?"). Draftul rămâne vizibil pe ecran înainte de confirmare
+(WA_VISIBLE_DRAFT, comportament dovedit, neatins) — confirmarea vizuală a conținutului există, doar
+nu mai e și rostită. Test nou explicit (`messageDoesNotSpeakBackContent`) verifică asta ca decizie
+deliberată, nu regresie accidentală.
+
+### Fișiere, linii
+
+- `modules/benson-foreground-service/.../WaQuestionText.kt` (nou, 15 linii) — extras din
+  `waQuestionFor`, pattern identic cu `WaCallVideoMatcher` (pur, zero `Context`, JUnit-testabil).
+- `BensonForegroundService.kt`: `waQuestionFor` acum delegă la `WaQuestionText.forKind` (3 linii,
+  toate cele 5 locuri care-l apelau neschimbate).
+- `app/index.tsx`: `askWhoToCall`, 1 linie (doar ramura RO).
+- `WaQuestionTextTest.kt` (nou, 5 teste — câte unul per șablon + verificare generică).
+
+### TESTE
+
+- `gradlew :benson-foreground-service:testReleaseUnitTest`: **81/81 verde** — 5 noi
+  (`WaQuestionTextTest`) + 76 existente neschimbate, inclusiv `WaCallVideoMatcherTest` (12/12) și
+  `SelfTtsGuardTest` (6/6, fișier wake-adiacent, neatins, confirmat tot verde).
+- `npx tsc --noEmit`: curat.
+- `gradlew assembleRelease`: BUILD SUCCESSFUL (54s). APK:
+  `android/app/build/outputs/apk/release/app-release.apk`, 387.334.823 bytes,
+  sha256 `92ea12c028f61bca5674def7c6f6709a921f6769f99303259a20d13fd349c5b8`. Instalat pe dispozitiv.
+
+**Fără test pentru `askWhoToCall` (JS)**: `npm test` nu are script configurat (lacună cunoscută,
+neinventată) — nicio infrastructură de test pentru `app/index.tsx` în acest proiect azi.

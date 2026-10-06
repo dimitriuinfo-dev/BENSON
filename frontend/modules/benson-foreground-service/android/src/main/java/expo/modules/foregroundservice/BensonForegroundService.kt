@@ -2440,11 +2440,10 @@ class BensonForegroundService : Service() {
     proceedWithWaContact(pending.kind, chosen, pending.messageText, rawAnswer, aliasSpokenForm = pending.spokenNameRaw, aliasCandidates = pending.candidates)
   }
 
-  private fun waQuestionFor(kind: String, name: String, message: String?): String = when (kind) {
-    "call" -> "O sun pe $name pe WhatsApp?"
-    "video" -> "Video cu $name?"
-    else -> "Îi scriu lui $name: «$message». Trimit?"
-  }
+  // Textul mutat în WaQuestionText.kt (pur, JUnit-testat — WaQuestionTextTest), același pattern ca
+  // WaCallVideoMatcher. Delegare simplă, zero schimbare la cele 5 locuri care o apelează.
+  private fun waQuestionFor(kind: String, name: String, message: String?): String =
+    WaQuestionText.forKind(kind, name, message)
 
   private fun handlePendingWaAnswer(rawAnswer: String) {
     val pending = pendingWaAction ?: return

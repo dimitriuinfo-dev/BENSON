@@ -243,7 +243,10 @@ const SCREEN_READ_PATTERN =
 // shared contact-param sanity check rejects a name on either route (parser or brain).
 function askWhoToCall(lang: string, address: string): string {
   const l = (lang || '').toLowerCase();
-  if (l.startsWith('ro')) return `Pe cine să sun, ${address}?`;
+  // ADĂUGARE — ÎNTREBĂRILE LUI BENSON ÎNCEP CU CUVÂNT INTEROGATIV (06.10.2026): doar RO atinsă —
+  // germana/engleza încep deja cu un cuvânt interogativ ("Wen"/"Who"), fără ambiguitatea română
+  // (o întrebare da/nu identică la text cu afirmația, deosebită doar prin intonație).
+  if (l.startsWith('ro')) return `Pe cine dorești să sun, ${address}?`;
   if (l.startsWith('de')) return `Wen soll ich anrufen, ${address}?`;
   return `Who should I call, ${address}?`;
 }
