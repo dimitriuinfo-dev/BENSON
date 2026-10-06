@@ -44,8 +44,16 @@ object WakeVerifyMatcher {
     return dp[a.length][b.length]
   }
 
+  // RUNDA AC2-F, Pasul 1c (07.10.2026, product-owner-directed) — un transcript gol ONLINE (cazul
+  // #14 din testul Pasul 1b: scor 0,957, conexiune ok, dar text="") înseamnă exact același lucru
+  // ca offline-ul: verificarea nu a spus nimic concret, nici da nici nu. Tratate identic — decide
+  // scorul local. Un transcript NEGOL dar care nu se potrivește cu numele de trezire (vorbire
+  // reală, altceva decât „Benson") NU intră aici — rămâne respins necondiționat mai jos, filtrul
+  // de alarme false neatins.
+  fun needsScoreFallback(transcript: String?): Boolean = transcript == null || transcript.isBlank()
+
   fun isWakeVerified(transcript: String?, wakeName: String = "Benson"): Boolean {
-    if (transcript == null) return false
+    if (transcript == null || transcript.isBlank()) return false
     val norm = normalize(transcript)
     val target = normalize(wakeName)
     if (target.isBlank()) return false

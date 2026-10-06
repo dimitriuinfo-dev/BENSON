@@ -28,4 +28,13 @@ class WakeVerifyMatcherTest {
   // Configured wake name is NOT hardcoded "Benson" — comparison target follows Settings.
   @Test fun acceptsConfiguredNameToma() = assertTrue(WakeVerifyMatcher.isWakeVerified("toma", "Toma"))
   @Test fun rejectsBensonWhenConfiguredNameIsToma() = assertFalse(WakeVerifyMatcher.isWakeVerified("benson", "Toma"))
+
+  // RUNDA AC2-F, Pasul 1c (07.10.2026) — cazul #14 din testul Pasul 1b: scor 0,957, conexiune ok
+  // (nu offline), dar text="" — tratat acum identic cu offline-ul: scorul local decide, nu
+  // respingere automată. Un transcript real nepotrivit (alarmă falsă) NU intră aici.
+  @Test fun needsScoreFallbackForNullTranscript() = assertTrue(WakeVerifyMatcher.needsScoreFallback(null))
+  @Test fun needsScoreFallbackForEmptyOnlineTranscript() = assertTrue(WakeVerifyMatcher.needsScoreFallback(""))
+  @Test fun needsScoreFallbackForBlankOnlineTranscript() = assertTrue(WakeVerifyMatcher.needsScoreFallback("   "))
+  @Test fun doesNotNeedScoreFallbackForRealSpeech() = assertFalse(WakeVerifyMatcher.needsScoreFallback("cum faci azi"))
+  @Test fun doesNotNeedScoreFallbackForBenson() = assertFalse(WakeVerifyMatcher.needsScoreFallback("benson"))
 }

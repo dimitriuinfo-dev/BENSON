@@ -24,6 +24,11 @@ implementează pe loc. Fără dată de livrare — se reconsideră abia după ce
   «…». Dorești să-l trimit?". 3. `WA_HANGUP` prin voce: NU — în apel microfonul e al WhatsApp;
   închidere prin butonul de volan (HFP) sau manual, BENSON curăță după apel. Fiecare acțiune intră
   în enum doar cu rețetă verificată pe dispozitiv.
+- **RUNDA CĂUTARE** (după WHATSAPP 2): BENSON reține ultima căutare (`CONVERSATION_WINDOW`).
+  „Intră pe Amazon"/„arată-le pe cele de pe Amazon" → deschide căutarea direct în aplicația Amazon
+  cu ultimul termen, prin link/intent, NU prin apăsare pe pagina de rezultate. Același tipar pentru
+  eBay și alte magazine. „Cu livrare azi" → filtrul de livrare rapidă, unde Amazon îl expune. Zero
+  plăți — BENSON se oprește la lista de produse.
 
 - CAR-3a/CAR-3b: ecranul Android Auto (BensonCarAppService) și microfonul mașinii (CarAudioRecord,
   la atingere). Validatorul Android Auto încă respinge pachetul („failed all other checks", cauză

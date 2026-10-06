@@ -1044,10 +1044,15 @@ class BensonForegroundService : Service() {
   // Revert: OFFLINE_ACCEPT_SCORE_THRESHOLD = 2f (peste orice scor posibil => offline respinge mereu).
   private val OFFLINE_ACCEPT_SCORE_THRESHOLD = 0.95f
 
+  // RUNDA AC2-F, Pasul 1c (07.10.2026, product-owner-directed) — text="" ONLINE (conexiune ok,
+  // Deepgram a răspuns, dar n-a transcris nimic — cazul #14 din Pasul 1b, scor 0,957) tratat acum
+  // identic cu offline: decide scorul local. Un transcript real care nu se potrivește cu numele de
+  // trezire rămâne respins necondiționat — filtrul de alarme false neatins.
   private fun isWakeVerified(transcript: String?, heedScore: Float): Boolean {
-    if (transcript == null) {
+    if (WakeVerifyMatcher.needsScoreFallback(transcript)) {
       val accepted = heedScore >= OFFLINE_ACCEPT_SCORE_THRESHOLD
-      AudioDiag.log(this, "WAKE_OFFLINE_DECISION", "score=${"%.3f".format(heedScore)} threshold=$OFFLINE_ACCEPT_SCORE_THRESHOLD accepted=$accepted")
+      val reason = if (transcript == null) "offline" else "empty_online"
+      AudioDiag.log(this, "WAKE_OFFLINE_DECISION", "reason=$reason score=${"%.3f".format(heedScore)} threshold=$OFFLINE_ACCEPT_SCORE_THRESHOLD accepted=$accepted")
       return accepted
     }
     return WakeVerifyMatcher.isWakeVerified(transcript, NativeCloudWake.currentWakeName(this))
