@@ -184,4 +184,38 @@ bandă joasă ca „offline"-urile — susține aceeași concluzie: cauza comun�
 reală a rostirii/zgomotul de fond la momentul acelor încercări, nu un bug separat de rețea sau
 verificare. Nu e ceva ce codul poate repara prin prag sau fereastră — e ce a ajuns în microfon.
 
+---
+
+## TESTUL PASUL 1b — 15 încercări, 07.10.2026
+
+| # | Scor | Rezultat | Transcript | „Da, Master"? |
+|---|---|---|---|---|
+| 1 | 0,872 | accepted | „benson" | **DA** |
+| 2 | 0,930 | accepted | „benson" | **DA** |
+| 3 | 0,960 | accepted | „benson" | **DA** |
+| 4 | 0,963 | offline → scor≥0,95 → **acceptat** | — | **DA** |
+| 5 | 0,981 | accepted | „benson" | **DA** |
+| 6 | 0,949 | accepted | „benson" | **DA** |
+| 7 | 0,936 | accepted | „benson" | **DA** |
+| 8 | 0,877 | accepted | „benson" | **DA** |
+| 9 | 0,833 | accepted | „benson" | **DA** |
+| 10 | 0,810 | rejected (online, text gol) | — | NU |
+| 11 | 0,950 | accepted | „benson" | **DA** |
+| 12 | 0,918 | offline → scor<0,95 → respins | — | NU |
+| 13 | 0,938 | accepted | „benson" | **DA** |
+| 14 | 0,957 | rejected (online, text gol) | — | NU |
+| 15 | 0,941 | accepted | „benson" | **DA** |
+
+**12/15 (80%) — ținta ≥12/14 atinsă.** Salt mare față de 6/14 (43%) la Pasul 1.
+
+- **Încercarea #4** e prima confirmare reală că pragul offline de 0,95 chiar prinde un caz: scor
+  0,963, rețea picată, acceptat doar prin scorul local — fără Pasul 1(1) ar fi fost tăcere.
+- Toate cele 12 „accepted" au transcris literal „benson" — varianta penson/venson nu a fost
+  necesară azi (nimic nu arată că era folosită), dar rămâne acolo pentru data viitoare.
+- **Rămân 3 ratări**: #10 (0,810, cel mai slab scor din tot lotul — consistent cu tendința găsită la
+  Pasul 1, scor mic → verificare mai puțin sigură), #12 (0,918, sub pragul offline), și **#14, cel
+  mai surprinzător** — scor 0,957 (printre cele mai mari), online, conexiune ok, dar transcript gol.
+  Un scor mare nu garantează o transcriere reușită — zgomot/hiccup STT trecător, nu ceva ce scorul
+  local poate prezice.
+
 ## STOP — conform instrucțiunii. Aștept decizia ta pentru Pasul 2.
