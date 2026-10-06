@@ -793,6 +793,11 @@ class BensonForegroundService : Service() {
           "accepted" -> retainWakeClip(wavPath, "positive")
           "rejected" -> retainWakeClip(wavPath, "negative")
         }
+        // RUNDA AC2-F — PASUL 0 (07.10.2026, DEBUG ONLY, diagnostic, product-owner-directed):
+        // salvează necondiționat (inclusiv "offline", pe care retainWakeClip de mai sus îl sare)
+        // fiecare clip trimis la verificare, cu durata/peakRms/scor, pentru analiza celor 5
+        // "Benson" reale. Revert: șterge acest apel — restul fluxului nu se schimbă.
+        diagSaveAc2fWakeClip(wavPath, score, triggeredAtMs, resultLabel)
         mainHandler.post {
           if (!verified) {
             rearmWakeNative("wake_verify_rejected")
@@ -920,6 +925,44 @@ class BensonForegroundService : Service() {
       AudioDiag.log(this, "WAKE_DATASET", "label=$label count=${minOf(clips.size, WAKE_DATASET_MAX_CLIPS)}")
     } catch (e: Exception) {
       AudioDiag.logError("WAKE_DATASET_ERROR", "type=${e.javaClass.simpleName}")
+    }
+  }
+
+  // RUNDA AC2-F — PASUL 0 (07.10.2026, DEBUG ONLY). Refused on a signed release build regardless
+  // of whether this code ships in it — same guard idiom as handleTestSimulateHandoffMiss above
+  // (android:debuggable from the live ApplicationInfo; this module generates no BuildConfig field).
+  // Reads the WAV's own PCM (44-byte header, 16-bit mono LE, RATE=16000 — HeedWakeWord.writeWav's
+  // exact format) for duration/peakRms, no re-decoding library needed.
+  private fun diagSaveAc2fWakeClip(wavPath: String, score: Float, triggeredAtMs: Long, resultLabel: String) {
+    val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    if (!debuggable) return
+    try {
+      val bytes = File(wavPath).readBytes()
+      if (bytes.size <= 44) {
+        AudioDiag.log(this, "AC2F_DIAG_CLIP", "kind=wake result=$resultLabel error=empty_or_header_only bytes=${bytes.size}")
+        return
+      }
+      var sumSquares = 0.0
+      var peak = 0
+      var i = 44
+      while (i + 1 < bytes.size) {
+        val sample = ((bytes[i + 1].toInt() shl 8) or (bytes[i].toInt() and 0xFF)).toShort().toInt()
+        sumSquares += sample.toDouble() * sample.toDouble()
+        if (kotlin.math.abs(sample) > peak) peak = kotlin.math.abs(sample)
+        i += 2
+      }
+      val sampleCount = (bytes.size - 44) / 2
+      val durMs = sampleCount * 1000 / 16000
+      val rms = if (sampleCount > 0) kotlin.math.sqrt(sumSquares / sampleCount) else 0.0
+      val dir = File(getExternalFilesDir(null), "ac2f_diag").apply { if (!exists()) mkdirs() }
+      val dest = File(dir, "wake_${triggeredAtMs}_score${"%.3f".format(score)}_$resultLabel.wav")
+      File(wavPath).copyTo(dest, overwrite = true)
+      AudioDiag.log(
+        this, "AC2F_DIAG_CLIP",
+        "kind=wake path=${dest.name} durMs=$durMs peakRms=${"%.0f".format(rms)} score=${"%.3f".format(score)} result=$resultLabel triggeredAtMs=$triggeredAtMs",
+      )
+    } catch (e: Exception) {
+      AudioDiag.logError("AC2F_DIAG_CLIP_ERROR", "kind=wake type=${e.javaClass.simpleName}")
     }
   }
 

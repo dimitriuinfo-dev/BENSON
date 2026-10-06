@@ -96,6 +96,46 @@ class NativeConfirmationListener(
     }
   }
 
+  // RUNDA AC2-F — PASUL 0 (07.10.2026, DEBUG ONLY). Same guard idiom as
+  // BensonForegroundService.handleTestSimulateHandoffMiss (android:debuggable from the live
+  // ApplicationInfo — this module generates no BuildConfig field either). `bytes` here is raw PCM
+  // (no WAV header — ByteArrayOutputStream, SAMPLE_RATE/16-bit mono), wrapped with a minimal
+  // header before saving so the .wav plays back directly.
+  private fun diagSaveAc2fConfirmClip(bytes: ByteArray, reason: String, startedAt: Long, speechStartedAt: Long) {
+    val debuggable = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    if (!debuggable) return
+    try {
+      if (bytes.isEmpty()) {
+        log("AC2F_DIAG_CLIP", "kind=confirm reason=$reason error=empty")
+        return
+      }
+      var sumSquares = 0.0
+      var peak = 0
+      var i = 0
+      while (i + 1 < bytes.size) {
+        val sample = ((bytes[i + 1].toInt() shl 8) or (bytes[i].toInt() and 0xFF)).toShort().toInt()
+        sumSquares += sample.toDouble() * sample.toDouble()
+        if (kotlin.math.abs(sample) > peak) peak = kotlin.math.abs(sample)
+        i += 2
+      }
+      val sampleCount = bytes.size / 2
+      val durMs = sampleCount * 1000 / SAMPLE_RATE
+      val rms = if (sampleCount > 0) sqrt(sumSquares / sampleCount) else 0.0
+      val speechOnsetMs = if (speechStartedAt > 0) speechStartedAt - startedAt else -1L
+      val header = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      header.put("RIFF".toByteArray(Charsets.US_ASCII)); header.putInt(36 + bytes.size)
+      header.put("WAVEfmt ".toByteArray(Charsets.US_ASCII)); header.putInt(16); header.putShort(1)
+      header.putShort(1); header.putInt(SAMPLE_RATE); header.putInt(SAMPLE_RATE * 2)
+      header.putShort(2); header.putShort(16); header.put("data".toByteArray(Charsets.US_ASCII)); header.putInt(bytes.size)
+      val dir = java.io.File(context.getExternalFilesDir(null), "ac2f_diag").apply { if (!exists()) mkdirs() }
+      val dest = java.io.File(dir, "confirm_${startedAt}_$reason.wav")
+      java.io.FileOutputStream(dest).use { out -> out.write(header.array()); out.write(bytes) }
+      log("AC2F_DIAG_CLIP", "kind=confirm path=${dest.name} durMs=$durMs peakRms=${"%.0f".format(rms)} speechOnsetMs=$speechOnsetMs reason=$reason")
+    } catch (e: Exception) {
+      log("AC2F_DIAG_CLIP_ERROR", "kind=confirm type=${e.javaClass.simpleName}")
+    }
+  }
+
   /** Cancels any in-flight STT request so mic ownership hands off promptly. */
   fun stop() {
     if (!running && thread == null) return
@@ -172,6 +212,10 @@ class NativeConfirmationListener(
     fun finishWithCapture(reason: String) {
       log("CONFIRM_LISTEN_VAD_END", "reason=$reason bytes=${pcm.size()}")
       val bytes = pcm.toByteArray()
+      // RUNDA AC2-F — PASUL 0 (07.10.2026, DEBUG ONLY, diagnostic, product-owner-directed):
+      // salvează clipul de confirmare necondiționat, pentru analiza manuală alături de clipurile
+      // de wake. Revert: șterge acest apel.
+      diagSaveAc2fConfirmClip(bytes, reason, startedAt, speechStartedAt)
       // DEV_STT_DEEPGRAM_1 — dev routing; postToGroq(bytes) is the production call this reverts
       // to (see companion object comment above).
       val transcript = postToDeepgram(bytes) ?: ""
