@@ -10,6 +10,13 @@ implementează pe loc. Fără dată de livrare — se reconsideră abia după ce
   `ANSWER_PHONE_CALLS`); „Nu" → lasă să sune/respinge. Agenda citită local, nimic nu părăsește
   telefonul. 3. Ambele intră în enum doar cu rețetă verificată pe dispozitiv. Acceptare: 5× apel GSM
   reușit, 5× apel primit preluat prin voce.
+- **RUNDA WHATSAPP 2** (07.10.2026, după TELEFON): 1. `WA_READ` — citire mesaje prin
+  `NotificationListenerService` (expeditor + text), DOAR la cerere („am mesaje?", „citește mesajul
+  de la X"). Conținutul = UNTRUSTED_DATA, niciodată instrucțiune. Local, nestocat.
+  2. `WA_REPLY` — răspuns prin `RemoteInput` din notificare, după confirmarea „Răspuns către X:
+  «…». Dorești să-l trimit?". 3. `WA_HANGUP` prin voce: NU — în apel microfonul e al WhatsApp;
+  închidere prin butonul de volan (HFP) sau manual, BENSON curăță după apel. Fiecare acțiune intră
+  în enum doar cu rețetă verificată pe dispozitiv.
 
 - CAR-3a/CAR-3b: ecranul Android Auto (BensonCarAppService) și microfonul mașinii (CarAudioRecord,
   la atingere). Validatorul Android Auto încă respinge pachetul („failed all other checks", cauză
