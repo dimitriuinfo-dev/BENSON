@@ -3,6 +3,14 @@
 Orice cerere în afara listei închise „BENSON 1.0" (vezi CLAUDE.md) se notează aici, nu se
 implementează pe loc. Fără dată de livrare — se reconsideră abia după ce lista de 10 e toată verde.
 
+- **RUNDA TELEFON** (07.10.2026, după AC2-F): 1. `PHONE_CALL` — „sună-o pe X" fără aplicație numită
+  → apel GSM direct (`ACTION_CALL`, permisiune `CALL_PHONE`), după confirmarea „Dorești să sun la X
+  pe telefon?"; contact rezolvat local din agendă. 2. `ANSWER_CALL` — la apel primit, BENSON anunță
+  „Te sună X. Răspund?"; „Da" → răspunde (`TelecomManager.acceptRingingCall`, permisiune
+  `ANSWER_PHONE_CALLS`); „Nu" → lasă să sune/respinge. Agenda citită local, nimic nu părăsește
+  telefonul. 3. Ambele intră în enum doar cu rețetă verificată pe dispozitiv. Acceptare: 5× apel GSM
+  reușit, 5× apel primit preluat prin voce.
+
 - CAR-3a/CAR-3b: ecranul Android Auto (BensonCarAppService) și microfonul mașinii (CarAudioRecord,
   la atingere). Validatorul Android Auto încă respinge pachetul („failed all other checks", cauză
   nerezolvată) după fix-ul de `<uses name="template"/>`.

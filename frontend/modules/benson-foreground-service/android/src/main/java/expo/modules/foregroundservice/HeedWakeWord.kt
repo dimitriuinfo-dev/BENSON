@@ -43,6 +43,7 @@ internal class HeedWakeWord(
     const val PRE_ROLL_SAMPLES = RATE * 1_500 / 1_000
     private const val MAX_COMMAND_SAMPLES = RATE * 8
     private const val TAIL_SILENCE_SAMPLES = RATE * 1_200 / 1_000
+    private const val WAKE_MIC_LEVEL_INTERVAL_MS = 30_000L
     private const val MODEL_ASSET = "wakeword/heed_candidate.onnx"
     private const val META_ASSET = "wakeword/heed_candidate.json"
 
@@ -215,7 +216,10 @@ internal class HeedWakeWord(
         }
         val audio = if (read == chunk.size) chunk.copyOf() else chunk.copyOfRange(0, read)
         val nowMs = System.currentTimeMillis()
-        if (nowMs - lastLevelLogAt >= 1000) {
+        // RUNDA AC2-F, Pasul 1 (07.10.2026) — 1/sec împingea liniile utile (WAKE_SCORE/WAKE_VERIFY)
+        // afară din buffer-ul de logcat înainte să apuce cineva să le captureze (dovedit de două
+        // ori azi). Revert: WAKE_MIC_LEVEL_INTERVAL_MS = 1_000.
+        if (nowMs - lastLevelLogAt >= WAKE_MIC_LEVEL_INTERVAL_MS) {
           lastLevelLogAt = nowMs
           var sumSquares = 0.0
           for (s in audio) sumSquares += s.toDouble() * s.toDouble()

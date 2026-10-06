@@ -780,12 +780,12 @@ class BensonForegroundService : Service() {
       // applyWakeForegroundPolicy/handleNativeCommandFlow sequence that used to run immediately.
       val acceptedAtMs = System.currentTimeMillis()
       Thread({
-        val (verifyTranscript, connReused) = wakeVerifyTranscribe(wavPath)
+        val (verifyTranscript, connReused, clipMs) = wakeVerifyTranscribe(wavPath)
         val verified = isWakeVerified(verifyTranscript, score)
         val resultLabel = if (verifyTranscript == null) "offline" else if (verified) "accepted" else "rejected"
         AudioDiag.log(
           this, "WAKE_VERIFY",
-          "result=$resultLabel text=\"${verifyTranscript ?: ""}\" score=${"%.3f".format(score)} latencyMs=${System.currentTimeMillis() - acceptedAtMs} connReused=$connReused",
+          "result=$resultLabel text=\"${verifyTranscript ?: ""}\" score=${"%.3f".format(score)} clipMs=$clipMs latencyMs=${System.currentTimeMillis() - acceptedAtMs} connReused=$connReused",
         )
         // FIX_WAKE_DATASET_1 (2026-10-03, user-directed) — "offline" is skipped: a timeout tells
         // us nothing about whether the clip was really "Benson", so it's never labeled either way.
@@ -966,12 +966,33 @@ class BensonForegroundService : Service() {
     }
   }
 
-  private fun wakeVerifyTranscribe(wavPath: String): Pair<String?, Boolean> {
-    val bytes = try { File(wavPath).readBytes() } catch (_: Exception) { null } ?: return null to false
-    if (bytes.isEmpty()) return null to false
+  // RUNDA AC2-F, Pasul 1 (07.10.2026) — fereastră fixă în jurul cuvântului: preroll-ul
+  // (HeedWakeWord.PRE_ROLL_SAMPLES, 1,5s) e mereu scris PRIMUL în WAV, deci oricât de lung ar fi
+  // restul clipului (până la 8s), primele (1,5+1,0)=2,5s conțin exact cuvântul — nu mai trimitem
+  // restul la Deepgram. Revert: WAKE_VERIFY_POST_TRIGGER_MS = 6_500 (readuce fereastra la ~8s).
+  private val WAKE_VERIFY_POST_TRIGGER_MS = 1_000
+  private val WAKE_VERIFY_WINDOW_BYTES = (HeedWakeWord.PRE_ROLL_SAMPLES + 16_000 * WAKE_VERIFY_POST_TRIGGER_MS / 1_000) * 2
+
+  private fun trimToVerifyWindow(bytes: ByteArray): ByteArray {
+    if (bytes.size <= 44) return bytes
+    val pcm = bytes.copyOfRange(44, bytes.size)
+    val trimmedPcm = if (pcm.size > WAKE_VERIFY_WINDOW_BYTES) pcm.copyOfRange(0, WAKE_VERIFY_WINDOW_BYTES) else pcm
+    val header = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    header.put("RIFF".toByteArray(Charsets.US_ASCII)); header.putInt(36 + trimmedPcm.size)
+    header.put("WAVEfmt ".toByteArray(Charsets.US_ASCII)); header.putInt(16); header.putShort(1)
+    header.putShort(1); header.putInt(16_000); header.putInt(16_000 * 2)
+    header.putShort(2); header.putShort(16); header.put("data".toByteArray(Charsets.US_ASCII)); header.putInt(trimmedPcm.size)
+    return header.array() + trimmedPcm
+  }
+
+  private fun wakeVerifyTranscribe(wavPath: String): Triple<String?, Boolean, Int> {
+    val fullBytes = try { File(wavPath).readBytes() } catch (_: Exception) { null } ?: return Triple(null, false, 0)
+    if (fullBytes.isEmpty()) return Triple(null, false, 0)
+    val bytes = trimToVerifyWindow(fullBytes)
+    val clipMs = (bytes.size - 44) * 1000 / (16_000 * 2)
     val dgKey = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
       .getString("wake_stt_deepgram_api_key", "") ?: ""
-    if (dgKey.isBlank()) return null to false
+    if (dgKey.isBlank()) return Triple(null, false, clipMs)
     // FIX_WAKE_VERIFY_KEYTERM_1 (2026-10-03, user-directed) — Deepgram Keyterm Prompting
     // (confirmed via developers.deepgram.com/docs/keyterm: param name `keyterm`, Nova-3,
     // multilingual-compatible) biases the model toward writing the wake name correctly instead of
@@ -989,13 +1010,13 @@ class BensonForegroundService : Service() {
     return try {
       client.newCall(request).execute().use { resp ->
         val connReused = !tracker.newConnection
-        if (!resp.isSuccessful) return null to connReused
-        val json = resp.body?.string() ?: return null to connReused
+        if (!resp.isSuccessful) return Triple(null, connReused, clipMs)
+        val json = resp.body?.string() ?: return Triple(null, connReused, clipMs)
         val alt = JSONObject(json).optJSONObject("results")?.optJSONArray("channels")
           ?.optJSONObject(0)?.optJSONArray("alternatives")?.optJSONObject(0)
-        (alt?.optString("transcript", "") ?: "").trim() to connReused
+        Triple((alt?.optString("transcript", "") ?: "").trim(), connReused, clipMs)
       }
-    } catch (_: Exception) { null to !tracker.newConnection }
+    } catch (_: Exception) { Triple(null, !tracker.newConnection, clipMs) }
   }
 
   // FIX_WAKE_VERIFY_FAILSAFE_1 (2026-10-03, device-proven) — the original heedScore>=0.90
@@ -1015,8 +1036,22 @@ class BensonForegroundService : Service() {
   // the signature only to avoid touching the call site above. wakeName comes from
   // NativeCloudWake.currentWakeName — same source keyterm uses, same source HeedWakeWord already
   // trusts for model selection — not hardcoded "Benson".
-  private fun isWakeVerified(transcript: String?, heedScore: Float): Boolean =
-    WakeVerifyMatcher.isWakeVerified(transcript, NativeCloudWake.currentWakeName(this))
+  // RUNDA AC2-F, Pasul 1 (07.10.2026, product-owner-directed, aprobat cu precizări) — offline e
+  // acum decis de scorul local, nu mai e respingere necondiționată. ATENȚIE, dovadă deja în cod,
+  // nu ignorată: FIX_WAKE_VERIFY_FAILSAFE_1 de mai sus (2026-10-03) a RENUNȚAT exact la acest
+  // fallback fiindcă alarmele false observate atunci scoreau 0,795-0,984 — PESTE pragul 0,95 ales
+  // acum. Implementat exact cum a cerut Rareș, cu riscul semnalat explicit în raport, nu ascuns.
+  // Revert: OFFLINE_ACCEPT_SCORE_THRESHOLD = 2f (peste orice scor posibil => offline respinge mereu).
+  private val OFFLINE_ACCEPT_SCORE_THRESHOLD = 0.95f
+
+  private fun isWakeVerified(transcript: String?, heedScore: Float): Boolean {
+    if (transcript == null) {
+      val accepted = heedScore >= OFFLINE_ACCEPT_SCORE_THRESHOLD
+      AudioDiag.log(this, "WAKE_OFFLINE_DECISION", "score=${"%.3f".format(heedScore)} threshold=$OFFLINE_ACCEPT_SCORE_THRESHOLD accepted=$accepted")
+      return accepted
+    }
+    return WakeVerifyMatcher.isWakeVerified(transcript, NativeCloudWake.currentWakeName(this))
+  }
 
   // ── NATIVE_CMD_1 (2026-10-02, user-approved) — native capture → STT → simple-command routing ──
   // Full chain now lives here, per CLAUDE.md's wake contract: wake, ack, session, command capture,
