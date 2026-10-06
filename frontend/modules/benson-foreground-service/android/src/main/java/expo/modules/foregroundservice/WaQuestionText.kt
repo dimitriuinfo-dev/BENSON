@@ -8,10 +8,13 @@ package expo.modules.foregroundservice
 // Extras din BensonForegroundService.waQuestionFor (același pattern ca WaCallVideoMatcher) ca să
 // fie JUnit-testabil — pur, zero dependență de Context. Logica de confirmare (da/nu, fereastra de
 // captură) nu e atinsă aici, doar textul întrebării.
+// CORECȚIE (06.10.2026, product-owner-directed): WA_MESSAGE rostește din nou conținutul mesajului
+// — în mașină Rareș nu vede ecranul, deci WA_VISIBLE_DRAFT (neatins) nu ajută acolo; conținutul
+// trebuie AUZIT înainte de „Da". Revenire parțială față de runda anterioară, care scosese conținutul.
 object WaQuestionText {
   fun forKind(kind: String, name: String, message: String?): String = when (kind) {
     "call" -> "Dorești apel WhatsApp cu $name?"
     "video" -> "Dorești apel video WhatsApp cu $name?"
-    else -> "Dorești să trimit mesajul către $name?"
+    else -> "Mesaj către $name: «$message». Dorești să-l trimit?"
   }
 }

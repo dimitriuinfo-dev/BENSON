@@ -122,3 +122,39 @@ deliberată, nu regresie accidentală.
 
 **Fără test pentru `askWhoToCall` (JS)**: `npm test` nu are script configurat (lacună cunoscută,
 neinventată) — nicio infrastructură de test pentru `app/index.tsx` în acest proiect azi.
+
+---
+
+## CORECȚIE — WA_MESSAGE rostește din nou conținutul (06.10.2026)
+
+Motivul dat de Rareș: în mașină nu vede ecranul — `WA_VISIBLE_DRAFT` (confirmarea vizuală a
+textului pe ecran) nu ajută acolo. Conținutul trebuie AUZIT înainte de „Da".
+
+`WaQuestionText.kt`: `else -> "Dorești să trimit mesajul către $name?"` →
+`else -> "Mesaj către $name: «$message». Dorești să-l trimit?"` — revenire parțială la vechiul
+comportament (conținutul), păstrând cuvântul interogativ (`Dorești`) în propoziția finală.
+
+Teste actualizate: `message()` cu textul nou exact; `messageDoesNotSpeakBackContent` ȘTERS,
+înlocuit cu `messageSpeaksBackContent` (inversul — verifică explicit că textul rostit CONȚINE
+mesajul); `allThreeStartWithInterrogativeWord` despărțit în
+`callAndVideoStartWithInterrogativeWord` (neschimbat ca test) + `messageEndsWithInterrogativeQuestion`
+(message nu mai începe cu „Dorești", dar se termină cu „Dorești să-l trimit?" — regula se aplică
+propoziției finale, nu întregului text). **6/6 verde** (`:benson-foreground-service:testReleaseUnitTest`).
+
+### Bază și stare push
+
+- `wip_2026_10_06_question_mark` pornește din tag-ul `settings-2026-10-06` (commit `1026d51`),
+  confirmat: `git merge-base --is-ancestor settings-2026-10-06 wip_2026_10_06_question_mark` → true.
+- **Push-ul rundei settings NU a fost făcut.** Nimic (`settings-2026-10-06`/branch-uri `wip_*`) nu
+  există pe `origin` încă — confirmat prin `git ls-remote`. Rămâne blocat pe descoperirea din runda
+  trecută: `origin/main` are 13 commit-uri independente de azi (`RECOVERY_*`), fără strămoș comun cu
+  linia asta de dezvoltare — push-ul către `main` tot așteaptă decizia ta, netrecut aici.
+
+### TESTE finale
+
+- `gradlew :benson-foreground-service:testReleaseUnitTest`: 6/6 (`WaQuestionTextTest`).
+- `npx tsc --noEmit`: curat.
+- `gradlew assembleRelease`: BUILD SUCCESSFUL (51s). APK:
+  `android/app/build/outputs/apk/release/app-release.apk`, 387.334.823 bytes,
+  sha256 `c900cc1e5a2d635bc21230359829d5e6622fc0f34c8162d31fe682bd02fb1d7a`.
+  **Neinstalat de mine** — Rareș verifică hash-ul și instalează.
