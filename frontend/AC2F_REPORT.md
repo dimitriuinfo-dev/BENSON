@@ -139,3 +139,49 @@ Cazul „online dar gol" rămâne o întrebare separată, văzută o dată, neco
 ## STOP — conform instrucțiunii
 
 Niciun cod din Pasul 1-5. Aștept confirmarea ta pentru a continua.
+
+---
+
+## TESTUL PASUL 1 — 14 încercări capturate pe fișier (nu buffer), 07.10.2026
+
+Mai multe de 10 — presupun reîncercări după tăceri. Toate din `ac2f_pasul1_10x_test.log`.
+
+| # | Ora | Scor | Rezultat | clipMs | latencyMs | connReused | „Da, Master"? |
+|---|---|---|---|---|---|---|---|
+| 1 | 19:02:31 | 0,849 | rejected (online, text gol) | 2500 | 1936 | false | **NU** |
+| 2 | 19:02:41 | 0,832 | rejected (online, text gol) | 2500 | 1482 | true | **NU** |
+| 3 | 19:05:05 | 0,889 | offline → scor<0,95 → respins | 2500 | 2008 | false | **NU** |
+| 4 | 19:06:07 | 0,853 | rejected (online, text gol) | 2500 | 1386 | false | **NU** |
+| 5 | 19:07:12 | 0,916 | offline → scor<0,95 → respins | 2500 | 2006 | true | **NU** |
+| 6 | 19:07:30 | 0,919 | **accepted**, text="benson" | 2500 | 1141 | false | **DA** |
+| 7 | 19:07:44 | 0,821 | offline → scor<0,95 → respins | 2500 | 2008 | false | **NU** |
+| 8 | 19:07:57 | 0,957 | **accepted**, text="benson" | 2500 | 1708 | false | **DA** |
+| 9 | 19:08:09 | 0,903 | **accepted**, text="benson" | 2500 | 891 | true | **DA** |
+| 10 | 19:08:24 | 0,910 | offline → scor<0,95 → respins | 2500 | 2011 | false | **NU** |
+| 11 | 19:08:38 | 0,933 | **accepted**, text="benson" | 2500 | 1273 | true | **DA** |
+| 12 | 19:08:51 | 0,918 | offline → scor<0,95 → respins | 2500 | 2011 | false | **NU** |
+| 13 | 19:09:05 | 0,904 | **accepted**, text="benson" | 2500 | 1333 | false | **DA** |
+| 14 | 19:09:26 | 0,974 | **accepted**, text="benson" | 2500 | 1561 | false | **DA** |
+
+**6/14 „Da, Master" (43%).** `clipMs=2500` consistent peste tot — trimmingul la fereastră fixă
+funcționează corect în toate cele 14 cazuri.
+
+### Diferența reală dintre reușite și ratări
+
+**Nu e offline vs. online cum părea ieri — e scorul HEED însuși.** Toate cele 6 reușite au scor
+≥0,903. Toate cele 8 ratări (atât „offline" cât și „rejected text gol" online) au scor ≤0,919, cu
+**7 din 8 sub 0,92**. Există suprapunere (0,903 a reușit, 0,916 nu) — nu separă curat — dar
+tendința e clară: **sub ~0,90, verificarea aproape sigur nu găsește cuvântul, indiferent dacă
+rețeaua merge sau nu.**
+
+**Pragul de 0,95 pentru acceptarea offline NU a prins niciun caz azi** — toate cele 5 „offline" au
+scoruri 0,821-0,918, toate sub 0,95. Fix-ul de la Pasul 1(1) a avut, concret, **efect zero în acest
+test**: a rămas o plasă de siguranță teoretică, nu una care a prins ceva azi.
+
+**Nou față de Pasul 0**: acum am și 3 cazuri „rejected text gol" ONLINE (nu offline) — conexiunea a
+mers, Deepgram a răspuns, dar n-a auzit nimic. Scorurile lor (0,849/0,832/0,853) sunt în aceeași
+bandă joasă ca „offline"-urile — susține aceeași concluzie: cauza comună probabilă e claritatea
+reală a rostirii/zgomotul de fond la momentul acelor încercări, nu un bug separat de rețea sau
+verificare. Nu e ceva ce codul poate repara prin prag sau fereastră — e ce a ajuns în microfon.
+
+## STOP — conform instrucțiunii. Aștept decizia ta pentru Pasul 2.
