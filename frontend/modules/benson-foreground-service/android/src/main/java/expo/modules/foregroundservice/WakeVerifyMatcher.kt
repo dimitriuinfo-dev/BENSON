@@ -11,7 +11,13 @@ object WakeVerifyMatcher {
   // Hand-tuned Deepgram-confusion variants for the DEFAULT wake name only. Applied only when the
   // configured name actually normalizes to "benson" — a different configured name (e.g. "Toma")
   // must not inherit Benson's own STT quirks.
-  private val BENSON_KNOWN_VARIANTS = setOf("benson", "bensan", "benzon", "bensen", "bension")
+  // RUNDA AC2-F, Pasul 1b (07.10.2026, product-owner-directed) — "penson"/"venson" adăugate
+  // explicit: consoanele inițiale p/v sunt confuzii acustice reale cu b pe un cuvânt izolat, fără
+  // context de propoziție, dar NU treceau de verificarea `word[0] == firstLetter` de mai jos
+  // (firstLetter fiind 'b') — respinse înainte să ajungă la Levenshtein, indiferent de distanță.
+  // Whitelist explicit, nu relaxare a regulii generale de literă inițială (care rămâne garda
+  // principală împotriva alarmelor false pe alte cuvinte). Revert: scoate "penson"/"venson".
+  private val BENSON_KNOWN_VARIANTS = setOf("benson", "bensan", "benzon", "bensen", "bension", "penson", "venson")
 
   // FIX_WAKE_VERIFY_KEYTERM_1 (2026-10-03, user-directed) — distance<=3 (no other constraint)
   // accepted "pension"/"person"/"benzin" as well as "bandswon": too loose. Tightened to distance
