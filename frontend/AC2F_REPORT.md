@@ -88,6 +88,54 @@ adb pull /storage/emulated/0/Android/data/com.benson.butler/files/ac2f_diag ac2f
 - `npx tsc --noEmit`: curat (nicio schimbare JS de data asta).
 - `gradlew assembleDebug`: BUILD SUCCESSFUL.
 
+---
+
+## ANALIZA CLIPURILOR — 07.10.2026 (fără cod, doar analiză)
+
+**Onest, înainte de concluzie**: din 5 × „Benson" + 1 confirmare testate, am recuperat date pentru
+**4 din cele 5 încercări de wake și 0 din confirmare**. Logcat-ul e un buffer circular (dovedit
+deja de mai multe ori în sesiunea asta) — a 5-a încercare și confirmarea s-au întâmplat probabil
+înaintea ferestrei vizibile, iar liniile lor au fost deja împinse afară de spam-ul `WAKE_MIC_LEVEL`
+(o linie/secundă) până am apucat să fac captura. **Fișierele WAV în sine confirmă același lucru —
+exact 4 clipuri de wake pe disc, zero clipuri de confirmare** — nu e doar un gol de log, confirmarea
+chiar nu a produs un fișier. Două explicații posibile, nedistinse încă: (a) s-a întâmplat înainte de
+fereastra capturată și fișierul a fost... nu, fișierele nu se evică din storage ca logcat-ul, deci
+dacă `finishWithCapture` ar fi rulat vreodată azi, fișierul ar exista. **Concluzie clară pe acest
+punct: `NativeConfirmationListener.finishWithCapture` nu a rulat deloc azi** — fie confirmarea
+testată a mers pe alt drum decât acest listener, fie ceva a oprit fluxul înainte de acel punct.
+Nu ghicesc care — rămâne întrebare deschisă, posibil de clarificat cu ce comandă exact ai confirmat.
+
+### Cele 4 clipuri de wake
+
+| Clip | Scor | Rezultat | Durată | peakRms | Transcript |
+|---|---|---|---|---|---|
+| `…0,966_accepted` | 0,966 | accepted | 8000ms (**a atins plafonul max de 8s**) | 1461 | „benson" |
+| `…0,950_accepted` | 0,950 | accepted | 3800ms | 1272 | „benson" |
+| `…0,986_offline` | 0,986 | **offline** | 3900ms | 1337 | — (timeout 2013ms, connReused=false) |
+| `…0,955_accepted` | 0,955 | accepted | 7200ms | 1193 | „benson" |
+
+**3 din 4 au reușit curat** — transcris corect „benson", niciun semn de clipare/preroll insuficient:
+durată și peakRms arată clipuri normale, nimic trunchiat sau anormal de scurt. Primul clip a atins
+plafonul de 8 secunde (`MAX_COMMAND_SAMPLES`) fără 1,2s de tăcere — zgomot de fundal continuu
+probabil, dar transcrierea tot a ieșit corectă.
+
+**Singurul eșec din acest lot e „offline"** — exact Dovada 2, reconfirmată: scor local bun (0,986,
+peste orice prag discutat), rețeaua a picat la 2013ms, tratat ca respingere.
+
+### Ce NU confirmă acest lot
+
+Capturarea anterioară (turul trecut, live) arătase și un caz „rejected text="" connReused=true" —
+online, conexiune reușită, dar transcriere goală (nu timeout). **Acest lot de 4 nu reproduce acel
+caz** — fie condițiile de rețea au fost mai bune de data asta (posibil Wi-Fi vs. date mobile),
+fie a fost o coincidență de moment. Ipoteza „preroll insuficient" rămâne **neconfirmată ȘI
+nerespinsă** din acest lot — pur și simplu n-a apărut cazul relevant pentru ea.
+
+### Cauza, pe scurt
+
+Din ce am putut analiza azi: **cauza dominantă, reproductibilă, e exact Dovada 2** (offline/timeout
+tratat ca respingere necondiționat, fără fallback pe scor) — nu un clip corupt sau prost tăiat.
+Cazul „online dar gol" rămâne o întrebare separată, văzută o dată, neconfirmată aici.
+
 ## STOP — conform instrucțiunii
 
-Niciun cod din Pasul 1-5. Aștept clipurile + confirmarea ta pentru a continua.
+Niciun cod din Pasul 1-5. Aștept confirmarea ta pentru a continua.
