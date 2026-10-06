@@ -2570,7 +2570,18 @@ export default function BensonApp() {
     bumpSessionKeepAwake();
     stopSpeaking();
     beginTtsBlock();
-    if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
+    // Product-owner report (2026-10-06): Benson silent the whole time it ran behind Spotify in the
+    // bubble (typed commands still worked instantly — only voice, both ways, was dead). Root cause
+    // for the OUT direction: Round D (2026-08-31, see the AppState listener above) correctly kills
+    // any in-flight network TTS on backgrounding because Android genuinely cannot play OpenAI/
+    // Gemini's fetched-audio-file TTS while backgrounded — but nothing routed FUTURE speech
+    // (like this reply, confirming the Spotify search) away from that same broken path while still
+    // backgrounded, so it just silently failed to produce audio every time, not just once.
+    // On-device TTS (expo-speech, native Android TextToSpeech) has no such restriction — it is
+    // the only provider used whenever the bubble (not BENSON's own screen) is what's visible.
+    if (!isForegroundRef.current) {
+      speakOnDevice(text, onFinished);
+    } else if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
       speakWithGemini(
         text, geminiKeyRef.current, 'Kore',
         () => { endTtsBlock('success'); onFinished?.(); },
@@ -2598,7 +2609,12 @@ export default function BensonApp() {
     // Fire-and-forget still blocks the mic for the duration + tail (previously it did NOT touch
     // speakingRef at all, so the mic stayed open through these replies — a real echo source).
     beginTtsBlock();
-    if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
+    // See speakText's 2026-10-06 comment above — network TTS cannot play while backgrounded at
+    // all, so route straight to on-device speech whenever the bubble (not BENSON's own screen) is
+    // what's visible, instead of attempting a provider guaranteed to fail silently.
+    if (!isForegroundRef.current) {
+      speakOnDevice(text);
+    } else if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
       speakWithGemini(text, geminiKeyRef.current, 'Kore', () => endTtsBlock('success'))
         .catch(() => speakOnDevice(text));
     } else if (ttsProviderRef.current === 'openai' && openaiKeyRef.current) {
@@ -2626,15 +2642,11 @@ export default function BensonApp() {
     rememberSpoken(text);
     bumpSessionKeepAwake();
     beginTtsBlock();
-    if (ttsProviderRef.current === 'gemini' && geminiKeyRef.current) {
-      speakWithGemini(text, geminiKeyRef.current, 'Kore', () => endTtsBlock('success'))
-        .catch(() => speakOnDevice(text));
-    } else if (ttsProviderRef.current === 'openai' && openaiKeyRef.current) {
-      speakWithOpenAI(text, openaiKeyRef.current, 'onyx', () => endTtsBlock('success'), currentVoiceInstructions())
-        .catch(() => speakOnDevice(text));
-    } else {
-      speakOnDevice(text);
-    }
+    // 2026-10-06 — unconditionally on-device, never the configured network provider: this only
+    // ever fires while hibernating, which by definition means backgrounded/screen-off, and network
+    // TTS cannot produce audio at all in that state (see speakText's comment above for the full
+    // story — this function would otherwise be silently useless exactly when it matters most).
+    speakOnDevice(text);
   }
 
   // Plays streamed reply sentences back-to-back as they arrive, instead of waiting
