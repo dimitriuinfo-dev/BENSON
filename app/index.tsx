@@ -1996,9 +1996,20 @@ export default function BensonApp() {
     })();
   }, [phase]);
 
+  // Product-owner report (2026-10-06): the unfiltered list (473 on-device voices, alphabetical —
+  // ar/as-IN/... come before anything useful) made Settings effectively unscrollable, burying the
+  // Debug Panel button further down the same screen ("nu mai există Debug Panel" — it was always
+  // there, just unreachable past this wall of irrelevant languages). BENSON only ever speaks
+  // ro/en/de (see the LANGUAGE selector just above this list) — showing only those is enough,
+  // never a reason to need the other ~450.
+  const SUPPORTED_VOICE_LANG_PREFIXES = ['ro', 'en', 'de'];
   const voiceGroups = useMemo(() => {
     const groups: Record<string, Voice[]> = {};
-    for (const v of voices) (groups[v.language] ??= []).push(v);
+    for (const v of voices) {
+      const prefix = v.language.split(/[-_]/)[0].toLowerCase();
+      if (!SUPPORTED_VOICE_LANG_PREFIXES.includes(prefix)) continue;
+      (groups[v.language] ??= []).push(v);
+    }
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   }, [voices]);
 
@@ -5518,7 +5529,9 @@ export default function BensonApp() {
               </View>
 
               {/* Stage 6 — Specific voice selection */}
-              <Text style={s.label}>VOICE SELECTION  ({voices.length} on device)</Text>
+              <Text style={s.label}>
+                VOICE SELECTION  ({voiceGroups.reduce((n, [, vs]) => n + vs.length, 0)} relevant of {voices.length} on device)
+              </Text>
               {voiceGroups.map(([langCode, vs]) => (
                 <View key={langCode} style={{ marginBottom: 14 }}>
                   <Text style={s.groupLabel}>{langCode}</Text>
