@@ -505,6 +505,11 @@ export function addSpeechEndListener(cb: () => void) {
 export function speakNow(text: string, options: Speech.SpeechOptions) {
   // Keep the app-level TTS state separate from proof that Android's speech engine actually
   // accepted and completed the utterance. Log lifecycle only; never write message text to logs.
+  // RUNDA „BENSON ÎNTREABĂ CA O ÎNTREBARE" (06.10.2026): NU s-a extins cu textul complet aici —
+  // speakNow e o funcție comună, folosită potențial și pentru citit conținut WhatsApp (date
+  // UNTRUSTED, politica "niciodată în log" contează mai mult acolo). Textul complet, cu
+  // punctuație, e logat doar la sursă, în BensonForegroundService.speakNativeFallbackThenCapture
+  // — acolo unde chiar trăiesc întrebările de confirmare (vezi inventarul din raport).
   logAudioDiag('TTS_NATIVE_REQUEST', `chars=${text.length} language=${options.language ?? 'default'}`);
   try {
     Speech.speak(text, {

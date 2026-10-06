@@ -371,6 +371,10 @@ class BensonForegroundService : Service() {
       // separate, bigger round if still wanted.
       applyTtsRouting(t)
       val utteranceId = "wake_say_${System.currentTimeMillis()}"
+      // ADĂUGARE — BENSON ÎNTREABĂ CA O ÎNTREBARE (06.10.2026, product-owner-directed): textul
+      // complet, cu punctuația, ca să se poată verifica pe log că „?" ajunge intact la motorul de
+      // voce — nu e trunchiat/sanitizat nicăieri pe acest drum (t.speak primește `text` neschimbat).
+      AudioDiag.log(this, "TTS_NATIVE_REQUEST", "text=\"$text\"")
       val result = t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, utteranceId)
       AudioDiag.log(this, "WAKE_FALLBACK", "engine=native result=$result")
     } else {

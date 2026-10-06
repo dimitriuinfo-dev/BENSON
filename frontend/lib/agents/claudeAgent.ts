@@ -57,6 +57,9 @@ export function buildSystemPrompt(
       `Address the user formally as "${address}". Efficient, precise, no-nonsense. ` +
       `Respond in language ${lang}. Concise and actionable.`,
   };
+  // RUNDA „BENSON ÎNTREABĂ CA O ÎNTREBARE" (06.10.2026, product-owner-directed) — comun tuturor
+  // personajelor, nu doar butler-ului.
+  const questionLine = `\n\nWhen you're not sure what the user wants, ask one short question — don't assume, and don't refuse.`;
   const learnedLine = learnedContext ? `\n\n${learnedContext}` : '';
   const drivingLine = drivingContext ? `\n\n${drivingContext}` : '';
   const toolsLine = hasTools
@@ -94,7 +97,7 @@ export function buildSystemPrompt(
       `claim the whole request succeeded when only part of it did. Confirming something that didn't ` +
       `actually happen is a serious error — never do it.`
     : '';
-  return base[character] + factsLine + familyLine + learnedLine + drivingLine + toolsLine;
+  return base[character] + factsLine + familyLine + questionLine + learnedLine + drivingLine + toolsLine;
 }
 
 // Claude Agent — the default conversational fallback, also used by Search Agent to synthesize answers.
