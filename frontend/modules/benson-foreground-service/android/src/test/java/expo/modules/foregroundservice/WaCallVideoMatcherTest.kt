@@ -28,4 +28,12 @@ class WaCallVideoMatcherTest {
   @Test fun trailingPunctuationStripped() = assertEquals("call" to "hannah", WaCallVideoMatcher.classify("Sună-o pe Hannah."))
 
   @Test fun noMatchForUnrelatedText() = assertEquals(null, WaCallVideoMatcher.classify("deschide youtube"))
+
+  // QUESTION_MARK — inventarul formelor cerute de Rareș. CORECTAT: "apelează"/"dă-i un apel lui"
+  // nu s-au adăugat la parser (anulat explicit — "Parserul NU primește tipare noi"; vor fi
+  // rezolvate prin interpretorul ChatGPT din experiment, nu aici). Rămân doar reconfirmările
+  // formelor deja recunoscute.
+  @Test fun sunaLPeX() = assertEquals("call" to "hannah", WaCallVideoMatcher.classify("sună-l pe Hannah"))
+  @Test fun sunOPeX() = assertEquals("call" to "hannah", WaCallVideoMatcher.classify("sun-o pe Hannah"))
+  @Test fun sunaLaX() = assertEquals("call" to "hannah", WaCallVideoMatcher.classify("sună la Hannah"))
 }

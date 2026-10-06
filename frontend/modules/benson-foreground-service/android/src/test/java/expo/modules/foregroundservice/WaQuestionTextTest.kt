@@ -7,8 +7,8 @@ import org.junit.Test
 // ADĂUGARE — ÎNTREBĂRILE LUI BENSON ÎNCEP CU CUVÂNT INTEROGATIV (06.10.2026). Golden tests: fiecare
 // șablon nou, plus o verificare generică "începe cu cuvânt interogativ" pentru toate 3.
 class WaQuestionTextTest {
-  @Test fun call() = assertEquals("Dorești apel WhatsApp cu Hannah?", WaQuestionText.forKind("call", "Hannah", null))
-  @Test fun video() = assertEquals("Dorești apel video WhatsApp cu Mama?", WaQuestionText.forKind("video", "Mama", null))
+  @Test fun call() = assertEquals("Dorești să sun la Hannah pe WhatsApp?", WaQuestionText.forKind("call", "Hannah", null))
+  @Test fun video() = assertEquals("Dorești apel video cu Mama pe WhatsApp?", WaQuestionText.forKind("video", "Mama", null))
   @Test fun message() = assertEquals("Mesaj către Ingrid: «Ajung în 10 minute». Dorești să-l trimit?", WaQuestionText.forKind("message", "Ingrid", "Ajung în 10 minute"))
 
   // CORECȚIE (06.10.2026): în mașină Rareș nu vede ecranul — conținutul mesajului TREBUIE auzit

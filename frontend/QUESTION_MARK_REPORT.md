@@ -158,3 +158,41 @@ propoziției finale, nu întregului text). **6/6 verde** (`:benson-foreground-se
   `android/app/build/outputs/apk/release/app-release.apk`, 387.334.823 bytes,
   sha256 `c900cc1e5a2d635bc21230359829d5e6622fc0f34c8162d31fe682bd02fb1d7a`.
   **Neinstalat de mine** — Rareș verifică hash-ul și instalează.
+
+---
+
+## COMPLETARE — WA_CALL fără acord de gen + inventar forme parser (06.10.2026)
+
+**Pasul 1 — text**: `WaQuestionText.kt`, ramura „call": „Dorești apel WhatsApp cu X?" →
+**„Dorești să sun la X pe WhatsApp?"** (fără -l/-o, zero acord de gen posibil). „video" aliniat la
+același loc pentru „pe WhatsApp": **„Dorești apel video cu X pe WhatsApp?"**.
+
+**Pasul 2 — inventar forme recunoscute azi** (`WaCallVideoMatcher.CALL_PATTERN`,
+`SUN_PREFIX = "sun[a]?(?:[\s-]?[ol])?"`):
+
+| Formă cerută | Recunoscută azi? |
+|---|---|
+| „sună-l pe X" | ✅ |
+| „sun-o pe X" | ✅ |
+| „sună la X" | ✅ |
+| „apelează-l pe X" | ❌ lipsă (verb diferit de „sun") |
+| „dă-i un apel lui X" | ❌ lipsă (construcție complet diferită) |
+
+**Implementat inițial, apoi REVERTIT** — comandă de corecție primită imediat după: „Parserul NU
+primește tipare noi." Cele două forme lipsă (`apelează`/`dă-i un apel`) rămân neadăugate în parser;
+`WaCallVideoMatcher.kt` confirmat identic cu tag-ul `question-2026-10-06`
+(`git diff question-2026-10-06 -- WaCallVideoMatcher.kt` = 0 linii). Vor fi rezolvate prin
+interpretorul ChatGPT din experiment (vezi `EXP_REPORT.md`, Partea A2 redesenată), nu prin parser.
+
+**Pasul 3 — teste**: `WaQuestionTextTest.call`/`.video` actualizate la textul nou;
+`WaCallVideoMatcherTest` păstrează doar reconfirmările formelor deja recunoscute
+(`sunaLPeX`/`sunOPeX`/`sunaLaX`), fără testele pentru formele revertite.
+
+### TESTE finale
+
+- `gradlew :benson-foreground-service:testReleaseUnitTest`: toate verzi (91 teste în modul).
+- `npx tsc --noEmit`: curat.
+- `gradlew assembleRelease`: BUILD SUCCESSFUL (59s). APK:
+  `android/app/build/outputs/apk/release/app-release.apk`, 387.334.823 bytes,
+  sha256 `e15cd4012e34051b5e7fe09a2d08de696e1daa05378453eafde0c1bc63901bce`.
+  **Neinstalat de mine.**
