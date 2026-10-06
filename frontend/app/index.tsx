@@ -99,7 +99,6 @@ import {
   supersedeActiveMission, resolveActiveMissionFromUtterance,
 } from '../src/core/mission';
 import { isWhatsAppRecipientCorrection } from '../src/core/mission/missionUtteranceGuards';
-import { getBondedDevices, type BluetoothDeviceInfo } from 'benson-car-bluetooth';
 import { addPipModeListener } from 'benson-app-registry';
 import {
   startContextWatch, BORDER_CROSSINGS,
@@ -344,6 +343,13 @@ export default function BensonApp() {
   const [tavilyKey, setTavilyKey]     = useState('');
   const [openaiKey, setOpenaiKey]     = useState('');
   const [geminiKey, setGeminiKey]     = useState('');
+  // RUNDA SETĂRI — CORECȚIE (06.10.2026): câmpurile din UI nu mai încarcă cheia reală (de mai sus)
+  // — doar un draft gol, exact ca groqKey/deepgramKey deja mai jos. Cheia reală rămâne în apiKey/…
+  // pentru apelurile adevărate; hint-ul „salvat: ••••last4" se calculează din ea, nu din draft.
+  const [apiKeyInput, setApiKeyInput]     = useState('');
+  const [tavilyKeyInput, setTavilyKeyInput] = useState('');
+  const [openaiKeyInput, setOpenaiKeyInput] = useState('');
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
   // Round 2 — Groq key + STT nucleus selector, both surfaced in the one Settings modal.
   const [groqKey, setGroqKey]         = useState('');
   const [savedGroqMasked, setSavedGroqMasked] = useState('(none)');
@@ -381,6 +387,7 @@ export default function BensonApp() {
   const [speaking, setSpeaking]       = useState(false);
   const [convMode, setConvMode]       = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [devOpen, setDevOpen] = useState(false);
   const [appPermOpen, setAppPermOpen] = useState(false);
   const [setupWizardOpen, setSetupWizardOpen] = useState(false);
   const [showQuickContacts, setShowQuickContacts] = useState(false);
@@ -534,9 +541,6 @@ export default function BensonApp() {
 
   // Car Mode
   const [carMode, setCarMode] = useState(false);
-  const [carDeviceAddress, setCarDeviceAddress] = useState('');
-  const [carDeviceName, setCarDeviceName] = useState('');
-  const [bondedDevices, setBondedDevices] = useState<BluetoothDeviceInfo[]>([]);
 
   // Quick Contacts
   const [quickContacts, setQuickContacts] = useState<QuickContact[]>([]);
@@ -570,6 +574,7 @@ export default function BensonApp() {
   const voiceRateRef    = useRef(1.1);
   const voicePitchRef   = useRef(0.85);
   const voiceIdRef      = useRef('');
+  const bestRoVoiceIdRef = useRef('');
   const apiKeyRef       = useRef('');
   const tavilyKeyRef    = useRef('');
   // BENSON_GROUNDED_CONVERSATION_1 (2026-09-20) — session-local ONLY: the last place+coordinates a
@@ -1185,7 +1190,6 @@ export default function BensonApp() {
   const lastWaitingUserAnnounceRef = useRef<{ text: string; at: number } | null>(null);
   const WAITING_USER_ANNOUNCE_COOLDOWN_MS = 60000;
   const carModeRef        = useRef(false);
-  const carDeviceAddressRef = useRef('');
   const contextWatchRef     = useRef<ContextWatchHandle | null>(null);
   const roadTypeRef         = useRef<RoadType | null>(null);
   const vignetteExpiryRef   = useRef<Record<string, string>>({});
@@ -2053,6 +2057,23 @@ export default function BensonApp() {
     }).catch(() => {});
   }, []);
 
+  // RUNDA SETĂRI — CORECȚIE (06.10.2026): KEY_PRESENT pentru groq/deepgram nu apărea în logcat la
+  // pornire rece, deși SecureStore le întoarce corect (confirmat: hint-ul mascat din Settings se
+  // încarcă bine la deschiderea ecranului, câteva secunde mai târziu). Același tipar ca VOICE_LIST
+  // de mai sus (niciodată garantat pe acest telefon imediat după boot). Citire IZOLATĂ, doar pentru
+  // acest log — NU reface push-ul de credențiale de mai sus (acela rămâne neatins, pe drumul lui).
+  useEffect(() => {
+    const t = setTimeout(() => {
+      getEngineConfig('stt', 'groq').then((cfg) => {
+        logAudioDiag('KEY_PRESENT', `provider=groq present=${!!cfg?.apiKey} last4=${cfg?.apiKey ? maskApiKey(cfg.apiKey) : 'n/a'}`);
+      }).catch(() => {});
+      getEngineConfig('stt', 'deepgram').then((cfg) => {
+        logAudioDiag('KEY_PRESENT', `provider=deepgram present=${!!cfg?.apiKey} last4=${cfg?.apiKey ? maskApiKey(cfg.apiKey) : 'n/a'}`);
+      }).catch(() => {});
+    }, 3000);
+    return () => clearTimeout(t);
+  }, []);
+
   // Mission Governance (Waze/WhatsApp, Phase 1) — cold-start restore + resume status on return.
   // src/core/mission's store is AsyncStorage-backed, so a mission left WaitingConfirmation or
   // WaitingUser survives an app kill; this surfaces it instead of silently forgetting it.
@@ -2219,6 +2240,28 @@ export default function BensonApp() {
     return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b));
   }, [voices]);
 
+  // RUNDA SETĂRI — CORECȚIE (06.10.2026): lista generală (toate limbile, 473 pe acest telefon)
+  // a fost cea care îngropa Developer/cheile sub sute de rânduri (confirmat pe captură) — rămâne
+  // doar filtrată ro/de/en, pe ecranul Dezvoltator, pentru teste.
+  const devVoiceGroups = useMemo(
+    () => voiceGroups.filter(([langCode]) => /^(ro|de|en)/i.test(langCode)),
+    [voiceGroups],
+  );
+
+  // BENSON foloseste implicit o singură voce RO fixă, fără alegere manuală necesară: preferă un
+  // identificator "-local" (pe telefon, fără rețea) față de unul "-network"; dacă nu există nicio
+  // voce -local, ia prima RO disponibilă. Gol dacă telefonul n-are nicio voce română — atunci
+  // BENSON cade pe vocea implicită de sistem (voice: undefined), ca înainte de această rundă.
+  const bestRoVoiceId = useMemo(() => {
+    const ro = voices.filter(v => v.language.toLowerCase().startsWith('ro'));
+    if (ro.length === 0) return '';
+    const local = ro.find(v => v.identifier.toLowerCase().includes('-local'));
+    const chosen = local ?? ro[0];
+    logAudioDiag('BENSON_VOICE_FIXED', `identifier=${chosen.identifier} name=${chosen.name} quality=${chosen.quality} isLocal=${!!local} roCandidates=${ro.length}`);
+    return chosen.identifier;
+  }, [voices]);
+  bestRoVoiceIdRef.current = bestRoVoiceId;
+
   // ── Pulse animation while the B seal is actively listening ────────────────
   useEffect(() => {
     if (!listening) return;
@@ -2262,7 +2305,7 @@ export default function BensonApp() {
       if (m === 5 || m === 15 || m === 30) { setReminderMins(m); a11yReminderMsRef.current = m * 60 * 1000; }
     }).catch(() => {});
 
-    const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, gk, tp, cm, acm, cda, cdn, vig, rl, mp, se, ww, wn] = await Promise.all([
+    const [name, key, sl, sr, sp, ve, sc, sa, hist, fcts, bg, tk, vid, ok, gk, tp, cm, vig, rl, mp, se, ww, wn] = await Promise.all([
       AsyncStorage.getItem('masterName'),
       AsyncStorage.getItem('anthropicKey'),
       AsyncStorage.getItem('bensonLang'),
@@ -2280,9 +2323,6 @@ export default function BensonApp() {
       AsyncStorage.getItem('geminiKey'),
       AsyncStorage.getItem('bensonTtsProvider'),
       AsyncStorage.getItem('bensonCarMode'),
-      AsyncStorage.getItem('bensonAutoCarMode'),
-      AsyncStorage.getItem('bensonCarDeviceAddress'),
-      AsyncStorage.getItem('bensonCarDeviceName'),
       AsyncStorage.getItem(VIGNETTE_KEY),
       AsyncStorage.getItem('bensonReplyLang'),
       AsyncStorage.getItem('bensonModelProvider'),
@@ -2303,6 +2343,12 @@ export default function BensonApp() {
     if (vid) { setVoiceId(vid); voiceIdRef.current = vid; }
     if (ok) { setOpenaiKey(ok); openaiKeyRef.current = ok; }
     if (gk) { setGeminiKey(gk); geminiKeyRef.current = gk; setGeminiKeyForStt(gk); }
+    // KEY_PRESENT diagnostic (RUNDA SETĂRI — CORECȚIE, 06.10.2026) — confirmă că seiful/AsyncStorage
+    // nu au fost golite de relocarea din această rundă. Niciodată cheia întreagă, doar prezența +
+    // ultimele 4 caractere (maskApiKey, același util ca în Settings).
+    for (const [provider, val] of [['anthropic', key], ['openai', ok], ['gemini', gk], ['tavily', tk]] as [string, string][]) {
+      logAudioDiag('KEY_PRESENT', `provider=${provider} present=${!!val} last4=${val ? maskApiKey(val) : 'n/a'}`);
+    }
     if (tp === 'openai' || tp === 'device' || tp === 'gemini') { setTtsProvider(tp); ttsProviderRef.current = tp; }
     if (mp === 'openai' || mp === 'claude' || mp === 'gemini') { setModelProvider(mp); modelProviderRef.current = mp; }
     // STT engine restore + one-time cloud→local migration. Cloud is proven unreliable on this
@@ -2341,6 +2387,7 @@ export default function BensonApp() {
     // place the real secret is authored (settingsStore.ts); this is a runtime push only, same
     // class of mechanism as setPorcupineAccessKey. No-op (silently) when no Groq key is saved yet.
     getEngineConfig('stt', 'groq').then((cfg) => {
+      logAudioDiag('KEY_PRESENT', `provider=groq present=${!!cfg?.apiKey} last4=${cfg?.apiKey ? maskApiKey(cfg.apiKey) : 'n/a'}`);
       if (cfg?.apiKey) {
         try {
           setNativeWakeCredentials(cfg.apiKey, cfg.baseUrl || GROQ_STT_DEFAULT_BASE_URL, cfg.model || GROQ_STT_DEFAULT_MODEL);
@@ -2351,6 +2398,7 @@ export default function BensonApp() {
     // so the native confirmation listener has its Deepgram key on app launch too, not only after
     // a Settings save.
     getEngineConfig('stt', 'deepgram').then((cfg) => {
+      logAudioDiag('KEY_PRESENT', `provider=deepgram present=${!!cfg?.apiKey} last4=${cfg?.apiKey ? maskApiKey(cfg.apiKey) : 'n/a'}`);
       if (cfg?.apiKey) {
         try { setConfirmationSttCredentials(cfg.apiKey); } catch {}
         try { setWakeDeepgramCredentials(cfg.apiKey); } catch {}
@@ -2369,9 +2417,6 @@ export default function BensonApp() {
       setCarMode(false); carModeRef.current = false;
       AsyncStorage.setItem('bensonCarMode', 'false').catch(() => {});
     }
-    if (cda) { setCarDeviceAddress(cda); carDeviceAddressRef.current = cda; }
-    if (cdn) { setCarDeviceName(cdn); }
-    if (acm === 'true') AsyncStorage.setItem('bensonAutoCarMode', 'false').catch(() => {});
     if (vig) {
       try {
         const parsed: Record<string, string> = JSON.parse(vig);
@@ -2816,7 +2861,7 @@ export default function BensonApp() {
       language: replyLangRef.current,
       pitch:    voicePitchRef.current,
       rate:     voiceRateRef.current,
-      voice:    voiceIdRef.current || undefined,
+      voice:    voiceIdRef.current || bestRoVoiceIdRef.current || undefined,
       onDone:    () => settle('success'),
       onError:   () => settle('error'),
       onStopped: () => { if (!settled) { settled = true; clearTimeout(watchdogTimer); endTtsBlock('interrupt'); } },
@@ -3090,19 +3135,21 @@ export default function BensonApp() {
   }
 
   async function saveApiKeys() {
-    const ak = apiKey.trim();
-    const tk = tavilyKey.trim();
-    const ok = openaiKey.trim();
-    const gk = geminiKey.trim();
+    // RUNDA SETĂRI — CORECȚIE (06.10.2026): drafturi, nu cheile reale — un câmp lăsat gol nu mai
+    // șterge o cheie deja salvată (același convenție ca Groq/Deepgram mai jos, extinsă și la
+    // Anthropic/Tavily/OpenAI/Gemini, care înainte scriau direct `apiKey.trim()` etc., golind
+    // cheia dacă SAVE KEYS era apăsat cu câmpul necompletat).
+    const ak = apiKeyInput.trim();
+    const tk = tavilyKeyInput.trim();
+    const ok = openaiKeyInput.trim();
+    const gk = geminiKeyInput.trim();
     const grq = groqKey.trim();
-    apiKeyRef.current = ak;
-    tavilyKeyRef.current = tk;
-    openaiKeyRef.current = ok;
-    geminiKeyRef.current = gk;
-    setGeminiKeyForStt(gk || null);
-    await AsyncStorage.multiSet([
-      ['anthropicKey', ak], ['tavilyKey', tk], ['openaiKey', ok], ['geminiKey', gk],
-    ]);
+    const writes: [string, string][] = [];
+    if (ak) { setApiKey(ak); apiKeyRef.current = ak; writes.push(['anthropicKey', ak]); setApiKeyInput(''); }
+    if (tk) { setTavilyKey(tk); tavilyKeyRef.current = tk; writes.push(['tavilyKey', tk]); setTavilyKeyInput(''); }
+    if (ok) { setOpenaiKey(ok); openaiKeyRef.current = ok; writes.push(['openaiKey', ok]); setOpenaiKeyInput(''); }
+    if (gk) { setGeminiKey(gk); geminiKeyRef.current = gk; setGeminiKeyForStt(gk); writes.push(['geminiKey', gk]); setGeminiKeyInput(''); }
+    if (writes.length) await AsyncStorage.multiSet(writes);
     // Groq key goes to expo-secure-store (settingsStore), not AsyncStorage — only written when the
     // field is non-empty, so an untouched blank field never clears a previously saved key.
     if (grq) {
@@ -3280,27 +3327,6 @@ export default function BensonApp() {
   }
 
   // ── Car Mode auto-detection ───────────────────────────────────────────────
-  async function toggleAutoCarMode(v: boolean) {
-    // Bluetooth/speed must never start BENSON or take audio focus without explicit activation.
-    await AsyncStorage.setItem('bensonAutoCarMode', 'false');
-  }
-
-  async function loadBondedDevices() {
-    try {
-      const devices = await getBondedDevices();
-      setBondedDevices(devices);
-    } catch {}
-  }
-
-  async function selectCarDevice(device: BluetoothDeviceInfo) {
-    setCarDeviceAddress(device.address); carDeviceAddressRef.current = device.address;
-    setCarDeviceName(device.name);
-    await AsyncStorage.multiSet([
-      ['bensonCarDeviceAddress', device.address],
-      ['bensonCarDeviceName', device.name],
-    ]);
-  }
-
   // ── Quick Contacts ─────────────────────────────────────────────────────────
   async function loadDeviceContacts() {
     const { status } = await Contacts.requestPermissionsAsync();
@@ -5744,57 +5770,67 @@ export default function BensonApp() {
             </View>
             <ScrollView showsVerticalScrollIndicator={false}>
 
-              {/* Service status — live, non-invasive checks */}
-              <Text style={s.label}>SERVICE STATUS</Text>
-              <View style={s.statusRow}>
-                <Text style={s.statusLabel}>Microphone</Text>
-                <Text style={s.statusDot}>{serviceStatus.mic ? '✅' : '❌'}</Text>
-              </View>
-              <View style={s.statusRow}>
-                <Text style={s.statusLabel}>Accessibility Service</Text>
-                <Text style={s.statusDot}>{serviceStatus.accessibility ? '✅' : '❌'}</Text>
-              </View>
-              <View style={s.statusRow}>
-                <Text style={s.statusLabel}>GPS</Text>
-                <Text style={s.statusDot}>{serviceStatus.gps ? '✅' : '❌'}</Text>
-              </View>
-              <View style={s.statusRow}>
-                <Text style={s.statusLabel}>AI Connection</Text>
-                <Text style={s.statusDot}>{serviceStatus.ai ? '✅' : '❌'}</Text>
-              </View>
-              <View style={[s.row, { marginTop: 10 }]}>
-                <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, flex: 1 }]}
-                  onPress={() => { tap(); checkServiceStatus(); }}
-                  accessibilityLabel="Test all services" accessibilityRole="button">
-                  <Text style={[s.dangerTxt, { color: GOLD }]}>Testează tot</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, flex: 1 }]}
-                  onPress={() => { tap(); router.push('/debug'); }}
-                  accessibilityLabel="Open debug panel" accessibilityRole="button">
-                  <Text style={[s.dangerTxt, { color: GOLD }]}>Debug Panel</Text>
-                </TouchableOpacity>
-                {!serviceStatus.accessibility && (
-                  <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, flex: 1 }]}
-                    onPress={() => { tap(); openAccessibilitySettings(); }}
-                    accessibilityLabel="Enable accessibility service" accessibilityRole="button">
-                    <Text style={[s.dangerTxt, { color: GOLD }]}>Activează Accessibility</Text>
+              {/* Language */}
+              <Text style={s.label}>LANGUAGE</Text>
+              <View style={s.row}>
+                {LANGUAGES.map(l => (
+                  <TouchableOpacity key={l.code} onPress={() => changeLang(l.code)}
+                    style={[s.chip, lang === l.code && s.chipActive]}
+                    accessibilityLabel={`Language: ${l.label}`} accessibilityRole="button"
+                    accessibilityState={{ selected: lang === l.code }}>
+                    <Text style={[s.chipTxt, lang === l.code && s.chipTxtActive]}>{l.label}</Text>
                   </TouchableOpacity>
-                )}
+                ))}
               </View>
 
-              {/* Setup / Einrichtung — re-run the guided system-permissions wizard anytime */}
-              <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 10 }]}
-                onPress={() => { tap(); setSetupWizardOpen(true); }}
-                accessibilityLabel="Setup / Einrichtung" accessibilityRole="button">
-                <Text style={[s.dangerTxt, { color: GOLD }]}>Setup / Einrichtung</Text>
+              {/* Stage 2 — Address mode */}
+              <Text style={s.label}>BENSON CALLS YOU</Text>
+              <View style={s.row}>
+                <TouchableOpacity onPress={() => changeAddressMode('master')}
+                  style={[s.chip, addressMode === 'master' && s.chipActive]}
+                  accessibilityLabel="Address mode: Master" accessibilityRole="button"
+                  accessibilityState={{ selected: addressMode === 'master' }}>
+                  <Text style={[s.chipTxt, addressMode === 'master' && s.chipTxtActive]}>Master</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => changeAddressMode('name')}
+                  style={[s.chip, addressMode === 'name' && s.chipActive]}
+                  accessibilityLabel={`Address mode: ${masterName || 'your name'}`} accessibilityRole="button"
+                  accessibilityState={{ selected: addressMode === 'name' }}>
+                  <Text style={[s.chipTxt, addressMode === 'name' && s.chipTxtActive]}>
+                    {masterName || 'Your name'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 20 }]}
+                onPress={() => { tap(); setDevOpen(true); }}
+                accessibilityLabel="Developer settings" accessibilityRole="button">
+                <Text style={[s.dangerTxt, { color: GOLD }]}>Dezvoltator</Text>
               </TouchableOpacity>
 
-              {/* App Permissions — BENSON 4: which installed apps BENSON may open/operate */}
-              <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 10 }]}
-                onPress={() => { tap(); setAppPermOpen(true); }}
-                accessibilityLabel="App permissions" accessibilityRole="button">
-                <Text style={[s.dangerTxt, { color: GOLD }]}>App Permissions</Text>
+              <Text style={s.versionTag}>
+                {Constants.expoConfig?.extra?.buildLabel ?? 'BENSON'}
+              </Text>
+
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Developer Modal — technical/secondary settings, hidden from the main screen
+          (RUNDA SETĂRI — CURĂBENIE, 06.10.2026). Nimic wake/microfon nu e aici — acelea
+          rămân în Settings, intact, per interdicția explicită a rundei. */}
+      <Modal visible={devOpen} animationType="slide" transparent>
+        <View style={s.modalBg}>
+          <View style={s.modalBox}>
+            <View style={s.modalHeader}>
+              <Text style={s.modalTitle}>DEVELOPER</Text>
+              <TouchableOpacity hitSlop={12} onPress={() => { tap(); setDevOpen(false); }}
+                accessibilityLabel="Close developer settings" accessibilityRole="button">
+                <Text style={s.closeX}>✕</Text>
               </TouchableOpacity>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false}>
 
               {/* Închide complet — moved here from the main screen's top bar (product-owner-directed
                   2026-08-23: it was easy to miss floating over the medallion). Left in the default
@@ -5807,36 +5843,37 @@ export default function BensonApp() {
                 <Text style={s.dangerTxt}>{silenced ? 'Pornește Benson' : 'Închide complet'}</Text>
               </TouchableOpacity>
 
-              {/* Floating bubble — "draw over other apps" can't be silently granted; this opens
-                  the system settings screen once. The bubble itself only shows automatically
-                  once granted, whenever conversation mode is on. */}
-              <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 10 }]}
-                onPress={() => { tap(); requestOverlayPermission(); }}
-                accessibilityLabel="Enable floating bubble" accessibilityRole="button">
-                <Text style={[s.dangerTxt, { color: GOLD }]}>Enable Floating Bubble</Text>
-              </TouchableOpacity>
-
               {/* API Keys — BENSON calls Anthropic/OpenAI directly with the user's own key (kept
-                  on-device only). The Supabase relay was removed for deploy compatibility. */}
+                  on-device only). The Supabase relay was removed for deploy compatibility.
+                  RUNDA SETĂRI — CORECȚIE (06.10.2026): etichetă vizibilă permanentă deasupra
+                  fiecărui câmp (nu doar placeholder); câmpul pornește gol — cheia reală nu se mai
+                  încarcă în UI, doar hint-ul mascat „salvat: ••••last4" (acelați convenție ca
+                  Groq/Deepgram, extinsă acum la toate 6). */}
               <Text style={s.label}>API KEYS</Text>
-              <TextInput style={s.input} placeholder="Cheie Anthropic (sk-ant-...) — creierul lui Benson" placeholderTextColor={MUTED}
-                value={apiKey} onChangeText={setApiKey} secureTextEntry />
-              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="Tavily key (tvly-...) — for web search" placeholderTextColor={MUTED}
-                value={tavilyKey} onChangeText={setTavilyKey} secureTextEntry />
-              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="OpenAI key (sk-...) — for OpenAI chat model + voice" placeholderTextColor={MUTED}
-                value={openaiKey} onChangeText={setOpenaiKey} secureTextEntry />
-              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="Gemini key (AIza...) — free, best speech transcription" placeholderTextColor={MUTED}
-                value={geminiKey} onChangeText={setGeminiKey} secureTextEntry />
+              <Text style={s.groupLabel}>Anthropic{apiKey ? `  ·  salvat: ${maskApiKey(apiKey)}` : ''}</Text>
+              <TextInput style={s.input} placeholder="sk-ant-..." placeholderTextColor={MUTED}
+                value={apiKeyInput} onChangeText={setApiKeyInput} secureTextEntry autoCapitalize="none" autoCorrect={false} />
+              <Text style={[s.groupLabel, { marginTop: 10 }]}>OpenAI{openaiKey ? `  ·  salvat: ${maskApiKey(openaiKey)}` : ''}</Text>
+              <TextInput style={s.input} placeholder="sk-..." placeholderTextColor={MUTED}
+                value={openaiKeyInput} onChangeText={setOpenaiKeyInput} secureTextEntry autoCapitalize="none" autoCorrect={false} />
+              <Text style={[s.groupLabel, { marginTop: 10 }]}>Gemini{geminiKey ? `  ·  salvat: ${maskApiKey(geminiKey)}` : ''}</Text>
+              <TextInput style={s.input} placeholder="AIza..." placeholderTextColor={MUTED}
+                value={geminiKeyInput} onChangeText={setGeminiKeyInput} secureTextEntry autoCapitalize="none" autoCorrect={false} />
+              <Text style={[s.groupLabel, { marginTop: 10 }]}>Tavily{tavilyKey ? `  ·  salvat: ${maskApiKey(tavilyKey)}` : ''}</Text>
+              <TextInput style={s.input} placeholder="tvly-..." placeholderTextColor={MUTED}
+                value={tavilyKeyInput} onChangeText={setTavilyKeyInput} secureTextEntry autoCapitalize="none" autoCorrect={false} />
               {/* Groq key (Round 2) — powers the STT section below. Stored via expo-secure-store
                   (settingsStore.saveEngineConfig), the same hardware-backed store as the Picovoice
                   key — never AsyncStorage. Saved by the same SAVE KEYS button as the others. Field
                   blanks after save; the masked hint shows what is currently stored. */}
-              <TextInput style={[s.input, { marginTop: 10 }]} placeholder={`Groq API key (gsk_...) — transcriere${savedGroqMasked !== '(none)' ? `  · salvat: ${savedGroqMasked}` : ''}`} placeholderTextColor={MUTED}
+              <Text style={[s.groupLabel, { marginTop: 10 }]}>Groq{savedGroqMasked !== '(none)' ? `  ·  salvat: ${savedGroqMasked}` : ''}</Text>
+              <TextInput style={s.input} placeholder="gsk_..." placeholderTextColor={MUTED}
                 value={groqKey} onChangeText={setGroqKey} secureTextEntry autoCapitalize="none" autoCorrect={false} />
               {/* DEV_STT_DEEPGRAM_1 (2026-09-16) — development-only STT while Groq's quota is
                   exhausted; powers BOTH main-command and confirmation transcription. Groq key
                   above stays the production credential, untouched. */}
-              <TextInput style={[s.input, { marginTop: 10 }]} placeholder={`Deepgram key (dev STT)${savedDeepgramMasked !== '(none)' ? `  · salvat: ${savedDeepgramMasked}` : ''}`} placeholderTextColor={MUTED}
+              <Text style={[s.groupLabel, { marginTop: 10 }]}>Deepgram{savedDeepgramMasked !== '(none)' ? `  ·  salvat: ${savedDeepgramMasked}` : ''}</Text>
+              <TextInput style={s.input} placeholder="dev STT" placeholderTextColor={MUTED}
                 value={deepgramKey} onChangeText={setDeepgramKey} secureTextEntry autoCapitalize="none" autoCorrect={false} />
               <TouchableOpacity style={[s.btn, { marginTop: 10 }]} onPress={() => { tap(); saveApiKeys(); }}
                 accessibilityLabel="Save API keys" accessibilityRole="button">
@@ -5889,28 +5926,103 @@ export default function BensonApp() {
                 <Text style={[s.factLine, { color: groqTestStatus === 'OK' ? '#4dff88' : '#ff5c5c' }]}>{groqTestStatus}</Text>
               )}
 
-              {/* Chat model */}
-              <Text style={s.label}>CHAT MODEL</Text>
+              {/* Wake-confirmation chime — the short "ding" Benson plays when it hears "Benson".
+                  "Oprit" turns it off entirely; the others set how loud it is (and preview it). */}
+              <Text style={s.label}>SUNET LA TREZIRE</Text>
               <View style={s.row}>
-                <TouchableOpacity onPress={() => toggleModelProvider('claude')}
-                  style={[s.chip, modelProvider === 'claude' && s.chipActive]}
-                  accessibilityLabel="Claude chat model" accessibilityRole="button"
-                  accessibilityState={{ selected: modelProvider === 'claude' }}>
-                  <Text style={[s.chipTxt, modelProvider === 'claude' && s.chipTxtActive]}>Claude</Text>
+                {([['Oprit', 0], ['Încet', 0.3], ['Mediu', 0.6], ['Tare', 1.0]] as [string, number][]).map(([label, v]) => {
+                  const active = Math.abs(wakeVolume - v) < 0.05;
+                  return (
+                    <TouchableOpacity key={label} onPress={() => { tap(); changeWakeVolume(v); }}
+                      style={[s.chip, active && s.chipActive]}
+                      accessibilityLabel={`Sunet la trezire ${label}`} accessibilityRole="button"
+                      accessibilityState={{ selected: active }}>
+                      <Text style={[s.chipTxt, active && s.chipTxtActive]}>{label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={s.factLine}>
+                Sunetul scurt care confirmă că te-am auzit când spui „Benson”. Alege „Oprit” ca să nu se mai audă.
+              </Text>
+
+              {/* STT engine — cloud recognition on this device has been unreliable (hangs/errors);
+                  on-device (Android's own offline mode) has the same issue plus mic contention;
+                  Local is BENSON's own AudioRecord+VAD+Whisper pipeline, fully on-device. */}
+              <Text style={s.label}>ASCULTARE (STT)</Text>
+              <View style={s.row}>
+                <TouchableOpacity onPress={() => changeSttEngine('cloud')}
+                  style={[s.chip, sttEngine === 'cloud' && s.chipActive]}
+                  accessibilityLabel="Recunoaștere vocală în cloud" accessibilityRole="button"
+                  accessibilityState={{ selected: sttEngine === 'cloud' }}>
+                  <Text style={[s.chipTxt, sttEngine === 'cloud' && s.chipTxtActive]}>Cloud</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => toggleModelProvider('openai')}
-                  style={[s.chip, modelProvider === 'openai' && s.chipActive]}
-                  accessibilityLabel="ChatGPT chat model" accessibilityRole="button"
-                  accessibilityState={{ selected: modelProvider === 'openai' }}>
-                  <Text style={[s.chipTxt, modelProvider === 'openai' && s.chipTxtActive]}>ChatGPT (gpt-4o)</Text>
+                <TouchableOpacity onPress={() => changeSttEngine('ondevice')}
+                  style={[s.chip, sttEngine === 'ondevice' && s.chipActive]}
+                  accessibilityLabel="Recunoaștere vocală Android pe device, offline" accessibilityRole="button"
+                  accessibilityState={{ selected: sttEngine === 'ondevice' }}>
+                  <Text style={[s.chipTxt, sttEngine === 'ondevice' && s.chipTxtActive]}>Offline Android</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => toggleModelProvider('gemini')}
-                  style={[s.chip, modelProvider === 'gemini' && s.chipActive]}
-                  accessibilityLabel="Gemini chat model" accessibilityRole="button"
-                  accessibilityState={{ selected: modelProvider === 'gemini' }}>
-                  <Text style={[s.chipTxt, modelProvider === 'gemini' && s.chipTxtActive]}>Gemini</Text>
+                <TouchableOpacity onPress={() => changeSttEngine('local')}
+                  style={[s.chip, sttEngine === 'local' && s.chipActive]}
+                  accessibilityLabel="Sistemul propriu Benson, Whisper local" accessibilityRole="button"
+                  accessibilityState={{ selected: sttEngine === 'local' }}>
+                  <Text style={[s.chipTxt, sttEngine === 'local' && s.chipTxtActive]}>Benson (local)</Text>
                 </TouchableOpacity>
               </View>
+              <Text style={s.factLine}>
+                Benson (local): sistem propriu, integral pe telefon — vocea ta nu iese niciodată din device pentru ascultare. Offline Android necesită modelul limbii descărcat din Setările telefonului. Cloud e varianta clasică Google.
+              </Text>
+
+              {/* Background Mode */}
+              <Text style={s.label}>BACKGROUND LISTENING</Text>
+              <Switch value={backgroundMode} onValueChange={toggleBackgroundMode}
+                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
+                accessibilityLabel="Background listening" accessibilityRole="switch" />
+              <Text style={s.factLine}>
+                Keeps Benson listening via a persistent notification when Conversation Mode is on, even if the app is minimised.
+              </Text>
+
+              {/* Wake word kill switch */}
+              <Text style={s.label}>WAKE WORD</Text>
+              <Switch value={wakeWordEnabled} onValueChange={toggleWakeWord}
+                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
+                accessibilityLabel="Wake word active" accessibilityRole="switch" />
+              <Text style={s.factLine}>
+                When off, Benson never listens for "Benson" in the background — the mic stays closed until you tap to talk.
+              </Text>
+
+              {/* Picovoice Porcupine — AccessKey field + live status (product-owner-directed
+                  2026-08-02). Blank field is normal even when a key is already saved — see
+                  savePorcupineKey's comment; the status lines below are the source of truth.
+                  NU ȘTERS 06.10.2026: grep confirmă consumator real, nu zero — PorcupineManager
+                  e instanțiat din tryStartPorcupine() (BensonForegroundService.kt), apelat din
+                  ACTION_REVIVE/ACTION_RESUME_HOTWORD/resumeHotwordAndNotify. Abandonat ca produs
+                  (CLAUDE.md), dar nu mort în cod — doar relocat. */}
+              <Text style={s.label}>PICOVOICE ACCESS KEY</Text>
+              <TextInput style={s.input} placeholder="Picovoice AccessKey" placeholderTextColor={MUTED}
+                value={porcupineKeyInput} onChangeText={setPorcupineKeyInput} secureTextEntry
+                accessibilityLabel="Picovoice AccessKey" />
+              <TouchableOpacity style={[s.btn, { marginTop: 10 }]} onPress={savePorcupineKey}
+                accessibilityLabel="Save Picovoice AccessKey" accessibilityRole="button">
+                <Text style={s.btnText}>SAVE KEY</Text>
+              </TouchableOpacity>
+              <Text style={s.factLine}>
+                AccessKey: {porcupineStatus.hasKey ? '✓ saved' : '✗ missing'} · Model file (benson.ppn): {porcupineStatus.hasModel ? '✓ present' : '✗ missing'}
+                {porcupineStatus.hasKey && porcupineStatus.hasModel ? ' — Porcupine ready.' : ' — falls back to the classic engine until both are present.'}
+              </Text>
+              <Text style={s.factLine}>
+                Wake-word engine running right now: {activeWakeEngine === 'porcupine' ? 'Porcupine' : activeWakeEngine === 'speechrecognizer' ? 'Classic (SpeechRecognizer)' : 'none (wake word off)'}
+              </Text>
+
+              {/* Car Mode */}
+              <Text style={s.label}>CAR MODE</Text>
+              <Switch value={carMode} onValueChange={toggleCarMode}
+                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
+                accessibilityLabel="Car mode" accessibilityRole="switch" />
+              <Text style={s.factLine}>
+                Big-button, hands-free screen for driving. Turns on Conversation Mode and Background Listening automatically.
+              </Text>
 
               {/* Voice engine */}
               <Text style={s.label}>VOICE ENGINE</Text>
@@ -5946,25 +6058,141 @@ export default function BensonApp() {
                 OpenAI/Gemini voices cost per use and need internet; Benson falls back to the device voice automatically if unavailable.
               </Text>
 
-              {/* Wake-confirmation chime — the short "ding" Benson plays when it hears "Benson".
-                  "Oprit" turns it off entirely; the others set how loud it is (and preview it). */}
-              <Text style={s.label}>SUNET LA TREZIRE</Text>
-              <View style={s.row}>
-                {([['Oprit', 0], ['Încet', 0.3], ['Mediu', 0.6], ['Tare', 1.0]] as [string, number][]).map(([label, v]) => {
-                  const active = Math.abs(wakeVolume - v) < 0.05;
-                  return (
-                    <TouchableOpacity key={label} onPress={() => { tap(); changeWakeVolume(v); }}
-                      style={[s.chip, active && s.chipActive]}
-                      accessibilityLabel={`Sunet la trezire ${label}`} accessibilityRole="button"
-                      accessibilityState={{ selected: active }}>
-                      <Text style={[s.chipTxt, active && s.chipTxtActive]}>{label}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
+              {/* Voice on/off */}
+              <Text style={s.label}>VOICE</Text>
+              <Switch value={voiceEnabled} onValueChange={toggleVoice}
+                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
+                accessibilityLabel="Voice enabled" accessibilityRole="switch" />
+
+              {/* Speed */}
+              <Text style={s.label}>VOICE SPEED  ({voiceRate.toFixed(2)}x)</Text>
+              <SimpleSlider
+                min={0.8} max={1.5} value={voiceRate}
+                onChange={(v) => { setVoiceRate(v); voiceRateRef.current = v; }}
+                onSlideEnd={updateRate}
+              />
+
+              {/* RUNDA SETĂRI — CORECȚIE (06.10.2026): lista generală (473 voci, toate limbile) a
+                  fost ștearsă — ea singură îngropa Developer/cheile sub sute de rânduri. BENSON
+                  foloseste implicit o singură voce RO fixă (vezi bestRoVoiceId mai jos); selecția
+                  manuală rămâne doar pentru teste, filtrată la ro/de/en. */}
+              <Text style={s.label}>VOICE SELECTION — ro/de/en  ({devVoiceGroups.reduce((n, [, vs]) => n + vs.length, 0)} on device)</Text>
+              {bestRoVoiceId !== '' && (
+                <Text style={s.factLine}>Implicit (BENSON): {bestRoVoiceId}</Text>
+              )}
+              {devVoiceGroups.map(([langCode, vs]) => (
+                <View key={langCode} style={{ marginBottom: 14 }}>
+                  <Text style={s.groupLabel}>{langCode}</Text>
+                  {vs.map(v => (
+                    <View key={v.identifier} style={s.voiceRow}>
+                      <TouchableOpacity
+                        style={[s.chip, { flex: 1 }, voiceId === v.identifier && s.chipActive]}
+                        onPress={() => selectVoice(v.identifier)}
+                        accessibilityLabel={`Voice: ${v.name}`} accessibilityRole="button"
+                        accessibilityState={{ selected: voiceId === v.identifier }}>
+                        <Text numberOfLines={1}
+                          style={[s.chipTxt, voiceId === v.identifier && s.chipTxtActive]}>
+                          {v.name}
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={s.previewBtn} onPress={() => previewVoice(v.identifier, v.language)}
+                        accessibilityLabel={`Preview voice: ${v.name}`} accessibilityRole="button">
+                        <Text style={s.previewTxt}>▶</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              ))}
+              {voiceId !== '' && (
+                <TouchableOpacity style={s.dangerBtn} onPress={() => selectVoice('')}
+                  accessibilityLabel="Reset to default voice" accessibilityRole="button">
+                  <Text style={s.dangerTxt}>Reset to default voice</Text>
+                </TouchableOpacity>
+              )}
+
+              {/* Service status — live, non-invasive checks */}
+              <Text style={s.label}>SERVICE STATUS</Text>
+              <View style={s.statusRow}>
+                <Text style={s.statusLabel}>Microphone</Text>
+                <Text style={s.statusDot}>{serviceStatus.mic ? '✅' : '❌'}</Text>
               </View>
-              <Text style={s.factLine}>
-                Sunetul scurt care confirmă că te-am auzit când spui „Benson”. Alege „Oprit” ca să nu se mai audă.
-              </Text>
+              <View style={s.statusRow}>
+                <Text style={s.statusLabel}>Accessibility Service</Text>
+                <Text style={s.statusDot}>{serviceStatus.accessibility ? '✅' : '❌'}</Text>
+              </View>
+              <View style={s.statusRow}>
+                <Text style={s.statusLabel}>GPS</Text>
+                <Text style={s.statusDot}>{serviceStatus.gps ? '✅' : '❌'}</Text>
+              </View>
+              <View style={s.statusRow}>
+                <Text style={s.statusLabel}>AI Connection</Text>
+                <Text style={s.statusDot}>{serviceStatus.ai ? '✅' : '❌'}</Text>
+              </View>
+              <View style={[s.row, { marginTop: 10 }]}>
+                <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, flex: 1 }]}
+                  onPress={() => { tap(); checkServiceStatus(); }}
+                  accessibilityLabel="Test all services" accessibilityRole="button">
+                  <Text style={[s.dangerTxt, { color: GOLD }]}>Testează tot</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, flex: 1 }]}
+                  onPress={() => { tap(); router.push('/debug'); }}
+                  accessibilityLabel="Open debug panel" accessibilityRole="button">
+                  <Text style={[s.dangerTxt, { color: GOLD }]}>Debug Panel</Text>
+                </TouchableOpacity>
+                {!serviceStatus.accessibility && (
+                  <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, flex: 1 }]}
+                    onPress={() => { tap(); openAccessibilitySettings(); }}
+                    accessibilityLabel="Enable accessibility service" accessibilityRole="button">
+                    <Text style={[s.dangerTxt, { color: GOLD }]}>Activează Accessibility</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {/* Setup / Einrichtung — re-run the guided system-permissions wizard anytime */}
+              <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 10 }]}
+                onPress={() => { tap(); setSetupWizardOpen(true); }}
+                accessibilityLabel="Setup / Einrichtung" accessibilityRole="button">
+                <Text style={[s.dangerTxt, { color: GOLD }]}>Setup / Einrichtung</Text>
+              </TouchableOpacity>
+
+              {/* App Permissions — BENSON 4: which installed apps BENSON may open/operate */}
+              <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 10 }]}
+                onPress={() => { tap(); setAppPermOpen(true); }}
+                accessibilityLabel="App permissions" accessibilityRole="button">
+                <Text style={[s.dangerTxt, { color: GOLD }]}>App Permissions</Text>
+              </TouchableOpacity>
+
+              {/* Floating bubble — "draw over other apps" can't be silently granted; this opens
+                  the system settings screen once. The bubble itself only shows automatically
+                  once granted, whenever conversation mode is on. */}
+              <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 10 }]}
+                onPress={() => { tap(); requestOverlayPermission(); }}
+                accessibilityLabel="Enable floating bubble" accessibilityRole="button">
+                <Text style={[s.dangerTxt, { color: GOLD }]}>Enable Floating Bubble</Text>
+              </TouchableOpacity>
+
+              {/* Chat model */}
+              <Text style={s.label}>CHAT MODEL</Text>
+              <View style={s.row}>
+                <TouchableOpacity onPress={() => toggleModelProvider('claude')}
+                  style={[s.chip, modelProvider === 'claude' && s.chipActive]}
+                  accessibilityLabel="Claude chat model" accessibilityRole="button"
+                  accessibilityState={{ selected: modelProvider === 'claude' }}>
+                  <Text style={[s.chipTxt, modelProvider === 'claude' && s.chipTxtActive]}>Claude</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => toggleModelProvider('openai')}
+                  style={[s.chip, modelProvider === 'openai' && s.chipActive]}
+                  accessibilityLabel="ChatGPT chat model" accessibilityRole="button"
+                  accessibilityState={{ selected: modelProvider === 'openai' }}>
+                  <Text style={[s.chipTxt, modelProvider === 'openai' && s.chipTxtActive]}>ChatGPT (gpt-4o)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => toggleModelProvider('gemini')}
+                  style={[s.chip, modelProvider === 'gemini' && s.chipActive]}
+                  accessibilityLabel="Gemini chat model" accessibilityRole="button"
+                  accessibilityState={{ selected: modelProvider === 'gemini' }}>
+                  <Text style={[s.chipTxt, modelProvider === 'gemini' && s.chipTxtActive]}>Gemini</Text>
+                </TouchableOpacity>
+              </View>
 
               {/* Accessibility reminder interval — how often Benson gently re-speaks the reminder
                   while the Accessibility service stays off. */}
@@ -5986,121 +6214,17 @@ export default function BensonApp() {
                 Cât de des îți reamintesc vocal, blând, dacă Serviciul de Accesibilitate rămâne oprit.
               </Text>
 
-              {/* STT engine — cloud recognition on this device has been unreliable (hangs/errors);
-                  on-device (Android's own offline mode) has the same issue plus mic contention;
-                  Local is BENSON's own AudioRecord+VAD+Whisper pipeline, fully on-device. */}
-              <Text style={s.label}>ASCULTARE (STT)</Text>
+              {/* Stage 2 — Character */}
+              <Text style={s.label}>CHARACTER</Text>
               <View style={s.row}>
-                <TouchableOpacity onPress={() => changeSttEngine('cloud')}
-                  style={[s.chip, sttEngine === 'cloud' && s.chipActive]}
-                  accessibilityLabel="Recunoaștere vocală în cloud" accessibilityRole="button"
-                  accessibilityState={{ selected: sttEngine === 'cloud' }}>
-                  <Text style={[s.chipTxt, sttEngine === 'cloud' && s.chipTxtActive]}>Cloud</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => changeSttEngine('ondevice')}
-                  style={[s.chip, sttEngine === 'ondevice' && s.chipActive]}
-                  accessibilityLabel="Recunoaștere vocală Android pe device, offline" accessibilityRole="button"
-                  accessibilityState={{ selected: sttEngine === 'ondevice' }}>
-                  <Text style={[s.chipTxt, sttEngine === 'ondevice' && s.chipTxtActive]}>Offline Android</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => changeSttEngine('local')}
-                  style={[s.chip, sttEngine === 'local' && s.chipActive]}
-                  accessibilityLabel="Sistemul propriu Benson, Whisper local" accessibilityRole="button"
-                  accessibilityState={{ selected: sttEngine === 'local' }}>
-                  <Text style={[s.chipTxt, sttEngine === 'local' && s.chipTxtActive]}>Benson (local)</Text>
-                </TouchableOpacity>
-              </View>
-              <Text style={s.factLine}>
-                Benson (local): sistem propriu, integral pe telefon — vocea ta nu iese niciodată din device pentru ascultare. Offline Android necesită modelul limbii descărcat din Setările telefonului. Cloud e varianta clasică Google.
-              </Text>
-
-              {/* Language */}
-              <Text style={s.label}>LANGUAGE</Text>
-              <View style={s.row}>
-                {LANGUAGES.map(l => (
-                  <TouchableOpacity key={l.code} onPress={() => changeLang(l.code)}
-                    style={[s.chip, lang === l.code && s.chipActive]}
-                    accessibilityLabel={`Language: ${l.label}`} accessibilityRole="button"
-                    accessibilityState={{ selected: lang === l.code }}>
-                    <Text style={[s.chipTxt, lang === l.code && s.chipTxtActive]}>{l.label}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {/* Voice on/off */}
-              <Text style={s.label}>VOICE</Text>
-              <Switch value={voiceEnabled} onValueChange={toggleVoice}
-                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
-                accessibilityLabel="Voice enabled" accessibilityRole="switch" />
-
-              {/* Background Mode */}
-              <Text style={s.label}>BACKGROUND LISTENING</Text>
-              <Switch value={backgroundMode} onValueChange={toggleBackgroundMode}
-                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
-                accessibilityLabel="Background listening" accessibilityRole="switch" />
-              <Text style={s.factLine}>
-                Keeps Benson listening via a persistent notification when Conversation Mode is on, even if the app is minimised.
-              </Text>
-
-              {/* Wake word kill switch */}
-              <Text style={s.label}>WAKE WORD</Text>
-              <Switch value={wakeWordEnabled} onValueChange={toggleWakeWord}
-                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
-                accessibilityLabel="Wake word active" accessibilityRole="switch" />
-              <Text style={s.factLine}>
-                When off, Benson never listens for "Benson" in the background — the mic stays closed until you tap to talk.
-              </Text>
-
-              {/* Picovoice Porcupine — AccessKey field + live status (product-owner-directed
-                  2026-08-02). Blank field is normal even when a key is already saved — see
-                  savePorcupineKey's comment; the status lines below are the source of truth. */}
-              <Text style={s.label}>PICOVOICE ACCESS KEY</Text>
-              <TextInput style={s.input} placeholder="Picovoice AccessKey" placeholderTextColor={MUTED}
-                value={porcupineKeyInput} onChangeText={setPorcupineKeyInput} secureTextEntry
-                accessibilityLabel="Picovoice AccessKey" />
-              <TouchableOpacity style={[s.btn, { marginTop: 10 }]} onPress={savePorcupineKey}
-                accessibilityLabel="Save Picovoice AccessKey" accessibilityRole="button">
-                <Text style={s.btnText}>SAVE KEY</Text>
-              </TouchableOpacity>
-              <Text style={s.factLine}>
-                AccessKey: {porcupineStatus.hasKey ? '✓ saved' : '✗ missing'} · Model file (benson.ppn): {porcupineStatus.hasModel ? '✓ present' : '✗ missing'}
-                {porcupineStatus.hasKey && porcupineStatus.hasModel ? ' — Porcupine ready.' : ' — falls back to the classic engine until both are present.'}
-              </Text>
-              <Text style={s.factLine}>
-                Wake-word engine running right now: {activeWakeEngine === 'porcupine' ? 'Porcupine' : activeWakeEngine === 'speechrecognizer' ? 'Classic (SpeechRecognizer)' : 'none (wake word off)'}
-              </Text>
-
-              {/* Car Mode */}
-              <Text style={s.label}>CAR MODE</Text>
-              <Switch value={carMode} onValueChange={toggleCarMode}
-                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
-                accessibilityLabel="Car mode" accessibilityRole="switch" />
-              <Text style={s.factLine}>
-                Big-button, hands-free screen for driving. Turns on Conversation Mode and Background Listening automatically.
-              </Text>
-
-              {/* Auto Car Mode detection */}
-              <Text style={s.label}>AUTO CAR MODE</Text>
-              <Switch value={false} onValueChange={toggleAutoCarMode} disabled
-                trackColor={{ true: GOLD, false: MUTED }} thumbColor={NAVY}
-                accessibilityLabel="Auto car mode detection" accessibilityRole="switch" />
-              <Text style={s.factLine}>
-                Disabled: Bluetooth and speed changes never activate BENSON or alter audio automatically.
-              </Text>
-              <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 10 }]} onPress={loadBondedDevices}
-                accessibilityLabel="Load paired Bluetooth devices" accessibilityRole="button">
-                <Text style={[s.dangerTxt, { color: GOLD }]}>Load paired Bluetooth devices</Text>
-              </TouchableOpacity>
-              {carDeviceName !== '' && (
-                <Text style={s.factLine}>Current car device: {carDeviceName}</Text>
-              )}
-              <View style={[s.row, { marginTop: 8 }]}>
-                {bondedDevices.map(d => (
-                  <TouchableOpacity key={d.address} onPress={() => selectCarDevice(d)}
-                    style={[s.chip, carDeviceAddress === d.address && s.chipActive]}
-                    accessibilityLabel={`Car device: ${d.name}`} accessibilityRole="button"
-                    accessibilityState={{ selected: carDeviceAddress === d.address }}>
-                    <Text style={[s.chipTxt, carDeviceAddress === d.address && s.chipTxtActive]}>{d.name}</Text>
+                {(['butler', 'friend', 'professional'] as Character[]).map(c => (
+                  <TouchableOpacity key={c} onPress={() => changeCharacter(c)}
+                    style={[s.chip, character === c && s.chipActive]}
+                    accessibilityLabel={`Character: ${c}`} accessibilityRole="button"
+                    accessibilityState={{ selected: character === c }}>
+                    <Text style={[s.chipTxt, character === c && s.chipTxtActive]}>
+                      {c[0].toUpperCase() + c.slice(1)}
+                    </Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -6168,98 +6292,6 @@ export default function BensonApp() {
                 </View>
               ))}
 
-              {/* Speed */}
-              <Text style={s.label}>VOICE SPEED  ({voiceRate.toFixed(2)}x)</Text>
-              <SimpleSlider
-                min={0.8} max={1.5} value={voiceRate}
-                onChange={(v) => { setVoiceRate(v); voiceRateRef.current = v; }}
-                onSlideEnd={updateRate}
-              />
-
-              {/* Tone */}
-              <Text style={s.label}>VOICE TONE</Text>
-              <View style={s.row}>
-                {([
-                  { label: 'Deep', pitch: 0.6  },
-                  { label: 'Low',  pitch: 0.85 },
-                  { label: 'Mid',  pitch: 1.0  },
-                  { label: 'High', pitch: 1.2  },
-                ] as { label: string; pitch: number }[]).map(v => (
-                  <TouchableOpacity key={v.pitch} onPress={() => updatePitch(v.pitch)}
-                    style={[s.chip, voicePitch === v.pitch && s.chipActive]}
-                    accessibilityLabel={`Voice tone: ${v.label}`} accessibilityRole="button"
-                    accessibilityState={{ selected: voicePitch === v.pitch }}>
-                    <Text style={[s.chipTxt, voicePitch === v.pitch && s.chipTxtActive]}>{v.label}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {/* Stage 6 — Specific voice selection */}
-              <Text style={s.label}>VOICE SELECTION  ({voices.length} on device)</Text>
-              {voiceGroups.map(([langCode, vs]) => (
-                <View key={langCode} style={{ marginBottom: 14 }}>
-                  <Text style={s.groupLabel}>{langCode}</Text>
-                  {vs.map(v => (
-                    <View key={v.identifier} style={s.voiceRow}>
-                      <TouchableOpacity
-                        style={[s.chip, { flex: 1 }, voiceId === v.identifier && s.chipActive]}
-                        onPress={() => selectVoice(v.identifier)}
-                        accessibilityLabel={`Voice: ${v.name}`} accessibilityRole="button"
-                        accessibilityState={{ selected: voiceId === v.identifier }}>
-                        <Text numberOfLines={1}
-                          style={[s.chipTxt, voiceId === v.identifier && s.chipTxtActive]}>
-                          {v.name}
-                        </Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity style={s.previewBtn} onPress={() => previewVoice(v.identifier, v.language)}
-                        accessibilityLabel={`Preview voice: ${v.name}`} accessibilityRole="button">
-                        <Text style={s.previewTxt}>▶</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                </View>
-              ))}
-              {voiceId !== '' && (
-                <TouchableOpacity style={s.dangerBtn} onPress={() => selectVoice('')}
-                  accessibilityLabel="Reset to default voice" accessibilityRole="button">
-                  <Text style={s.dangerTxt}>Reset to default voice</Text>
-                </TouchableOpacity>
-              )}
-
-              {/* Stage 2 — Character */}
-              <Text style={s.label}>CHARACTER</Text>
-              <View style={s.row}>
-                {(['butler', 'friend', 'professional'] as Character[]).map(c => (
-                  <TouchableOpacity key={c} onPress={() => changeCharacter(c)}
-                    style={[s.chip, character === c && s.chipActive]}
-                    accessibilityLabel={`Character: ${c}`} accessibilityRole="button"
-                    accessibilityState={{ selected: character === c }}>
-                    <Text style={[s.chipTxt, character === c && s.chipTxtActive]}>
-                      {c[0].toUpperCase() + c.slice(1)}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {/* Stage 2 — Address mode */}
-              <Text style={s.label}>BENSON CALLS YOU</Text>
-              <View style={s.row}>
-                <TouchableOpacity onPress={() => changeAddressMode('master')}
-                  style={[s.chip, addressMode === 'master' && s.chipActive]}
-                  accessibilityLabel="Address mode: Master" accessibilityRole="button"
-                  accessibilityState={{ selected: addressMode === 'master' }}>
-                  <Text style={[s.chipTxt, addressMode === 'master' && s.chipTxtActive]}>Master</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => changeAddressMode('name')}
-                  style={[s.chip, addressMode === 'name' && s.chipActive]}
-                  accessibilityLabel={`Address mode: ${masterName || 'your name'}`} accessibilityRole="button"
-                  accessibilityState={{ selected: addressMode === 'name' }}>
-                  <Text style={[s.chipTxt, addressMode === 'name' && s.chipTxtActive]}>
-                    {masterName || 'Your name'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
               {/* Family Engine */}
               <Text style={s.label}>FAMILY</Text>
               {family.map(f => (
@@ -6320,10 +6352,6 @@ export default function BensonApp() {
                 Când e activat, Benson trimite anonim: tipul comenzii, agentul folosit, succes/eșec,
                 limba, aplicația deschisă, durata procesării și tipul erorii — niciodată cuvintele
                 rostite sau date personale. Se încarcă o dată pe zi, doar prin WiFi.
-              </Text>
-
-              <Text style={s.versionTag}>
-                {Constants.expoConfig?.extra?.buildLabel ?? 'BENSON'}
               </Text>
 
             </ScrollView>
