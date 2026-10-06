@@ -3,7 +3,14 @@
 Orice cerere în afara listei închise „BENSON 1.0" (vezi CLAUDE.md) se notează aici, nu se
 implementează pe loc. Fără dată de livrare — se reconsideră abia după ce lista de 10 e toată verde.
 
-- **RUNDA TELEFON** (07.10.2026, după AC2-F): 1. `PHONE_CALL` — „sună-o pe X" fără aplicație numită
+- **RUNDA BULA** (07.10.2026, imediat după AC2-F, ÎNAINTEA TELEFON): bulă overlay NATIVĂ
+  (WindowManager, permisiune overlay), vizibilă peste orice aplicație cât BENSON e activ:
+  ascultă/înțelege/vorbește/execută. Inel care se scalează cu nivelul microfonului în timp real
+  (10–15 fps), alimentat din captura EXISTENTĂ (HEED/comandă/confirmare) — ZERO `AudioRecord` nou.
+  Text: rostirea lui Rareș + răspunsul lui BENSON, rămâne 8s după final. Aproape transparentă, fără
+  margine. „Sfântă" = betonată: test automat de regresie că bula apare și inelul primește nivel la
+  fiecare wake, comandă și confirmare. Log: `BUBBLE state=… micLevel=…`.
+- **RUNDA TELEFON** (07.10.2026, după BULA): 1. `PHONE_CALL` — „sună-o pe X" fără aplicație numită
   → apel GSM direct (`ACTION_CALL`, permisiune `CALL_PHONE`), după confirmarea „Dorești să sun la X
   pe telefon?"; contact rezolvat local din agendă. 2. `ANSWER_CALL` — la apel primit, BENSON anunță
   „Te sună X. Răspund?"; „Da" → răspunde (`TelecomManager.acceptRingingCall`, permisiune
