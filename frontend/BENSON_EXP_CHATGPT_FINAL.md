@@ -45,6 +45,25 @@ Se trimite DUPĂ ce AC2-F e verde și are tag (`ac2f-2026-10-06`).
 - Parserul vechi = DOAR rezervă: timeout 2500 ms, fără rețea, buget epuizat.
   Log: `INTERPRETER engine=chatgpt|parser reason=… elapsedMs=…`
 
+## ADĂUGARE — CLARIFICARE + CĂUTARE ÎN APROPIERE          (07.10.2026)
+- Schema Structured Outputs din PARTEA A2 primește două valori noi în
+  `action`: `CLARIFY` (cu câmp `question`) și `PLACE_SEARCH` (cu câmp `query`).
+- CLARIFY: când cererea e ambiguă, ChatGPT întoarce o singură întrebare
+  scurtă. BENSON o rostește, deschide captura pentru răspuns (aceeași
+  fereastră ca la confirmare: așteaptă vorbirea ≥ 4 s), apoi trimite la
+  ChatGPT cererea inițială + întrebarea + răspunsul. Maximum 2 clarificări
+  pe cerere, apoi „Nu am înțeles, {ADRESARE}." Log: `CLARIFY q="…" answer="…"`.
+- PLACE_SEARCH: „cel mai apropiat X" → deschide Google Maps cu căutarea X
+  în jurul utilizatorului, prin link/intent. Fără permisiune de locație
+  pentru BENSON. Intră în enum doar cu rețeta verificată pe telefon.
+- Persona, SYSTEM (se adaugă la textul din PARTEA B): „Când cererea poate
+  însemna mai multe lucruri, întrebi scurt ce anume, o singură întrebare."
+
+Acceptare suplimentară (se adaugă la ## ACCEPTARE):
+- „unde e cel mai apropiat magazin?" → „Ce fel de magazin?" → „alimentar" →
+  Google Maps cu magazine alimentare din jur. 3×.
+- „unde e cel mai apropiat supermarket?" → direct Maps, fără întrebare.
+
 ## PARTEA B — CHATGPT CONVERSEAZĂ                         EXP_CHAT_DIRECT = true
 - `action=CONVERSE` → răspuns de la modelul de la (b), afișat (ce a spus
   Rareș + răspunsul) și rostit cu vocea actuală.
