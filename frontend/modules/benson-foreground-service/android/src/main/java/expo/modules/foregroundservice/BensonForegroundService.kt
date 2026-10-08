@@ -274,12 +274,30 @@ class BensonForegroundService : Service() {
   @Volatile private var ttsSpeakingSince = 0L
   @Volatile private var ttsLastDoneAt = 0L
 
+  // D0 (08.10.2026, Cauza: voce engleză) — FIX_NATIVE_TTS_LOCALE_RACE_1, device-proven by reading
+  // the code, not guessed: nativeTtsReady was flipped true BEFORE .language was set (two separate
+  // statements, same synchronous callback, but a reader on another thread could observe
+  // nativeTtsReady=true and call speak() in the gap). On a cold TextToSpeech init, the very FIRST
+  // utterance of a fresh process could speak with whatever locale/voice the engine defaults to —
+  // plausibly English if the system default differs from ro-RO — before our own assignment ran.
+  // Also selects an explicit Voice (not just .language), preferring a "-local" identifier over
+  // "-network", mirroring app/index.tsx's own bestRoVoiceId logic — a bare .language= otherwise
+  // leaves the engine to pick among this device's 3 ro-RO voices on its own.
+  // Revert: swap the two lines back (nativeTtsReady = ... before the language/voice block) and
+  // drop the explicit voice selection.
   private fun initNativeAck() {
     nativeTts = android.speech.tts.TextToSpeech(applicationContext) { status ->
-      nativeTtsReady = status == android.speech.tts.TextToSpeech.SUCCESS
-      if (nativeTtsReady) {
-        try { nativeTts?.language = java.util.Locale("ro", "RO") } catch (_: Exception) {}
-        AudioDiag.log(this, "NATIVE_TTS_INIT", "status=success")
+      if (status == android.speech.tts.TextToSpeech.SUCCESS) {
+        val t = nativeTts
+        var voiceId = "unset"
+        try {
+          t?.language = java.util.Locale("ro", "RO")
+          val bestVoice = t?.voices?.filter { it.locale.language == "ro" }
+            ?.let { ro -> ro.firstOrNull { it.name.contains("-local") } ?: ro.firstOrNull() }
+          if (bestVoice != null) { t?.voice = bestVoice; voiceId = bestVoice.name }
+        } catch (_: Exception) {}
+        nativeTtsReady = true
+        AudioDiag.log(this, "NATIVE_TTS_INIT", "status=success lang=ro voice=$voiceId")
       } else {
         AudioDiag.logError("NATIVE_TTS_INIT", "status=failed code=$status")
       }
