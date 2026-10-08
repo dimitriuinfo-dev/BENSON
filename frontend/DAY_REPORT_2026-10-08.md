@@ -276,3 +276,37 @@ restul zilei: **dacă vrei corpusul PC rulat înainte de seară, trimite cheia o
 Node — eu nu am de unde să o iau.** Altfel, rămâne pentru verificare diseară, direct pe telefon,
 cu `v4a_corpus.sh` original (varianta cu parser vechi, mai utilă oricum).
 Ramura asta se oprește aici; continui cu A.
+
+## A — Deschide orice aplicație ✅ VERDE (audit + teste pe fixture-uri reale, zero rescriere)
+
+**Audit, nu rescriere** (G7): `tryNativeOpenApp`/`findLaunchablePackage`/`AppNameMatcher.score`
+(exact 100 > startsWith 80 > contains 60 > contains-invers 50 > Levenshtein) + dezambiguizare
+numerotată (`PendingAppSearch`) + categorii (`findAppsByCategory`) + fallback Magazin Play erau
+DEJA corecte și dovedite pe dispozitiv (CLAUDE.md: 20.09 Calculator, 04.10 Magic FM/acronime). Nu
+exista un gol de cod de reparat — doar o lipsă de dovadă împotriva CÂMPULUI REAL, COMPETITIV de
+aplicații instalate (nu testat izolat până azi).
+
+**Verificat astăzi**: manifestul nu are nevoie de `<queries>` pentru acest drum —
+`ACTION_MAIN`/`CATEGORY_LAUNCHER` e scutit de restricțiile de vizibilitate ale pachetelor
+(Android 11+), confirmat în codul oficial Android — nimic de adăugat.
+
+**Nou, teste** (`AppLaunchFixtureTest.kt`, pe `test/fixtures/device/packages_all.txt`, cele 664
+de pachete reale capturate azi, 2 minute înainte să plece telefonul): reproduce exact bucla
+„best score wins" din `findLaunchablePackage`, dovedește că ținta corectă câștigă împotriva
+ÎNTREGULUI câmp real (nu a unei liste mici, alese de mine) pentru: YouTube, Spotify, WhatsApp,
+Chrome, calculatorul OnePlus (`com.oneplus.calculator` — confirmat azi că `com.android.calculator2`
+AOSP nici nu e instalat pe acest telefon, deci ținta corectă pentru CALC1 e cea deja aleasă),
+Magic FM din transcrierea greșită „magica fam". 8/8 teste noi verzi; suita completă
+`testReleaseUnitTest` (modul `benson-foreground-service`) rulează verde după adăugare (exit 0).
+
+**Onest, gol cunoscut, neînchis azi**: fixture-urile captate azi au doar NUMELE pachetelor
+(`pm list packages`), nu etichetele afișate (`pm list packages -f` + `aapt`/`dumpsys` ar fi dat
+etichetele, dar n-a fost timp în fereastra de 2 minute înainte să plece telefonul). Testele de
+mai sus folosesc etichete reale, de notorietate publică, doar pentru cele 8 aplicații cunoscute;
+restul celor 664 de pachete participă ca „zgomot" cu o etichetă aproximativă (ultimul segment al
+pachetului), suficientă să testeze dacă ținta câștigă totuși, nu ca etichetă corectă în sine. O
+captură completă de etichete (din `AppIndex`-ul propriu al lui BENSON, sau un `dumpsys`/`aapt`
+diseară) ar întări testul, dar nu era blocant pentru „A" azi.
+
+Fără flag nou — nimic de comutat, pentru că nimic nu s-a schimbat comportamental, doar dovedit.
+Commit separat, doar teste noi (fără cod de producție).
