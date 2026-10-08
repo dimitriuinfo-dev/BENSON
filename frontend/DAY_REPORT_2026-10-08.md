@@ -480,3 +480,30 @@ test a picat înainte de rețea. Blocat până se setează cheia reală.
 **4 (V4b → V6 → H, cf. `docs/specs/ZIUA_2026-10-08_rest.md`)**: fișierul nu există nicăieri în
 repo (căutare recursivă, negativ). Fără el nu pot începe — aș inventa cerințe pe fișiere deja
 betonate (exact G5). Am nevoie de conținut sau de fișierul salvat/comis.
+
+## Lista de seară — execuție live (telefon reconectat, emulator oprit)
+
+**Test 1 (wake „Benson") — ✅ PASS.** 13:43:44 `HEED_DETECTED score=0,976` → 13:43:50
+`WAKE_OFFLINE_DECISION accepted=true` (prag siguranță 0,95) → `WAKE_ACK` → `TTS_SPEAK kind=ack
+lang=ro voice=ro-ro-x-vfv-local chars=11` = „Da, Master.", o singură voce.
+**Observație, neblocantă**: din 9 rostiri reale „Benson" capturate azi-seară, 8 au primit
+`WAKE_VERIFY result=rejected text=""` (Deepgram n-a returnat text, dar apelul de rețea însuși a
+reușit — nu e eroare de conexiune). Doar scorul local ≥0,95 a trecut de fiecare dată prin plasa
+de siguranță. Fără date istorice de bază pentru rata asta — notat pentru urmărire, nu regresie
+confirmată.
+
+**Test 2 (regresia G3 completă) — ✅ PASS, 9/10.** (Emulatorul a fost oprit întâi — cauza celor
+10 FAIL inițiale era ambiguitate `adb`, nu produsul.) Unicul FAIL: `YT_PLAY_CONFIRM`, confirmat
+`YOUTUBE_SEARCH_CONFIRM query="madonna" found=false` — exact fals-negativul extern documentat
+toată ziua, nu o regresie.
+
+**Test 3 (STT OpenAI pe drumul real, voce reală) — ✅ PASS, neprovocat deliberat — a survenit
+organic din testarea de la pasul 1.** 13:43:53 `STT_REQUEST provider=openai bytes=40044` (captură
+reală de microfon, 943ms vorbire, VAD) → `STT_RESULT provider=openai text="Hədnəvində" chars=10`
+(transcript garblat — comanda spusă n-a fost clară/recunoscută, dar nu asta e criteriul testului)
+→ `USAGE_ADD costUsd=0,0001` (contorul V2 funcțional) → `NATIVE_ROUTE action=native_fallback
+reason=benson_backgrounded` (confirmă BENSON era în fundal, condiția obligatorie de test).
+**Primul drum complet microfon→OpenAI STT de azi, pe calea reală.**
+
+Teste 4 și 5 au nevoie de acțiune deliberată (o comandă reală cu „nu" în răspuns, urmată de o
+comandă reală; un apel WhatsApp real de 1 minut) — cerute separat, în conversație.
