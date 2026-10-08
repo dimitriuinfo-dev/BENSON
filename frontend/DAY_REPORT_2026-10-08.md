@@ -422,3 +422,61 @@ Toate cu BENSON în fundal, ecranul principal în prim-plan, „Benson" real (re
 
 Dacă (1), (2), (4) sau (5) pică: revert imediat la flag-ul rundei respective (`false`), conform
 „pasul înapoi e obligatoriu" — nu continua lista cu o regresie reală confirmată.
+
+## SEARA — diagnostic mașină (fără cod, cf. cerință) + erori proprii de recunoscut
+
+**Eroare proprie, de recunoscut**: am rulat `adb logcat -c` la începutul ferestrei de seară
+(ca să pornesc propria captură pentru testul 1), ÎNAINTE ca cererea „tragi logurile înainte de
+orice altceva" să vină. Bufferul principal de logcat (unde trăiește `BENSON_AUDIO`) a fost golit
+— datele native BENSON din mașină, de mai devreme azi, nu mai sunt în `car_logcat.txt`/
+`car_bugreport.zip`. Confirmat: cele 122 de linii `BENSON_AUDIO` din captură sunt toate din
+13:39-13:40 (testul 1 de azi-seară), nimic mai vechi.
+
+**Testul 1 (wake „Benson", din fereastra capturată)**: a picat. `HEED_DETECTED score=0,853` (sub
+local), dar `WAKE_VERIFY result=rejected text=""` — verificarea online (Deepgram) n-a transcris
+nimic din clipul de 2,5s → respins, fără „Da, Master.". Zero semnal P4 (`MIC_YIELD`/
+`CALL_ACTIVE`) în fereastra asta — nu e cauza de mai jos, aici a fost acasă, nu în mașină.
+
+**Diagnosticul de mașină, din `car_bugreport.zip` (dumpsys bluetooth_manager, supraviețuiește
+golirii logcat-ului — stocare proprie, nu bufferul de log)**: dispozitivul „My VW 1821"
+(`D0:40:EF:A8:C8:F3`) a avut Bluetooth HFP instabil toată ziua — `handleHfpConnected`/
+`handleHfpDisconnected` la 12:01→12:14, 12:32→13:14, 13:22→13:28 (A2DP, pe de altă parte, a căzut
+practic instant la FIECARE încercare de conectare, toate cele 4 înregistrate — audio prin
+telefon/Spotify via Bluetooth n-a funcționat deloc azi, dovedit). Pe ultima fereastră (13:22-13:28),
+istoricul `HeadsetStateMachine` arată stare `AudioOn` (SCO activ) cel puțin din 13:27:09, cu un
+eveniment `EVENT_TYPE_HANGUP_CALL` la 13:28:22 — adică a existat un apel (real sau declanșat de
+stack-ul HFP) cu audio SCO activ cel puțin ~1 minut.
+
+**Verdict, cu dovada din cod**: `isCallAudioActive()` (`BensonForegroundService.kt:3512`) verifică
+STRICT `AudioManager.mode == MODE_IN_CALL || MODE_IN_COMMUNICATION` — un semnal GLOBAL de sistem,
+nu „există un apel telefonic real". Conexiunea/reconexiunea HFP (SCO) cu maşina poate seta acest
+mode și FĂRĂ un apel literal (negociere de profil, test de voce al maşinii) — confirmat că s-a
+întâmplat cel puțin o dată azi (fereastra 13:27-13:28). **Verdict: P4 (fals pozitiv de „apel"),
+nu MAȘINA (conexiunea HFP a funcționat, chiar dacă instabil) și nu BENSON (niciun semn că
+serviciul ar fi fost oprit sau captura inactivă independent de asta).**
+
+**Onest, nedemonstrat complet**: am dovada directă doar pentru ultima fereastră HFP
+(13:22-13:28) — istoricul intern `HeadsetStateMachine` e tot un buffer limitat, rotit; pentru
+ferestrele mai vechi (12:01-12:14, 12:32-13:14) am doar `handleHfpConnected`/`handleHfpDisconnected`
+(conexiunea a existat), nu confirmarea directă că audio SCO (`AudioOn`) a fost activ și în ele.
+Plauzibil (fiecare reconectare HFP trece de regulă prin aceeași negociere), dar nu dovedit pentru
+tot intervalul — „aproape tot drumul" e o inferență rezonabilă, nu un fapt complet verificat.
+
+**Fără cod azi, cf. cerință explicită.** Propunere pentru runda următoare (NU implementată):
+`isCallAudioActive()` ar trebui să verifice și `TelephonyManager.callState` (apel telefonic real)
+sau `BluetoothHeadset` scopat la un apel confirmat, nu doar `AudioManager.mode` brut — ca
+reconectările HFP ale mașinii, fără apel real, să nu mai declanșeze `MIC_YIELD`.
+
+**Fișiere locale, șterse după analiză** (cf. cerință): `car_logcat.txt`, `car_bugreport.zip`,
+`.tmp_bugreport/` — niciodată commise (confirmat `git status`, untracked).
+
+## Itemele 3 și 4 — blocate, onest
+
+**3 (corpus V4a pe PC, cu cheia din mediu)**: `OPENAI_API_KEY` (Windows, user/machine env) e
+setată, dar conține literal un text de tip placeholder (26 caractere, verificat prin lungime +
+bytes — fără să afișez conținutul), nu o cheie OpenAI reală (acelea au 50+ caractere). Apelul de
+test a picat înainte de rețea. Blocat până se setează cheia reală.
+
+**4 (V4b → V6 → H, cf. `docs/specs/ZIUA_2026-10-08_rest.md`)**: fișierul nu există nicăieri în
+repo (căutare recursivă, negativ). Fără el nu pot începe — aș inventa cerințe pe fișiere deja
+betonate (exact G5). Am nevoie de conținut sau de fișierul salvat/comis.
