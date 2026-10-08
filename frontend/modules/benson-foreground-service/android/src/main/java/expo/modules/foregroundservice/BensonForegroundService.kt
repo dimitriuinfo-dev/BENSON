@@ -229,6 +229,48 @@ class BensonForegroundService : Service() {
     mainHandler.postDelayed({ if (sessionEpoch == epoch) closeSession("timeout") }, SessionWindow.FOLLOW_UP_WINDOW_MS)
   }
 
+  // E0 (08.10.2026, ZIUA v3) — flag + revert (G2). false = comportamentul dinainte de azi (capture
+  // reia imediat după TTS_DONE, fără filtru de text). Revert: E0_SELF_ECHO = false.
+  private val E0_SELF_ECHO = true
+  private val E0_TTS_TAIL_SETTLE_MS = 300L
+  private val E0_SIMILARITY_THRESHOLD = 0.8
+  // Last 2 texts BENSON spoke via speakNativeFallbackThenCapture (reports/questions) — "Da,
+  // Master." from the protected ack is a fixed, known constant, included in the comparison
+  // without needing to touch that function to record it dynamically.
+  private val recentSpokenTexts = ArrayDeque<String>(2)
+  // synchronized: written on the main thread (speakNativeFallbackThenCapture), read on the
+  // background "benson-native-cmd-capture" thread (isSelfEchoText, via startFollowUpCapture's
+  // onEnd) — ArrayDeque itself isn't thread-safe.
+  private fun recordSpokenTextForEcho(text: String) = synchronized(recentSpokenTexts) {
+    if (recentSpokenTexts.size >= 2) recentSpokenTexts.removeFirst()
+    recentSpokenTexts.addLast(text)
+  }
+  // Returns (isEcho, similarity). Normalizes both sides with the existing normalizeForMatch
+  // (diacritics/case/punctuation already stripped there). "Conține textul rostit" = substring
+  // either direction; similarity = 1 - normalized Levenshtein distance (WakeVerifyMatcher, already
+  // pure/JUnit-tested, reused rather than a second edit-distance implementation).
+  private fun isSelfEchoText(transcript: String): Pair<Boolean, Double> {
+    val t = normalizeForMatch(transcript)
+    if (t.isBlank()) return false to 0.0
+    // FIX_E0_SHORT_ANSWER_FALSE_ECHO_1 (08.10.2026, device-proven) — a bare "da" was being flagged
+    // as self-echo at sim=1.00 because it's a literal substring of the hardcoded "Da, Master."
+    // candidate ("da master" contains "da"). Any short transcript risks this same coincidental
+    // containment against a long candidate — classifyConfirmationNative's own word-boundary
+    // YES_WORDS/NO_WORDS matching already handles short real answers correctly; this filter exists
+    // for longer echoed SENTENCES, not 2-3 letter words. Below this length, never call it echo.
+    if (t.length <= 3) return false to 0.0
+    val snapshot = synchronized(recentSpokenTexts) { recentSpokenTexts.toList() }
+    val candidates = (snapshot + "Da, Master.").map { normalizeForMatch(it) }.filter { it.isNotBlank() }
+    var best = 0.0
+    for (c in candidates) {
+      if (t.contains(c) || c.contains(t)) return true to 1.0
+      val dist = WakeVerifyMatcher.levenshtein(t, c)
+      val sim = 1.0 - dist.toDouble() / maxOf(t.length, c.length).coerceAtLeast(1)
+      if (sim > best) best = sim
+    }
+    return (best >= E0_SIMILARITY_THRESHOLD) to best
+  }
+
   // P5 (08.10.2026, ZIUA v3) — flag + revert (G2). false = comportamentul dinainte de azi
   // (sesiunea rămâne deschisă până la timeout-ul de 8s după orice rostire, inclusiv rapoarte
   // finale). Revert: AC2F_P5_SESSION_CLOSE = false.
@@ -339,7 +381,10 @@ class BensonForegroundService : Service() {
         if (AC2F_P5_SESSION_CLOSE && utteranceId.startsWith("wake_say_") && !hasAnyPendingNativeState()) {
           mainHandler.post { closeSession("command_done") }
         } else {
-          mainHandler.post { startFollowUpCapture() }
+          // E0.1 (08.10.2026, self-echo) — capture stays closed from TTS_START to TTS_DONE+300ms,
+          // not opened the instant onDone fires. HeedWakeWord/wake keeps listening the whole time
+          // (barge-in, untouched) — this delay only affects the separate COMMAND capture.
+          mainHandler.postDelayed({ startFollowUpCapture() }, E0_TTS_TAIL_SETTLE_MS)
         }
       }
       @Deprecated("Deprecated in Java")
@@ -348,7 +393,7 @@ class BensonForegroundService : Service() {
         ttsLastDoneAt = System.currentTimeMillis()
         if (utteranceId?.startsWith("wake_") != true) return
         AudioDiag.logError("WAKE_ACK_ERROR", "utteranceId=$utteranceId reason=tts_error")
-        mainHandler.post { startFollowUpCapture() }
+        mainHandler.postDelayed({ startFollowUpCapture() }, E0_TTS_TAIL_SETTLE_MS)
       }
     })
   }
@@ -448,6 +493,7 @@ class BensonForegroundService : Service() {
   private fun speak(text: String) = speakNativeFallbackThenCapture(text)
 
   private fun speakNativeFallbackThenCapture(text: String) {
+    if (E0_SELF_ECHO) recordSpokenTextForEcho(text)
     val t = nativeTts
     if (t != null && nativeTtsReady) {
       // FIX_TTS_INTONATION_REVERT (2026-10-03, device-proven, user-directed) — both
@@ -3029,6 +3075,27 @@ class BensonForegroundService : Service() {
   private val CMD_MAX_MS = 10_000L
   private val CMD_VAD_SILENCE_MS = 800L
 
+  // E0.2/E0.3 (08.10.2026, self-echo) — dropped BEFORE handleNativeCommandFlow, so a pending
+  // confirmation's own classifyConfirmationNative never even sees this transcript. This is the
+  // actual fix for the original bug: BENSON's own fallback text contains "nu" as a bare word,
+  // which the existing NO_WORDS classifier would otherwise accept as a real decline. Not dropped
+  // silently — SELF_ECHO_DROPPED logs the similarity, and capture re-arms so a genuine pending
+  // confirmation/question keeps its real chance to be answered. Shared by the real capture path
+  // (startFollowUpCapture's onEnd) and DEBUG_INJECT_TRANSCRIPT (debug-only, P4.5-style hook —
+  // DEBUG_INJECT itself calls handleNativeCommandFlow directly, bypassing this check entirely,
+  // which is exactly why a separate hook exists for testing E0 deterministically).
+  private fun dispatchFollowUpTranscript(transcript: String?) {
+    val echo = if (E0_SELF_ECHO && !transcript.isNullOrBlank()) isSelfEchoText(transcript) else (false to 0.0)
+    if (echo.first) {
+      AudioDiag.log(this, "SELF_ECHO_DROPPED", "sim=${"%.2f".format(echo.second)} text=\"$transcript\"")
+      mainHandler.post { startFollowUpCapture() }
+    } else {
+      mainHandler.post {
+        handleNativeCommandFlow(transcript ?: "", isFollowUp = true, originalPhrase = "", originalWavPath = null)
+      }
+    }
+  }
+
   private fun startFollowUpCapture() {
     setMicOwner("COMMAND_STT", "followup_capture_start")
     updateBubbleNative("ASCULT", "", terminal = false, dismissDelayMs = 0L)
@@ -3043,9 +3110,7 @@ class BensonForegroundService : Service() {
           AudioDiag.log(this, "CMD_CAPTURE", "end bytes=$bytes reason=$logReason waitedMs=$waitedMs speechMs=$speechMs")
           val transcript = if (filePath != null) nativeTranscribe(filePath) else null
           if (filePath != null) try { File(filePath).delete() } catch (_: Exception) {}
-          mainHandler.post {
-            handleNativeCommandFlow(transcript ?: "", isFollowUp = true, originalPhrase = "", originalWavPath = null)
-          }
+          dispatchFollowUpTranscript(transcript)
         },
         isStopRequested = { false },
         preSpeechTimeoutMs = CMD_START_TIMEOUT_MS,
@@ -3307,6 +3372,20 @@ class BensonForegroundService : Service() {
             handleNativeCommandFlow(text, isFollowUp = true, originalPhrase = "DEBUG_INJECT", originalWavPath = null)
           }
         }
+        // E0 (08.10.2026) — debug-only, feeds text through dispatchFollowUpTranscript (the SAME
+        // echo-check + dispatch real capture results go through), unlike plain DEBUG_INJECT which
+        // calls handleNativeCommandFlow directly and bypasses the self-echo filter entirely. Only
+        // way to test E0 deterministically without real acoustic feedback in the room.
+        "com.benson.butler.DEBUG_INJECT_TRANSCRIPT" -> {
+          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val text = intent.getStringExtra("text")
+          if (text.isNullOrBlank()) return
+          AudioDiag.log(context, "DEBUG_INJECT", "action=transcript text=\"$text\"")
+          dispatchFollowUpTranscript(text)
+        }
         // P4.5 (08.10.2026) — debug-only, forces isCallAudioActive()'s return value so the real
         // state machine (refreshCallAudioState/suspendNativeWake/scheduleMicResumeAfterStability)
         // can be exercised without a real telephony/VoIP call. Never reachable in release (same
@@ -3413,6 +3492,7 @@ class BensonForegroundService : Service() {
         addAction("com.benson.butler.DEBUG_INJECT_ENABLE")
         addAction("com.benson.butler.DEBUG_INJECT_CONFIRM") // ZIUA 2026-10-08, G3
         addAction("com.benson.butler.DEBUG_INJECT_CALL_MODE") // ZIUA 2026-10-08, P4.5
+        addAction("com.benson.butler.DEBUG_INJECT_TRANSCRIPT") // ZIUA 2026-10-08, E0
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         registerReceiver(debugInjectReceiver, filter, Context.RECEIVER_EXPORTED)
