@@ -235,6 +235,14 @@ export function getProcessKillStats() {
   return NativeModule.getProcessKillStats();
 }
 
+export function getOpenAiUsageToday() {
+  return NativeModule.getOpenAiUsageToday();
+}
+
+export function setOpenAiDailyCapEur(eur) {
+  return NativeModule.setOpenAiDailyCapEur(eur);
+}
+
 // Suppresses the system STT start/stop tone (the "xylophone" beep) — call with true right
 // before starting a JS-side recognition session, false right after it ends.
 export function setSystemSoundsMuted(muted) {

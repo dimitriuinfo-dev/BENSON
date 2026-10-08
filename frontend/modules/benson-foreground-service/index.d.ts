@@ -75,6 +75,8 @@ export declare function requestIgnoreBatteryOptimizations(): void;
 export declare function requestAssistantRole(): void;
 export declare function isAssistantRoleHeld(): boolean;
 export declare function getProcessKillStats(): { killCount: number; recoveryCount: number };
+export declare function getOpenAiUsageToday(): { totalEur: number; capEur: number };
+export declare function setOpenAiDailyCapEur(eur: number): void;
 export declare function pauseHotword(): Promise<void>;
 export declare function resumeHotword(): Promise<void>;
 export declare function setSystemSoundsMuted(muted: boolean): void;

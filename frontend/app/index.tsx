@@ -19,6 +19,7 @@ import {
   addListenRequestedListener, addWakePokeListener, bringToForeground,
   isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations, addCallAudioStateListener, isCallAudioBlocked,
   requestAssistantRole, isAssistantRoleHeld, getProcessKillStats,
+  getOpenAiUsageToday, setOpenAiDailyCapEur,
   pauseHotword, resumeHotword, setSystemSoundsMuted, consumeRecoveryFlag, logAudioDiag,
   setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
   setPorcupineAccessKey, getPorcupineStatus, getActiveWakeEngine,
@@ -394,6 +395,8 @@ export default function BensonApp() {
   const [devOpen, setDevOpen] = useState(false);
   const [assistantRoleHeld, setAssistantRoleHeld] = useState(false);
   const [processKillStats, setProcessKillStats] = useState({ killCount: 0, recoveryCount: 0 });
+  const [openAiUsage, setOpenAiUsage] = useState({ totalEur: 0, capEur: 1 });
+  const [openAiCapInput, setOpenAiCapInput] = useState('');
   const [appPermOpen, setAppPermOpen] = useState(false);
   const [setupWizardOpen, setSetupWizardOpen] = useState(false);
   const [showQuickContacts, setShowQuickContacts] = useState(false);
@@ -5814,6 +5817,7 @@ export default function BensonApp() {
                   setDevOpen(true);
                   Promise.resolve(isAssistantRoleHeld()).then(setAssistantRoleHeld).catch(() => {});
                   Promise.resolve(getProcessKillStats()).then(setProcessKillStats).catch(() => {});
+                  Promise.resolve(getOpenAiUsageToday()).then(setOpenAiUsage).catch(() => {});
                 }}
                 accessibilityLabel="Developer settings" accessibilityRole="button">
                 <Text style={[s.dangerTxt, { color: GOLD }]}>Dezvoltator</Text>
@@ -5918,6 +5922,28 @@ export default function BensonApp() {
               <Text style={[s.groupLabel, { marginTop: 6 }]}>
                 Procese ucise: {processKillStats.killCount} · Recuperări confirmate: {processKillStats.recoveryCount}
               </Text>
+
+              {/* V2 (08.10.2026, Motor M5) — plafon zilnic configurabil, înaintea oricărui apel
+                  OpenAI nou plătit (V3/V4 îl verifică înainte de fiecare cerere). */}
+              <Text style={[s.label, { marginTop: 14 }]}>CONSUM OPENAI (azi)</Text>
+              <Text style={s.groupLabel}>
+                {openAiUsage.totalEur.toFixed(3)} € din {openAiUsage.capEur.toFixed(2)} € plafon zilnic
+              </Text>
+              <TextInput style={[s.input, { marginTop: 10 }]} placeholder="plafon zilnic în €, ex. 1.00"
+                placeholderTextColor={MUTED} value={openAiCapInput} onChangeText={setOpenAiCapInput}
+                keyboardType="decimal-pad" />
+              <TouchableOpacity style={[s.btn, { marginTop: 10 }]}
+                onPress={() => {
+                  tap();
+                  const eur = parseFloat(openAiCapInput.replace(',', '.'));
+                  if (!isFinite(eur) || eur <= 0) return;
+                  setOpenAiDailyCapEur(eur);
+                  setOpenAiCapInput('');
+                  Promise.resolve(getOpenAiUsageToday()).then(setOpenAiUsage).catch(() => {});
+                }}
+                accessibilityLabel="Set OpenAI daily cap" accessibilityRole="button">
+                <Text style={s.btnText}>SALVEAZĂ PLAFONUL</Text>
+              </TouchableOpacity>
 
               {/* ROUND_WAKE_NATIVE_GENERIC_1 — the ONE authoritative wake-name config. Applied
                   live (no separate save button, not a secret): every change is persisted and

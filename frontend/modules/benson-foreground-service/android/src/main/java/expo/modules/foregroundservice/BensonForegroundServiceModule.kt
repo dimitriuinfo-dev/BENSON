@@ -204,6 +204,21 @@ class BensonForegroundServiceModule : Module() {
       )
     }
 
+    // V2 (08.10.2026, Motor M5) — read-only snapshot for Dezvoltator; V3/V4 write via
+    // OpenAiUsageMeter directly (native-side, no JS round-trip needed for the hot path).
+    Function("getOpenAiUsageToday") {
+      val context = appContext.reactContext ?: return@Function mapOf("totalEur" to 0.0, "capEur" to 0.0)
+      mapOf(
+        "totalEur" to OpenAiUsageMeter.dailyTotalUsd(context) * OpenAiUsageMeter.USD_TO_EUR,
+        "capEur" to OpenAiUsageMeter.dailyCapEur(context),
+      )
+    }
+
+    Function("setOpenAiDailyCapEur") { eur: Double ->
+      val context = appContext.reactContext ?: return@Function Unit
+      OpenAiUsageMeter.setDailyCapEur(context, eur)
+    }
+
     Function("isAssistantRoleHeld") {
       if (!ASSISTANT_ROLE_ENABLED) return@Function false
       val context = appContext.reactContext ?: return@Function false
