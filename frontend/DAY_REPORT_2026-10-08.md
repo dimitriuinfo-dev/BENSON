@@ -310,3 +310,29 @@ diseară) ar întări testul, dar nu era blocant pentru „A" azi.
 
 Fără flag nou — nimic de comutat, pentru că nimic nu s-a schimbat comportamental, doar dovedit.
 Commit separat, doar teste noi (fără cod de producție).
+
+## V5 — Conversația (cod + teste unitare, NEAPELATĂ încă — V4b nu e construit azi)
+
+`ConversationHistory.kt` (nou, pur): istoric mărginit exact cum cere CLAUDE.md ("max 10 schimburi
+SAU 4000 de caractere") — 5/5 teste JUnit (gol, ordine, plafon pe nr. de schimburi, plafon pe
+caractere, clear).
+
+`generateChatReply`/`respondToChat` (`BensonForegroundService.kt`, lângă `normalizeOldAction`):
+apel `chat/completions`, `gpt-5-nano` (același preț deja verificat la V0, deja contorizat la V4a —
+niciun preț nou în `OpenAiUsageMeter`), cost real din `usage`, gata de plafon (V2). Răspunsul
+trece prin `speak(text, "chat")` — ACELAȘI motor TTS nativ, nicio voce OpenAI (Legea vocii unice).
+
+**De ce „cod, nu comportament" azi**: V4b (interpretorul decide CÂND preia controlul, pe cădere
+din parserul vechi) nu e construit azi — fără el, nimic nu apelează `respondToChat`. Zero risc de
+regresie (exact tiparul V4a la momentul lui): funcție pregătită, izolată, testată, neconectată.
+
+**Extensie mică, necesară**: `speak(text)`/`speakNativeFallbackThenCapture(text)` au primit un
+parametru opțional `kind` (implicit `null` → comportamentul vechi, inferat din starea pendinte,
+neschimbat) — exact golul lăsat intenționat în comentariul de azi de la L8-EXT ("CLARIFY/CHAT nu
+există încă azi — V4b/V5 vor trece kind explicit atunci"). `SingleTtsEngineTest` actualizat să
+caute noul tipar (`logTtsSpeak(kindOverride ?:`), nu cel vechi literal.
+
+Regresie: suita completă `testReleaseUnitTest` (modul `benson-foreground-service`) — 109 teste,
+0 eșecuri, toate clasele verzi (inclusiv `ConversationHistoryTest` nou, 5/5). `npx tsc --noEmit`:
+0 erori.
+FLAG: `V5_CONVERSATION` (implicit `true`, dar neapelat de nimeni — fără efect practic azi).

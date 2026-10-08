@@ -29,6 +29,6 @@ class SingleTtsEngineTest {
   @Test fun bothSpeakFunctionsLogTtsSpeak() {
     val text = File(sourceDir(), "BensonForegroundService.kt").readText()
     assertTrue("speakNativeAckThenCapture must call logTtsSpeak", text.contains("logTtsSpeak(\"ack\""))
-    assertTrue("speakNativeFallbackThenCapture must call logTtsSpeak", text.contains("logTtsSpeak(if (hasAnyPendingNativeState())"))
+    assertTrue("speakNativeFallbackThenCapture must call logTtsSpeak", text.contains("logTtsSpeak(kindOverride ?:"))
   }
 }

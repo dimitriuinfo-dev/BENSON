@@ -507,9 +507,9 @@ class BensonForegroundService : Service() {
   // funcție speak(text)": orice confirmare/rezultat nou (YouTube, și tot ce vine după) trece prin
   // AICI, nu direct prin TextToSpeech. Când vine RT-1a, doar vocea din spatele acestei funcții se
   // schimbă (Realtime, cu fallback pe acest TTS) — nimic din apelurile existente nu se mută.
-  private fun speak(text: String) = speakNativeFallbackThenCapture(text)
+  private fun speak(text: String, kind: String? = null) = speakNativeFallbackThenCapture(text, kind)
 
-  private fun speakNativeFallbackThenCapture(text: String) {
+  private fun speakNativeFallbackThenCapture(text: String, kindOverride: String? = null) {
     if (E0_SELF_ECHO) recordSpokenTextForEcho(text)
     val t = nativeTts
     if (t != null && nativeTtsReady) {
@@ -529,10 +529,10 @@ class BensonForegroundService : Service() {
       AudioDiag.log(this, "TTS_NATIVE_REQUEST", "text=\"$text\"")
       val result = t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, utteranceId)
       AudioDiag.log(this, "WAKE_FALLBACK", "engine=native result=$result")
-      // LEGE L8-EXT — kind inferat din starea pendinte la momentul vorbirii (același tipar ca P5):
-      // ceva pendinte ÎNCĂ (tocmai setat, înainte de a pune întrebarea) = confirm; nimic pendinte =
-      // raport final (CLARIFY/CHAT nu există încă azi — V4b/V5 vor trece kind explicit atunci).
-      logTtsSpeak(if (hasAnyPendingNativeState()) "confirm" else "report", text)
+      // LEGE L8-EXT — kind explicit (V5: "chat"/"clarify") câștigă; altfel inferat din starea
+      // pendinte la momentul vorbirii (același tipar ca P5): ceva pendinte ÎNCĂ = confirm; nimic
+      // pendinte = raport final.
+      logTtsSpeak(kindOverride ?: (if (hasAnyPendingNativeState()) "confirm" else "report"), text)
     } else {
       AudioDiag.log(this, "WAKE_FALLBACK", "fallback=tone")
       mainHandler.postDelayed({ startFollowUpCapture() }, 400)
@@ -3264,6 +3264,76 @@ class BensonForegroundService : Service() {
     "wa_message" -> "WA_MESSAGE"
     "native_fallback", "js_handoff", "none" -> "UNKNOWN"
     else -> old.uppercase()
+  }
+
+  // V5 (08.10.2026) — conversația, pe calea V4b (CHAT/CLARIFY din interpretor). Cod + teste azi;
+  // NU e încă apelată de nimeni (V4b, care decide CÂND interpretorul guvernează, nu e construit
+  // azi) — zero risc de regresie, exact ca V4a la momentul lui. Legea vocii unice (L8-EXT):
+  // răspunsul trece prin ACELAȘI speak() nativ, niciodată o voce OpenAI — doar textul e generat
+  // de model, nu sunetul.
+  private val V5_CONVERSATION = true
+  private val conversationHistory = ConversationHistory()
+  private val chatHttpClient = OkHttpClient.Builder()
+    .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS).build()
+
+  private val CHAT_SYSTEM_PROMPT = "Ești BENSON, un majordom vocal prietenos. Răspunzi scurt " +
+    "(1-2 fraze), în română, natural, ca într-o conversație reală — nu execuți comenzi, nu " +
+    "pretinzi că faci acțiuni, doar conversezi."
+
+  // Reutilizează gpt-5-nano (deja prețul verificat la V0, deja contorizat la V4a) — nu un model
+  // nou, nu un preț nou de adăugat în OpenAiUsageMeter.
+  private fun generateChatReply(transcript: String): String? {
+    if (!V5_CONVERSATION) return null
+    if (OpenAiUsageMeter.isBudgetExceeded(this)) { AudioDiag.log(this, "CHAT_SKIPPED", "reason=budget_exceeded"); return null }
+    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    val apiKey = prefs.getString("brain_api_key", "") ?: ""
+    if (apiKey.isBlank()) return null
+    val baseUrl = (prefs.getString("brain_base_url", "")?.takeIf { it.isNotBlank() } ?: "https://api.openai.com/v1").trimEnd('/')
+    val messages = org.json.JSONArray().apply {
+      put(JSONObject().apply { put("role", "system"); put("content", CHAT_SYSTEM_PROMPT) })
+      for (turn in conversationHistory.snapshot()) {
+        put(JSONObject().apply { put("role", turn.role); put("content", turn.text) })
+      }
+      put(JSONObject().apply { put("role", "user"); put("content", transcript) })
+    }
+    val body = JSONObject().apply { put("model", "gpt-5-nano"); put("messages", messages) }
+    val request = Request.Builder().url("$baseUrl/chat/completions")
+      .addHeader("Authorization", "Bearer $apiKey")
+      .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+    return try {
+      chatHttpClient.newCall(request).execute().use { resp ->
+        if (!resp.isSuccessful) { AudioDiag.logError("CHAT_ERROR", "http=${resp.code}"); return null }
+        val json = resp.body?.string() ?: return null
+        val root = JSONObject(json)
+        val reply = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")
+          ?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val usage = root.optJSONObject("usage")
+        if (usage != null) {
+          val inTok = usage.optInt("prompt_tokens", 0)
+          val outTok = usage.optInt("completion_tokens", 0)
+          val cost = (inTok / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_INPUT_PER_1M_USD +
+            (outTok / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_OUTPUT_PER_1M_USD
+          OpenAiUsageMeter.recordUsage(this, "chat_gpt5nano", cost)
+        }
+        reply
+      }
+    } catch (e: Exception) {
+      AudioDiag.logError("CHAT_ERROR", "type=${e.javaClass.simpleName}")
+      null
+    }
+  }
+
+  // V4b va apela asta când interpretorul clasifică CHAT pe drumul de cădere a parserului vechi —
+  // neapelat de nimeni azi (V4b nu e construit azi), funcție pregătită + testată izolat.
+  private fun respondToChat(transcript: String) {
+    conversationHistory.add("user", transcript)
+    val reply = generateChatReply(transcript)
+    if (reply == null) {
+      speak("Nu pot vorbi acum.", "chat")
+      return
+    }
+    conversationHistory.add("assistant", reply)
+    speak(reply, "chat")
   }
 
   // E0.2/E0.3 (08.10.2026, self-echo) — dropped BEFORE handleNativeCommandFlow, so a pending
