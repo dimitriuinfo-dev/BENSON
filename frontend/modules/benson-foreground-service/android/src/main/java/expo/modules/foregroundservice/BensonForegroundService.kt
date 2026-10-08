@@ -229,6 +229,19 @@ class BensonForegroundService : Service() {
     mainHandler.postDelayed({ if (sessionEpoch == epoch) closeSession("timeout") }, SessionWindow.FOLLOW_UP_WINDOW_MS)
   }
 
+  // P5 (08.10.2026, ZIUA v3) — flag + revert (G2). false = comportamentul dinainte de azi
+  // (sesiunea rămâne deschisă până la timeout-ul de 8s după orice rostire, inclusiv rapoarte
+  // finale). Revert: AC2F_P5_SESSION_CLOSE = false.
+  private val AC2F_P5_SESSION_CLOSE = true
+
+  // Exact aceeași listă de 5 verificată la începutul handleNativeCommandFlow — o întrebare
+  // (confirmare/disambiguare) setează unul dintre ele ÎNAINTE de a fi rostită și îl golește abia
+  // după răspuns, deci "niciunul setat" la finalul unui TTS înseamnă sigur raport final, nu
+  // întrebare încă nerezolvată.
+  private fun hasAnyPendingNativeState(): Boolean =
+    pendingWaDisambiguation != null || pendingWaAction != null || pendingAppSearch != null ||
+      pendingControlAction != null || pendingYoutubePlay != null
+
   private fun closeSession(reason: String) {
     if (sessionOpenUntil == 0L) return
     sessionOpenUntil = 0L
@@ -316,7 +329,18 @@ class BensonForegroundService : Service() {
         ttsLastDoneAt = System.currentTimeMillis()
         if (utteranceId?.startsWith("wake_") != true) return
         AudioDiag.log(this@BensonForegroundService, "WAKE_ACK_DONE", "utteranceId=$utteranceId")
-        mainHandler.post { startFollowUpCapture() }
+        // P5.1 (08.10.2026, ZIUA v3) — "wake_ack_" (speakNativeAckThenCapture, betonat, NEATINS)
+        // always opens the first-command window, unchanged. "wake_say_" covers BOTH confirmation
+        // questions AND final result reports (RUNDA SPEAK-1's single speak() point) — distinguished
+        // here not by the text, but by whether a pending-answer state is still set: a question sets
+        // one of these fields right before speaking it (see handleNativeCommandFlow's own check
+        // order) and only clears it once answered, so "nothing pending" at this exact instant means
+        // the utterance that just finished WAS the final report, not a question.
+        if (AC2F_P5_SESSION_CLOSE && utteranceId.startsWith("wake_say_") && !hasAnyPendingNativeState()) {
+          mainHandler.post { closeSession("command_done") }
+        } else {
+          mainHandler.post { startFollowUpCapture() }
+        }
       }
       @Deprecated("Deprecated in Java")
       override fun onError(utteranceId: String?) {
