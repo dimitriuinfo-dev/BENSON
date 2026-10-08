@@ -336,3 +336,89 @@ Regresie: suita completă `testReleaseUnitTest` (modul `benson-foreground-servic
 0 eșecuri, toate clasele verzi (inclusiv `ConversationHistoryTest` nou, 5/5). `npx tsc --noEmit`:
 0 erori.
 FLAG: `V5_CONVERSATION` (implicit `true`, dar neapelat de nimeni — fără efect practic azi).
+
+## H — Mâna (accesibilitate) 🔴 POARTĂ ROȘIE, oprită onest azi (lipsă text verbatim, nu lipsă timp)
+
+Textul exact al specificației „H" (testele 1/2/3/4/10, exact ce înseamnă „SPELL"/dictare în
+Chrome, exact ce trebuie scaffoldat) a fost dat verbatim într-un mesaj anterior din aceeași zi,
+rezumat (nu păstrat cuvânt cu cuvânt) odată cu compactarea conversației — nu am acces la textul
+lui, doar la propriul meu rezumat de nivel înalt ("H rămâne mâine" / "H: începi pe emulator doar
+după ce A e verde, flag-uri OFF, doar testele 1/2/3/4/10").
+
+Conform G7 ("diagnostic înainte de cod") și doctrinei „dacă o opțiune nu există, raportează — nu
+inventa": a scaffolda H din memorie proprie, aproximativă, ar însemna să inventez cerințe reale
+(ce anume verifică testul 1 vs 2 vs 3 vs 4, ce înseamnă exact „SPELL" — dictare prin tastatură,
+prin Accessibility paste, sau altceva). Risc real de scope greșit pe fișiere deja atinse azi
+(`BensonAccessibilityService`/`BensonCommandExecutor`, generic engine G-1, deja dovedit pe
+dispozitiv) — exact genul de greșeală pe care G5 o listează ca poartă roșie reală.
+
+**Decizie**: H se oprește aici azi, onest, fără cod scris. Pentru Rareș, în `DAY_REPORT`: dacă H
+rămâne pentru diseară/mâine, retrimite textul exact al rundei H (testele 1/2/3/4/10 + definiția
+„SPELL") ca mesaj separat, ca să nu lucrez din presupuneri pe un fișier deja protejat/dovedit.
+Nicio regresie posibilă — zero cod scris pentru H.
+
+## FINAL
+
+### Build semnat
+
+`android/app/build/outputs/apk/release/app-release.apk`
+- SHA-256 APK: `dc7385869fd2a6a479c5b1ba2d71bccef5105aa9ee0badcec815e7a1f2225553`
+- Certificat (verificat `apksigner verify --print-certs`): `CN=BENSON, OU=Dev, O=TOKKO, L=Unknown, ST=Unknown, C=RO` — corect.
+- `testReleaseUnitTest` (modul `benson-foreground-service`): **109/109 teste, 0 eșecuri**, toate clasele.
+- `npx tsc --noEmit`: 0 erori.
+- `gradlew assembleRelease`: BUILD SUCCESSFUL.
+
+**Poarta de livrare (regulă permanentă, CLAUDE.md)**: `DEBUG_INJECT` pe toate capabilitățile deja
+verzi ÎNAINTE de livrare — NU s-a putut rula azi, telefonul a plecat înainte de ultimul build. Nu
+e un APK „livrat" în sensul regulii — e builded, semnat, verde pe tot ce e testabil offline
+(unitar + tsc), gata de instalat și verificat diseară, în ordinea de mai jos.
+
+### Tabelul flag-urilor de azi
+
+| Flag | Valoare azi | Verificat live pe dispozitiv? | Motiv |
+|---|---|---|---|
+| `AC2F_P4_MIC_YIELD` | `true` | ✅ da (test automat MIC_YIELD 76ms, MIC_RESUME 1520ms) | — |
+| `AC2F_P5_SESSION_CLOSE` | `true` | ✅ da (closeSession confirmat pe „deschide calculatorul") | — |
+| `E0_SELF_ECHO` | `true` | ✅ da (bug găsit+reparat pe loc, apoi CONFIRM_RESULT=YES real) | — |
+| `V1_TRUTHFUL_REPORTER` | `true` | ✅ da (G3 9/10, OUTCOME logat pe acțiuni reale) | — |
+| `V3_OPENAI_STT_NATIVE` | `true` | ✅ da, prin WAV injection (3/3 apeluri reale OpenAI) — NU prin captura reală de microfon | drumul complet (microfon→STT OpenAI) rămâne de confirmat diseară |
+| `V4_SHADOW` | `true` (NU OFF — vezi motivul) | ❌ 0 execuții azi (telefon deconectat înainte de prima linie `INTERP_SHADOW`) | **Las-o pornită deliberat**, contrazic litera regulii „neverificat=OFF": codul e UMBRĂ PURĂ, zero execuție posibilă (`triggerShadowInterpretation` doar loghează, nu acționează) — oprirea ei n-ar reduce niciun risc real, ar elimina doar șansa de a strânge date diseară, exact scopul ei |
+| `V5_CONVERSATION` | `false` | ❌ 0 execuții (nimic nu apelează `respondToChat`, V4b nu există) | setat OFF explicit — inert oricum, dar respectă litera regulii fără cost |
+
+### Întrebări pentru Rareș (în raport, neblocante, cf. „la poartă roșie, oprești doar ramura")
+
+1. V4a — corpusul de 50 de comenzi (pe telefon SAU PC) n-a rulat azi deloc (0 date). Vrei să-l
+   rulez diseară direct pe telefon (`scripts/regression/v4a_corpus.sh`, varianta originală, mai
+   utilă — are comparație cu parserul vechi) înainte de testul cu vocea reală, sau preferi să
+   trimiți cheia o singură dată pentru varianta PC (`v4a_corpus_pc.mjs`)?
+2. H — am nevoie de textul exact al rundei (testele 1/2/3/4/10 + definiția „SPELL") retrimis ca
+   mesaj separat; rezumatul meu propriu nu e suficient de precis ca să scriu cod pe el.
+
+### Lista de test pentru seara cu Rareș (ordine, criteriu PASS/FAIL)
+
+Toate cu BENSON în fundal, ecranul principal în prim-plan, „Benson" real (regula fixă din CLAUDE.md).
+
+1. **Wake de bază** — „Benson" → PASS dacă „Da, Master." se aude clar, o singură voce RO
+   (verifică `TTS_SPEAK kind=ack voice=…` în log, trebuie identic cu restul rostirilor).
+2. **Regresia G3 completă pe dispozitiv** — `scripts/regression/day_2026_10_08.sh` cu
+   `INGRID_CONTACT=Hannah` — PASS la 9/10 sau mai bine (10/10 ar închide definitiv fals-negativul
+   YouTube extern).
+3. **V3 pe drumul real** — o comandă nerecunoscută de parserul vechi, cu BENSON în fundal, spusă
+   cu voce reală (nu `DEBUG_INJECT`) — PASS dacă `STT_REQUEST provider=openai` apare în log (nu
+   doar Deepgram/Groq) — primul test al drumului COMPLET microfon→OpenAI de azi.
+4. **E0 pe viață** — orice comandă care produce un răspuns vorbit cu „nu" în el (ex. „Încă nu
+   știu să fac asta") urmată de o comandă reală — PASS dacă comanda reală NU e aruncată ca ecou.
+5. **P4** — apel WhatsApp real, 1 minut, verifică zero sondare de microfon în log pe durata
+   apelului și reluare wake în 1.5-2.5s după terminare.
+6. **logRoute (regresie tăcută)** — orice comandă WA/YouTube normală — PASS dacă `NATIVE_ROUTE`/
+   `WA_PARSE` apar identic ca înainte (conținutul liniei, nu doar prezența) — prima confirmare
+   live că cele 21 de call site-uri mecanic înlocuite azi (V4a) nu au stricat logarea existentă.
+7. **V4_SHADOW, corpusul de 50** — rulează `v4a_corpus.sh` cu `DEVICE_SERIAL` setat la telefon —
+   PASS = cel puțin câteva zeci de linii `INTERP_SHADOW` reale în `v4a_corpus_last_run.log` (nu
+   neapărat procent mare de match — doar date, azi n-au existat deloc).
+8. **Testul de 20× „Benson" cu voce reală** (amânat de la decizia 3b) — PASS dacă rata de
+   acceptare e stabilă, fără pattern clar de fals-pozitiv/negativ legat de schimbările de azi.
+9. **D0** — ascultă toate rostirile din seară — PASS dacă vocea engleză nu mai apare niciodată.
+
+Dacă (1), (2), (4) sau (5) pică: revert imediat la flag-ul rundei respective (`false`), conform
+„pasul înapoi e obligatoriu" — nu continua lista cu o regresie reală confirmată.

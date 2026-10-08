@@ -3271,7 +3271,9 @@ class BensonForegroundService : Service() {
   // azi) — zero risc de regresie, exact ca V4a la momentul lui. Legea vocii unice (L8-EXT):
   // răspunsul trece prin ACELAȘI speak() nativ, niciodată o voce OpenAI — doar textul e generat
   // de model, nu sunetul.
-  private val V5_CONVERSATION = true
+  // FINAL (08.10.2026): OFF pentru livrare — nimic nu apelează respondToChat azi (V4b nu există),
+  // deci e inert oricum, dar setat explicit false ca să respect litera regulii "neverificat = OFF".
+  private val V5_CONVERSATION = false
   private val conversationHistory = ConversationHistory()
   private val chatHttpClient = OkHttpClient.Builder()
     .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS).build()
