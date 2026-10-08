@@ -638,6 +638,21 @@ class BensonForegroundService : Service() {
   // (WhatsApp/etc. foreground): this replaces the LISTENING WINDOW itself with a native one that
   // does not depend on any JS timer or JS being resumed at all.
   private var confirmationListener: NativeConfirmationListener? = null
+  // ZIUA 2026-10-08, G3 (debug-only) — last confirmationId started, so DEBUG_INJECT_CONFIRM can
+  // target it without the caller having to pass it back in. Not read by any production path.
+  @Volatile private var lastConfirmationId: String? = null
+
+  // Shared by the real NativeConfirmationListener callback AND the debug-injected path below —
+  // the one place that actually delivers a confirmation verdict, so a debug run exercises the
+  // exact same downstream code as a real microphone reply.
+  private fun deliverConfirmationResult(confirmationId: String, verdict: String, transcript: String) {
+    AudioDiag.log(this, "CONFIRM_LISTEN_RESULT", "confirmationId=$confirmationId verdict=$verdict text=\"$transcript\"")
+    if (micOwner == "CONFIRMATION_STT") setMicOwner("NONE", "confirmation_done")
+    armNativeWake("confirmation_done")
+    val cb = onConfirmationResult
+    if (cb != null) cb(confirmationId, verdict, transcript)
+    else pendingConfirmationResult = Triple(confirmationId, verdict, transcript)
+  }
 
   fun startConfirmationListening(confirmationId: String, timeoutMs: Long) {
     if (callAudioBlocked || isCallAudioActive()) {
@@ -645,20 +660,12 @@ class BensonForegroundService : Service() {
       return
     }
     confirmationListener?.stop()
+    lastConfirmationId = confirmationId
     setMicOwner("CONFIRMATION_STT", "confirmation_start")
     AudioDiag.log(this, "CONFIRM_LISTEN_START", "confirmationId=$confirmationId timeoutMs=$timeoutMs")
     val listener = NativeConfirmationListener(
       applicationContext,
-      onResult = { verdict, transcript ->
-        mainHandler.post {
-          AudioDiag.log(this, "CONFIRM_LISTEN_RESULT", "confirmationId=$confirmationId verdict=$verdict text=\"$transcript\"")
-          if (micOwner == "CONFIRMATION_STT") setMicOwner("NONE", "confirmation_done")
-          armNativeWake("confirmation_done")
-          val cb = onConfirmationResult
-          if (cb != null) cb(confirmationId, verdict, transcript)
-          else pendingConfirmationResult = Triple(confirmationId, verdict, transcript)
-        }
-      },
+      onResult = { verdict, transcript -> mainHandler.post { deliverConfirmationResult(confirmationId, verdict, transcript) } },
       log = { stage, fields -> AudioDiag.log(this, stage, fields) },
     )
     confirmationListener = listener
@@ -3188,6 +3195,32 @@ class BensonForegroundService : Service() {
             handleNativeCommandFlow(text, isFollowUp = true, originalPhrase = "DEBUG_INJECT", originalWavPath = null)
           }
         }
+        // ZIUA 2026-10-08, G3 — simulates a confirmation reply without real microphone audio, so
+        // the regression suite can exercise "Nu" → zero acțiune on a timed, flaky mic-free path.
+        // Takes the literal words (e.g. "nu"), not a verdict label: app/index.tsx's
+        // confirmResultSub re-classifies the TRANSCRIPT itself via classifyConfirmation(), not the
+        // native `verdict` field (that only gates the self-echo guard) — passing a bare verdict
+        // here would be silently ignored downstream. NativeConfirmationListener.classify() is the
+        // same classifier a real capture uses, so verdict/transcript stay consistent with a real one.
+        "com.benson.butler.DEBUG_INJECT_CONFIRM" -> {
+          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val text = intent.getStringExtra("text")
+          val id = lastConfirmationId
+          if (text.isNullOrBlank() || id == null) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=confirm_rejected reason=no_pending_confirmation")
+            return
+          }
+          val verdict = NativeConfirmationListener.classify(text)
+          AudioDiag.log(context, "DEBUG_INJECT", "action=confirm verdict=$verdict text=\"$text\" confirmationId=$id")
+          mainHandler.post {
+            confirmationListener?.stop()
+            confirmationListener = null
+            deliverConfirmationResult(id, verdict, text)
+          }
+        }
       }
     }
   }
@@ -3250,6 +3283,7 @@ class BensonForegroundService : Service() {
       val filter = android.content.IntentFilter().apply {
         addAction("com.benson.butler.DEBUG_INJECT")
         addAction("com.benson.butler.DEBUG_INJECT_ENABLE")
+        addAction("com.benson.butler.DEBUG_INJECT_CONFIRM") // ZIUA 2026-10-08, G3
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         registerReceiver(debugInjectReceiver, filter, Context.RECEIVER_EXPORTED)

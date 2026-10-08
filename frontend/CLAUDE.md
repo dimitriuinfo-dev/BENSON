@@ -9,6 +9,27 @@
 Aplicație Android (Expo SDK 54 / RN 0.81). Majordom vocal.
 Testat pe OnePlus Nord 4, OxygenOS 15. Limba BENSON: română. Sistem: germană.
 
+## GOVERNANCE — ZIUA 2026-10-08 v3 (autonom, G1-G8)
+
+Valabil pentru runda „ZIUA 08.10.2026 v3 — VOCEA GUVERNATĂ DE CHATGPT + MÂNA",
+branch `day-2026-10-08`. Ordinea: G → D0 → P4 → P5 → V → A → H → FINAL.
+
+- **G1** Branch `day-2026-10-08` din HEAD-ul curent (build 7c9f3a4b, incl. bc2c2de).
+  Un commit per pas: „[PAS] ce, de ce, flag".
+- **G2** Fiecare pas: FLAG + REVERT. Poarta: `tsc` 0 + `jest` verde + `gradle assembleRelease`
+  verde + testele injectate ale pasului + SUITA DE REGRESIE verde.
+- **G3** SUITA DE REGRESIE (comenzi tastate injectate prin DEBUG_INJECT, logcat pe fișier),
+  rulează după fiecare pas: WhatsApp apel/video/mesaj către Ingrid → confirmare rostită → „Nu"
+  → zero acțiune; YouTube caută + pornește + „oprește"; „oprește muzica". Regresie = repari sau
+  flag OFF.
+- **G4** Max 3 iterații/pas; apoi flag OFF, notă în raport, continui.
+- **G5** PORȚI ROȘII (singurele opriri): (a) fișiere betonate atinse dincolo de ce cere explicit
+  pasul — `HeedWakeWord.kt` rămâne ÎNCHIS toată ziua; (b) dependență nativă nouă sau `modules/**`
+  nouă; (c) git distructiv; (d) secret în log/repo.
+- **G6** Interzis: force push, reset, rebase, force-stop ca test; tag/push fără „verde" de la Rareș.
+- **G7** Diagnostic din log înainte de cod; fiecare fix citează linia de log.
+- **G8** `DAY_REPORT_2026-10-08.md` scris pe parcurs.
+
 ## BENSON 1.0 — lista închisă (04.10.2026, decizia Rareș, permanentă)
 
 Nimic din afara acestei liste de 10 nu se lucrează până nu e toată verde. Orice cerere în afara
