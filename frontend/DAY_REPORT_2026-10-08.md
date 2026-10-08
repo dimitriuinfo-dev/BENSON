@@ -122,9 +122,30 @@ FLAG: `AC2F_P5_SESSION_CLOSE` (implicit `true`). REVERT: `false`.
 Regresie G3: 9/10 (același fals-negativ de self-echo).
 Build `0a83154d...`, instalat. Commit `90bdc68`.
 
-## V / A / H — rămân pentru continuare
-Dată fiind dimensiunea reală a V (vocea guvernată de ChatGPT, M0/M1/M2/M4/M5 din Motor), A
-(reconstrucția „deschide orice aplicație") și H (sistemul „mâna" — citire ecran + 9 intenții +
-rezolvare țintă pe 4 niveluri + siguranță bancară), fiecare e comparabilă ca efort cu tot ce s-a
-făcut până acum azi (G+D0+P4+P5). Nu le încep pe nepregătite doar ca să bifez — rămân pentru
-continuarea sesiunii, cu acordul tău.
+## E0 — Self-echo ✅ VERDE (găsit și reparat un bug propriu în aceeași rundă)
+
+**E0.1**: capture-ul de COMANDĂ amânat cu 300ms după `TTS_DONE` (`E0_TTS_TAIL_SETTLE_MS`) înainte
+de a porni. Wake-ul (HeedWakeWord, barge-in) neatins, ascultă tot timpul.
+
+**E0.2/E0.3**: transcriptul comparat cu ultimele 2 texte rostite de BENSON (+ „Da, Master." fix,
+fără să ating funcția betonată) — similaritate Levenshtein ≥0,8 SAU conține-text →
+`SELF_ECHO_DROPPED`, aruncat ÎNAINTE de `handleNativeCommandFlow`. Asta e cauza reală: „Încă nu
+știu să fac asta." conține cuvântul „nu", pe care clasificatorul existent îl accepta ca refuz real.
+
+**Bug găsit și reparat pe loc**: un „da" simplu era el însuși confundat cu ecou (conținut literal
+în „Da, Master."). Reparat (`FIX_E0_SHORT_ANSWER_FALSE_ECHO_1`) — transcripturile ≤3 caractere nu
+mai intră în filtru.
+
+Cârlig nou de test: `DEBUG_INJECT_TRANSCRIPT` (debug-only) — `DEBUG_INJECT` simplu ocolea
+filtrul complet (apelează `handleNativeCommandFlow` direct), imposibil de testat determinist fără el.
+
+**Device-proven, exact testul cerut**: ecou injectat → `SELF_ECHO_DROPPED sim=1,00`, confirmarea
+a rămas pendinte → „da" real → `CONFIRM_RESULT verdict=YES` → `WA_NATIVE_CALL_VERIFY success=true`
+→ `CALL_ACTIVE` → `WA_INTENT result=ok`.
+
+FLAG: `E0_SELF_ECHO` (implicit `true`). REVERT: `false`.
+Regresie G3: 9/10 (fals-negativ extern, YouTube `found=false` — nu ține de niciun cod de azi).
+Build `0055d60f...`, instalat. Commit `e9f6064`.
+
+## V — Vocea guvernată de ChatGPT
+(în curs)
