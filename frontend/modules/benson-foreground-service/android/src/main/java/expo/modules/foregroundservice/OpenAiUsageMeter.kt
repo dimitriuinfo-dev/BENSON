@@ -22,6 +22,11 @@ object OpenAiUsageMeter {
   // these for a real budget decision far in the future; OpenAI pricing changes without notice.
   const val GPT4O_MINI_TRANSCRIBE_INPUT_PER_1M_USD = 1.25
   const val GPT4O_MINI_TRANSCRIBE_OUTPUT_PER_1M_USD = 5.0
+  // V3 (08.10.2026) — the transcription response has no `usage` field (verified 08.10.2026), so
+  // exact per-token billing can't be read back per call. This is OpenAI's OWN published estimate
+  // (developers.openai.com/api/docs/pricing, labeled "estimated cost" there too, not exact token
+  // billing) — used here instead of inventing a conversion rate ourselves.
+  const val GPT4O_MINI_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE = 0.003
   const val GPT5_NANO_INPUT_PER_1M_USD = 0.05
   const val GPT5_NANO_OUTPUT_PER_1M_USD = 0.40
   const val USD_TO_EUR = 0.89

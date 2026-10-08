@@ -1351,10 +1351,28 @@ class BensonForegroundService : Service() {
   // open / key save, see setWakeDeepgramCredentials in app/index.tsx), Groq fallback (same
   // credential setNativeWakeCredentials already pushes). Never logs a key. Returns null only if
   // BOTH fail/are unconfigured — caller treats that exactly like an empty transcript.
+  // V3 (08.10.2026) — flag + revert (G2). false = comportamentul dinainte de azi (Deepgram/Groq
+  // direct, fără nicio încercare OpenAI). Revert: V3_OPENAI_STT_NATIVE = false.
+  private val V3_OPENAI_STT_NATIVE = true
+
   private fun nativeTranscribe(wavPath: String): String? {
     val bytes = try { File(wavPath).readBytes() } catch (_: Exception) { null } ?: return null
     if (bytes.isEmpty()) return null
     val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    // V3 — OpenAI încercat PRIMUL, calea Deepgram/Groq de mai jos rămâne rezervă neatinsă, folosită
+    // doar la eroare/timeout OpenAI sau când contorul (V2) arată plafonul zilnic depășit.
+    if (V3_OPENAI_STT_NATIVE) {
+      if (OpenAiUsageMeter.isBudgetExceeded(this)) {
+        AudioDiag.log(this, "STT_FALLBACK", "reason=openai_budget_exceeded")
+      } else {
+        val openAiKey = prefs.getString("brain_api_key", "") ?: ""
+        if (openAiKey.isNotBlank()) {
+          val t = postToOpenAiTranscribe(bytes, openAiKey, prefs)
+          if (t != null) return t
+          AudioDiag.log(this, "STT_FALLBACK", "reason=openai_error_or_timeout")
+        }
+      }
+    }
     val dgKey = prefs.getString("wake_stt_deepgram_api_key", "") ?: ""
     if (dgKey.isNotBlank()) {
       val t = postToDeepgramCmd(bytes, dgKey)
@@ -1363,6 +1381,44 @@ class BensonForegroundService : Service() {
     val groqKey = prefs.getString("wake_stt_api_key", "") ?: ""
     if (groqKey.isBlank()) return null
     return postToGroqCmd(bytes, groqKey, prefs)
+  }
+
+  // V3 (08.10.2026) — own short client (5s callTimeout: audio commands here are at most CMD_MAX_MS
+  // worth of speech, short enough that a slow OpenAI response should fail fast into the Deepgram/
+  // Groq reserve rather than stall the whole command). Cost logged as an ESTIMATE from clip
+  // duration (OpenAiUsageMeter.GPT4O_MINI_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE, OpenAI's own
+  // published per-minute figure) — the response has no `usage` field to compute an exact cost from
+  // (verified 08.10.2026), and V2's own rule is never to invent a number, so this is sourced, not
+  // guessed.
+  private val openAiSttHttpClient = OkHttpClient.Builder()
+    .callTimeout(5, java.util.concurrent.TimeUnit.SECONDS).build()
+
+  private fun postToOpenAiTranscribe(wav: ByteArray, apiKey: String, prefs: android.content.SharedPreferences): String? {
+    AudioDiag.log(this, "STT_REQUEST", "provider=openai bytes=${wav.size}")
+    val baseUrl = (prefs.getString("brain_base_url", "")?.takeIf { it.isNotBlank() } ?: "https://api.openai.com/v1").trimEnd('/')
+    val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+      .addFormDataPart("file", "audio.wav", wav.toRequestBody("audio/wav".toMediaType()))
+      .addFormDataPart("model", "gpt-4o-mini-transcribe")
+      .addFormDataPart("language", cmdLanguage())
+      .addFormDataPart("response_format", "json")
+      .build()
+    val request = Request.Builder().url("$baseUrl/audio/transcriptions")
+      .addHeader("Authorization", "Bearer $apiKey").post(body).build()
+    return try {
+      openAiSttHttpClient.newCall(request).execute().use { resp ->
+        if (!resp.isSuccessful) { AudioDiag.logError("STT_RESULT", "provider=openai http=${resp.code}"); return null }
+        val json = resp.body?.string() ?: return null
+        val transcript = JSONObject(json).optString("text", "").trim()
+        AudioDiag.log(this, "STT_RESULT", "provider=openai text=\"$transcript\" chars=${transcript.length}")
+        val clipMs = (wav.size - 44).coerceAtLeast(0) * 1000.0 / (16_000 * 2)
+        val estimatedCostUsd = (clipMs / 60_000.0) * OpenAiUsageMeter.GPT4O_MINI_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE
+        OpenAiUsageMeter.recordUsage(this, "stt_openai_estimated", estimatedCostUsd)
+        transcript
+      }
+    } catch (e: Exception) {
+      AudioDiag.logError("STT_ERROR", "provider=openai type=${e.javaClass.simpleName}")
+      null
+    }
   }
 
   private fun postToDeepgramCmd(wav: ByteArray, apiKey: String): String? {
