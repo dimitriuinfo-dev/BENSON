@@ -3133,7 +3133,13 @@ class BensonForegroundService : Service() {
   }
   private val mainHandler = Handler(Looper.getMainLooper())
 
+  // P4 (08.10.2026, ZIUA v3) — debug-only override so the regression harness can exercise this
+  // state machine without a real telephony/VoIP call (P4.5). Never set by production code.
+  // null = use the real AudioManager.mode query below.
+  @Volatile private var debugForcedCallActive: Boolean? = null
+
   private fun isCallAudioActive(): Boolean {
+    debugForcedCallActive?.let { return it }
     val mode = try { (getSystemService(Context.AUDIO_SERVICE) as AudioManager).mode } catch (_: Exception) { AudioManager.MODE_NORMAL }
     val waState = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
       .getString("wa_call_lifecycle_state", "IDLE")
@@ -3142,10 +3148,19 @@ class BensonForegroundService : Service() {
   }
   fun isCallAudioBlockedNow(): Boolean = callAudioBlocked || isCallAudioActive()
 
+  // P4 — flag + revert (G2). false = comportamentul dinainte de azi (startCallMicProbe activ,
+  // reluare wake imediată, fără stabilitate de 1500ms). Revert: AC2F_P4_MIC_YIELD = false.
+  private val AC2F_P4_MIC_YIELD = true
+  private val MIC_RESUME_STABLE_MS = 1_500L
+  private val MIC_RESUME_RETRY_MS = 1_000L
+  private val MIC_RESUME_MAX_RETRIES = 3
+  @Volatile private var micResumeCheckEpoch = 0
+
   private fun refreshCallAudioState(reason: String) {
     val active = isCallAudioActive()
     if (active == callAudioBlocked) return
     callAudioBlocked = active
+    micResumeCheckEpoch += 1 // invalidates any in-flight resume-stability/retry chain below
     val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
     if (active) {
       AudioDiag.log(this, "CALL_AUDIO_GUARD", "state=active reason=$reason audioMode=${try { (getSystemService(Context.AUDIO_SERVICE) as AudioManager).mode } catch (_: Exception) { -1 }}")
@@ -3154,18 +3169,73 @@ class BensonForegroundService : Service() {
       pendingWakeAudioFile.getAndSet(null)
       pendingWakeCommandEpoch += 1
       suspendNativeWake("call_active")
+      AudioDiag.log(this, "MIC_YIELD", "reason=$reason")
       try { confirmationListener?.stop() } catch (_: Exception) {}
       confirmationListener = null
       setMicOwner("CALL", "call_audio_active")
-      startCallMicProbe() // RUNDA CAR-1/PROBA RMS — doar măsurare, blocajul de mai sus rămâne activ
+      // P4.3 — "zero AudioRecord.startRecording, zero sondare" cât durează apelul: mic-probe-ul de
+      // măsurare RMS (RUNDA CAR-1, 2026-10-04) deschidea propriul AudioRecord o dată pe secundă pe
+      // toată durata apelului, strict diagnostic — intră direct în contradicție cu cerința de azi.
+      // Dezactivat sub flag; codul rămâne, pentru revert.
+      if (!AC2F_P4_MIC_YIELD) startCallMicProbe()
     } else {
       AudioDiag.log(this, "CALL_AUDIO_GUARD", "state=ended reason=$reason")
       prefs.edit().putBoolean("call_audio_active", false).apply()
       if (micOwner == "CALL") setMicOwner("NONE", "call_audio_ended")
       stopCallMicProbe()
-      armNativeWake("call_audio_ended")
+      if (AC2F_P4_MIC_YIELD) {
+        scheduleMicResumeAfterStability(System.currentTimeMillis(), micResumeCheckEpoch)
+      } else {
+        armNativeWake("call_audio_ended")
+      }
     }
     onCallAudioStateChanged?.invoke(active)
+  }
+
+  // P4.4 — mode NORMAL stabil ≥1500ms înainte de reluare (evită flapping-ul in-call/post-call);
+  // P4.4 — eșec → 3 reîncercări la 1s, apoi WAKE_RESUME_FAILED + notificare discretă, fără TTS.
+  private fun scheduleMicResumeAfterStability(endedAt: Long, epoch: Int, attempt: Int = 0) {
+    mainHandler.postDelayed({
+      if (epoch != micResumeCheckEpoch) return@postDelayed // a new state transition superseded this chain
+      if (isCallAudioActive()) return@postDelayed // flapped back into a call — refreshCallAudioState will re-drive this
+      armNativeWake("call_audio_ended")
+      val resumed = heedWakeWord?.isRunning() == true || microWakeWord?.isRunning() == true
+      if (resumed) {
+        AudioDiag.log(this, "MIC_RESUME", "afterMs=${System.currentTimeMillis() - endedAt} attempt=$attempt")
+      } else if (attempt < MIC_RESUME_MAX_RETRIES) {
+        mainHandler.postDelayed({
+          if (epoch != micResumeCheckEpoch) return@postDelayed
+          scheduleMicResumeAfterStability(endedAt, epoch, attempt + 1)
+        }, MIC_RESUME_RETRY_MS)
+      } else {
+        AudioDiag.log(this, "WAKE_RESUME_FAILED", "attempts=$attempt")
+        notifyWakeResumeFailedDiscreetly()
+      }
+    }, if (attempt == 0) MIC_RESUME_STABLE_MS else 0L)
+  }
+
+  // Discrete = notification only, never TTS (P4.4's own wording) — the mic is presumably still in
+  // a bad state, so speaking over it would be exactly the kind of unreliable native speech this
+  // whole round is trying to avoid depending on.
+  private fun notifyWakeResumeFailedDiscreetly() {
+    try {
+      val manager = getSystemService(NotificationManager::class.java)
+      if (manager.getNotificationChannel(CHANNEL_ID) == null) return
+      val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        .setContentTitle("BENSON")
+        .setContentText("Ascultarea nu a repornit după apel — atinge pentru a relua.")
+        .setSmallIcon(applicationInfo.icon)
+        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setAutoCancel(true)
+        .setContentIntent(
+          PendingIntent.getService(
+            this, 3, Intent(this, BensonForegroundService::class.java).apply { action = ACTION_REVIVE },
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0),
+          ),
+        )
+        .build()
+      manager.notify(4273, notification)
+    } catch (_: Exception) {}
   }
 
   private val callStatePoll = object : Runnable {
@@ -3212,6 +3282,22 @@ class BensonForegroundService : Service() {
           mainHandler.post {
             handleNativeCommandFlow(text, isFollowUp = true, originalPhrase = "DEBUG_INJECT", originalWavPath = null)
           }
+        }
+        // P4.5 (08.10.2026) — debug-only, forces isCallAudioActive()'s return value so the real
+        // state machine (refreshCallAudioState/suspendNativeWake/scheduleMicResumeAfterStability)
+        // can be exercised without a real telephony/VoIP call. Never reachable in release (same
+        // debug_inject_enabled gate as every other DEBUG_INJECT_* action). "clear" extra removes
+        // the override, falling back to the real AudioManager.mode query.
+        "com.benson.butler.DEBUG_INJECT_CALL_MODE" -> {
+          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val clear = intent.getBooleanExtra("clear", false)
+          val active = intent.getBooleanExtra("active", false)
+          debugForcedCallActive = if (clear) null else active
+          AudioDiag.log(context, "DEBUG_INJECT", "action=call_mode forced=${debugForcedCallActive?.toString() ?: "cleared"}")
+          mainHandler.post { refreshCallAudioState("debug_forced") }
         }
         // ZIUA 2026-10-08, G3 — simulates a confirmation reply without real microphone audio, so
         // the regression suite can exercise "Nu" → zero acțiune on a timed, flaky mic-free path.
@@ -3302,6 +3388,7 @@ class BensonForegroundService : Service() {
         addAction("com.benson.butler.DEBUG_INJECT")
         addAction("com.benson.butler.DEBUG_INJECT_ENABLE")
         addAction("com.benson.butler.DEBUG_INJECT_CONFIRM") // ZIUA 2026-10-08, G3
+        addAction("com.benson.butler.DEBUG_INJECT_CALL_MODE") // ZIUA 2026-10-08, P4.5
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         registerReceiver(debugInjectReceiver, filter, Context.RECEIVER_EXPORTED)
