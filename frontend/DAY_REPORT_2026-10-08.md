@@ -147,5 +147,18 @@ FLAG: `E0_SELF_ECHO` (implicit `true`). REVERT: `false`.
 Regresie G3: 9/10 (fals-negativ extern, YouTube `found=false` — nu ține de niciun cod de azi).
 Build `0055d60f...`, instalat. Commit `e9f6064`.
 
-## V — Vocea guvernată de ChatGPT
+## V — Vocea guvernată de ChatGPT (6 sub-pași, fiecare cu poartă+flag+commit propriu)
+
+### V0 — Verificare, fără cod ✅
+
+| | Model | Preț (azi, surse oficiale) | Note |
+|---|---|---|---|
+| STT | `gpt-4o-mini-transcribe` | $1,25/1M tokeni input, $5/1M output | facturare pe TOKENI, nu pe minut (surse terțe cu $/min nesigure, ignorate) · context 16K, output max 2K · `language` ISO-639-1 pentru acuratețe/latență |
+| Text + Structured Outputs | `gpt-5-nano` | $0,05/1M input, $0,40/1M output | cel mai ieftin din gama OpenAI, confirmă `structured_outputs`+`function_calling`, context 400K |
+
+Latență: niciun număr oficial pentru `gpt-4o-mini-transcribe` — de măsurat empiric la V3.
+Limite de rată: niciun tabel oficial stabil — de verificat în dashboard-ul contului la V3/V4.
+Fără poartă roșie.
+
+### V1 — Raportorul adevărat
 (în curs)

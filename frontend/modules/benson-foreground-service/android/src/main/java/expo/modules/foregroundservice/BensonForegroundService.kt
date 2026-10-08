@@ -276,6 +276,13 @@ class BensonForegroundService : Service() {
   // finale). Revert: AC2F_P5_SESSION_CLOSE = false.
   private val AC2F_P5_SESSION_CLOSE = true
 
+  // V1 (08.10.2026, Motor M1) — flag + revert (G2). Pure logging addition: the actual "zero Gata
+  // fără dovadă" decisions (result.success / verified) already existed and were already correct in
+  // both call sites this touches (WA actions, YouTube play) — this only adds the standardized
+  // OUTCOME log line Motor's spec asks for, on top of that existing decision. false = no OUTCOME
+  // line, otherwise unchanged behavior either way.
+  private val V1_TRUTHFUL_REPORTER = true
+
   // Exact aceeași listă de 5 verificată la începutul handleNativeCommandFlow — o întrebare
   // (confirmare/disambiguare) setează unul dintre ele ÎNAINTE de a fi rostită și îl golește abia
   // după răspuns, deci "niciunul setat" la finalul unui TTS înseamnă sigur raport final, nu
@@ -1922,6 +1929,8 @@ class BensonForegroundService : Service() {
           mainHandler.post {
             setMicOwner("NONE", "youtube_play_done")
             val resp = if (verified) "Pornit." else "N-am reușit să pornesc piesa."
+            // V1 (08.10.2026, M1) — standardized OUTCOME, same decision as above, already correct.
+            if (V1_TRUTHFUL_REPORTER) AudioDiag.log(this, "OUTCOME", "action=youtube_play verified=$verified evidence=\"${meta?.title ?: "none"}\" spoken=\"$resp\"")
             updateBubbleNative(resp, rawAnswer, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
             speak(resp)
           }
@@ -2944,6 +2953,13 @@ class BensonForegroundService : Service() {
           // verify correctly (steps 1-2 passed), only the compose field itself wasn't found. Never
           // presses anything in that case (the function already returns before any ACTION_CLICK).
         } else if (result.step == "FIND_MESSAGE_INPUT") "Am deschis conversația, preiei tu." else "Nu am reușit: ${result.step}."
+        // V1 (08.10.2026, M1 raportorul adevărat) — standardizează logarea OUTCOME cerută de Motor,
+        // PESTE decizia deja existentă (result.success), nu o înlocuiește: WA era deja corect,
+        // "Sun pe X."/"Trimis." se rostesc DOAR când result.success e adevărat, verificat mai sus.
+        if (V1_TRUTHFUL_REPORTER) {
+          val verifiedTag = if (result.success) "true" else if (result.step == "FIND_MESSAGE_INPUT") "partial" else "false"
+          AudioDiag.log(this, "OUTCOME", "action=wa_${pending.kind} verified=$verifiedTag evidence=${result.step} spoken=\"$response\"")
+        }
         openSession("wa_action_done", mayDuck = true)
         setMicOwner("NONE", "wa_action_done")
         updateBubbleNative(response, "", terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
