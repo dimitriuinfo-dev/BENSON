@@ -469,6 +469,15 @@ class BensonForegroundService : Service() {
     AudioDiag.log(this, "TTS_ROUTE", "usage=${if (carMode) "nav_guidance" else "assistant"} carMode=$carMode outDevice=$outDevice")
   }
 
+  // LEGE L8-EXT (08.10.2026) — o singură identitate de voce pentru toate ieșirile. Verificat, nu
+  // presupus: nativeTts e UNICUL TextToSpeech din tot codul nativ (audit grep, 08.10.2026) — ack-ul
+  // și speakNativeFallbackThenCapture folosesc deja ACELAȘI obiect, deci aceeași voce aleasă o
+  // dată la initNativeAck (D0). Linia asta doar face vizibil pe log ce era deja adevărat.
+  private fun logTtsSpeak(kind: String, text: String) {
+    val voiceId = nativeTts?.voice?.name ?: "unset"
+    AudioDiag.log(this, "TTS_SPEAK", "kind=$kind lang=ro voice=$voiceId chars=${text.length}")
+  }
+
   private fun speakNativeAckThenCapture() {
     val t = nativeTts
     if (t != null && nativeTtsReady) {
@@ -476,6 +485,7 @@ class BensonForegroundService : Service() {
       val utteranceId = "wake_ack_${System.currentTimeMillis()}"
       val result = t.speak("Da, Master.", android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, utteranceId)
       AudioDiag.log(this, "WAKE_ACK", "engine=native result=$result")
+      logTtsSpeak("ack", "Da, Master.")
     } else {
       try {
         val tone = android.media.ToneGenerator(AudioManager.STREAM_MUSIC, 70)
@@ -519,6 +529,10 @@ class BensonForegroundService : Service() {
       AudioDiag.log(this, "TTS_NATIVE_REQUEST", "text=\"$text\"")
       val result = t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, utteranceId)
       AudioDiag.log(this, "WAKE_FALLBACK", "engine=native result=$result")
+      // LEGE L8-EXT — kind inferat din starea pendinte la momentul vorbirii (același tipar ca P5):
+      // ceva pendinte ÎNCĂ (tocmai setat, înainte de a pune întrebarea) = confirm; nimic pendinte =
+      // raport final (CLARIFY/CHAT nu există încă azi — V4b/V5 vor trece kind explicit atunci).
+      logTtsSpeak(if (hasAnyPendingNativeState()) "confirm" else "report", text)
     } else {
       AudioDiag.log(this, "WAKE_FALLBACK", "fallback=tone")
       mainHandler.postDelayed({ startFollowUpCapture() }, 400)
@@ -3444,6 +3458,29 @@ class BensonForegroundService : Service() {
             handleNativeCommandFlow(text, isFollowUp = true, originalPhrase = "DEBUG_INJECT", originalWavPath = null)
           }
         }
+        // V3-VERIFICARE (08.10.2026) — debug-only, injects a REAL WAV file (synthesized speech,
+        // pushed to the device beforehand) directly into nativeTranscribe — the actual STT call
+        // (OpenAI first, Deepgram/Groq reserve) hits the real network, unlike DEBUG_INJECT_TRANSCRIPT
+        // which skips STT entirely. Then dispatches through the same echo-check/command path a real
+        // capture would use, so a recognizable command (e.g. "deschide calculator") can actually execute.
+        "com.benson.butler.DEBUG_INJECT_WAV" -> {
+          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val path = intent.getStringExtra("path")
+          if (path.isNullOrBlank() || !File(path).isFile) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=wav_rejected reason=file_missing path=$path")
+            return
+          }
+          AudioDiag.log(context, "DEBUG_INJECT", "action=wav path=$path")
+          Thread({
+            val startedAt = System.currentTimeMillis()
+            val transcript = nativeTranscribe(path)
+            AudioDiag.log(context, "DEBUG_INJECT", "action=wav_done latencyMs=${System.currentTimeMillis() - startedAt} text=\"${transcript ?: ""}\"")
+            dispatchFollowUpTranscript(transcript)
+          }, "benson-debug-wav").start()
+        }
         // E0 (08.10.2026) — debug-only, feeds text through dispatchFollowUpTranscript (the SAME
         // echo-check + dispatch real capture results go through), unlike plain DEBUG_INJECT which
         // calls handleNativeCommandFlow directly and bypasses the self-echo filter entirely. Only
@@ -3565,6 +3602,7 @@ class BensonForegroundService : Service() {
         addAction("com.benson.butler.DEBUG_INJECT_CONFIRM") // ZIUA 2026-10-08, G3
         addAction("com.benson.butler.DEBUG_INJECT_CALL_MODE") // ZIUA 2026-10-08, P4.5
         addAction("com.benson.butler.DEBUG_INJECT_TRANSCRIPT") // ZIUA 2026-10-08, E0
+        addAction("com.benson.butler.DEBUG_INJECT_WAV") // ZIUA 2026-10-08, V3-VERIFICARE
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         registerReceiver(debugInjectReceiver, filter, Context.RECEIVER_EXPORTED)
