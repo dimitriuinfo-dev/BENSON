@@ -160,5 +160,19 @@ Latență: niciun număr oficial pentru `gpt-4o-mini-transcribe` — de măsurat
 Limite de rată: niciun tabel oficial stabil — de verificat în dashboard-ul contului la V3/V4.
 Fără poartă roșie.
 
-### V1 — Raportorul adevărat
+### V1 — Raportorul adevărat ✅ VERDE
+
+**Audit, nu rescriere**: `executeWaAction` (WA apel/video/mesaj) și `handlePendingYoutubePlayAnswer`
+(YouTube pornire) erau DEJA corecte — „Sun pe X."/„Pornesc video"/„Pornit." se rostesc DOAR când
+`result.success`/`verified` (dovadă reală: `WA_NATIVE_CALL_VERIFY`, `WA_WRITE_SENT_VERIFIED`,
+metadata MediaSession verificată) sunt adevărate. Nicio schimbare de comportament.
+
+**Adăugat**: logarea standard cerută de Motor M1 — `OUTCOME action=… verified=true|false|partial
+evidence=… spoken="…"` — pe lângă decizia deja existentă, la ambele puncte.
+
+FLAG: `V1_TRUTHFUL_REPORTER` (implicit `true`). REVERT: `false` (oprește doar linia de log).
+Regresie G3: 9/10 (același fals-negativ extern YouTube).
+Build `61c256db...`, instalat. Commit `e91530a`.
+
+### V2 — Contorul de cost
 (în curs)
