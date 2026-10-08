@@ -1355,6 +1355,18 @@ class BensonForegroundService : Service() {
     return rawWords.drop(dropCount).joinToString(" ").trim()
   }
 
+  // V4a (08.10.2026) — a SINGLE, mechanical forwarding point for every NATIVE_ROUTE/WA_PARSE log
+  // call (replace_all substitution, not per-site logic edits — behaviorally identical, same stage/
+  // fields reach AudioDiag.log exactly as before). Lets the shadow interpreter's INTERP_SHADOW line
+  // report what the OLD parser actually decided for the SAME transcript, without touching any of
+  // the ~18 individual routing branches themselves.
+  @Volatile private var lastOldParserAction: String = "none"
+  private fun logRoute(stage: String, fields: String) {
+    val action = Regex("action=\"?([^ \"]+)\"?").find(fields)?.groupValues?.get(1)
+    if (action != null) lastOldParserAction = action else if (stage == "WA_PARSE") lastOldParserAction = "wa_" + fields.removePrefix("kind=")
+    AudioDiag.log(this, stage, fields)
+  }
+
   private fun cmdLanguage(): String {
     val configured = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
       .getString("stt_language", null)?.substringBefore('-')?.lowercase()
@@ -1524,11 +1536,11 @@ class BensonForegroundService : Service() {
     val query = expo.modules.accessibility.AppMentionStripper.strip(m.groupValues[1].trim())
     if (query.isBlank()) return false
     if (isCarModeActive()) {
-      AudioDiag.log(this, "NATIVE_ROUTE", "action=yt_open_and_search_refused reason=car_mode target=\"$query\"")
+      logRoute("NATIVE_ROUTE", "action=yt_open_and_search_refused reason=car_mode target=\"$query\"")
       speak("Nu pornesc video cât conduci.")
       return true
     }
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=yt_open_and_search target=\"$query\"")
+    logRoute("NATIVE_ROUTE", "action=yt_open_and_search target=\"$query\"")
     if (!launchYoutubeSearch(query)) return false
     val svc = expo.modules.accessibility.BensonAccessibilityService.instance
     if (svc == null) { speak("Serviciul de accesibilitate nu e disponibil."); return true }
@@ -1556,16 +1568,16 @@ class BensonForegroundService : Service() {
     val target = normalizeForMatch(m.groupValues[1])
     if (target.isBlank()) return null
     if (COMPOUND_COMMAND_PATTERN.containsMatchIn(target)) {
-      AudioDiag.log(this, "NATIVE_ROUTE", "action=open_app_declined reason=compound_command target=\"$target\"")
+      logRoute("NATIVE_ROUTE", "action=open_app_declined reason=compound_command target=\"$target\"")
       return null
     }
     // RUNDA CAR-1 — "deschide youtube" în modul mașină e tot acces la video; refuzat. Nu afectează
     // deschiderea YouTube din afara mașinii (testul înghețat din CLAUDE.md rulează fără Android Auto).
     if (target == "youtube" && isCarModeActive()) {
-      AudioDiag.log(this, "NATIVE_ROUTE", "action=open_app_refused reason=car_mode target=\"$target\"")
+      logRoute("NATIVE_ROUTE", "action=open_app_refused reason=car_mode target=\"$target\"")
       return "Nu pornesc video cât conduci."
     }
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=open_app target=\"$target\"")
+    logRoute("NATIVE_ROUTE", "action=open_app target=\"$target\"")
     val pkg = findLaunchablePackage(target)
     if (pkg == null) {
       AudioDiag.log(this, "APP_LAUNCH", "pkg=none ok=false reason=not_found")
@@ -1629,7 +1641,7 @@ class BensonForegroundService : Service() {
 
   private fun tryNativeAppCategorySearch(command: String): Boolean {
     val category = AppCategoryMatcher.extractCategory(command) ?: return false
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=app_category_search target=\"$category\"")
+    logRoute("NATIVE_ROUTE", "action=app_category_search target=\"$category\"")
     val found = findAppsByCategory(category)
     when {
       found.size == 1 -> finishAppLaunch(found[0].first, found[0].second, command)
@@ -1722,7 +1734,7 @@ class BensonForegroundService : Service() {
     if (svc == null) { speakNativeFallbackThenCapture("Serviciul de accesibilitate nu e disponibil."); return true }
     val action = if (m.groupValues[1] == "inapoi") "back" else "home"
     val ok = svc.performGlobalNav(action)
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=global_nav target=\"$action\" ok=$ok")
+    logRoute("NATIVE_ROUTE", "action=global_nav target=\"$action\" ok=$ok")
     openSession("native_cmd_executed", mayDuck = true)
     setMicOwner("NONE", "native_cmd_executed")
     updateBubbleNative(if (ok) "" else "Nu am putut.", command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
@@ -1766,7 +1778,7 @@ class BensonForegroundService : Service() {
     if (!eligible) return false
 
     val query = parsed.query
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=music_play target=\"$query\" pkg=$fg")
+    logRoute("NATIVE_ROUTE", "action=music_play target=\"$query\" pkg=$fg")
     svc.runOnServiceScope {
       // FIX_MUSIC2_STALE_METADATA_1 (2026-10-04, device-proven) — a query containing the artist's
       // own name (e.g. "pune like a prayer madonna" while a DIFFERENT Madonna track was already
@@ -1940,11 +1952,11 @@ class BensonForegroundService : Service() {
     val query = expo.modules.accessibility.AppMentionStripper.strip(rawQuery)
     if (query.isBlank()) return false
     if (isCarModeActive()) {
-      AudioDiag.log(this, "NATIVE_ROUTE", "action=youtube_search_confirm_refused reason=car_mode target=\"$query\"")
+      logRoute("NATIVE_ROUTE", "action=youtube_search_confirm_refused reason=car_mode target=\"$query\"")
       speak("Nu pornesc video cât conduci.")
       return true
     }
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=youtube_search_confirm target=\"$query\" youtubeForeground=$youtubeForeground")
+    logRoute("NATIVE_ROUTE", "action=youtube_search_confirm target=\"$query\" youtubeForeground=$youtubeForeground")
     if (!youtubeForeground && !launchYoutubeSearch(query)) return false
     svc.runOnServiceScope {
       // Already-foreground: real search box, activate+type (genericSearchLocateFirst). Just
@@ -2184,7 +2196,7 @@ class BensonForegroundService : Service() {
       "urmatorul", "următorul", "urmatoarea", "următoarea", "next" -> "next"
       else -> "previous"
     }
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=media_ctl target=\"$action\"")
+    logRoute("NATIVE_ROUTE", "action=media_ctl target=\"$action\"")
     val ok = expo.modules.notificationlistener.MediaTransport.control(applicationContext, "", action)
     AudioDiag.log(this, "APP_LAUNCH", "pkg=media_session ok=$ok")
     if (!ok) return null
@@ -2220,14 +2232,14 @@ class BensonForegroundService : Service() {
     return when (fgPkg) {
       "com.google.android.youtube" -> {
         if (isCarModeActive()) {
-          AudioDiag.log(this, "NATIVE_ROUTE", "action=context_search_refused reason=car_mode target=\"$query\" app=youtube")
+          logRoute("NATIVE_ROUTE", "action=context_search_refused reason=car_mode target=\"$query\" app=youtube")
           return "Nu pornesc video cât conduci."
         }
-        AudioDiag.log(this, "NATIVE_ROUTE", "action=context_search target=\"$query\" app=youtube")
+        logRoute("NATIVE_ROUTE", "action=context_search target=\"$query\" app=youtube")
         if (launchYoutubeSearch(query)) "Caut $query pe YouTube." else null
       }
       "com.spotify.music" -> {
-        AudioDiag.log(this, "NATIVE_ROUTE", "action=context_search target=\"$query\" app=spotify")
+        logRoute("NATIVE_ROUTE", "action=context_search target=\"$query\" app=spotify")
         if (launchSpotifySearch(query)) "Caut $query pe Spotify." else null
       }
       else -> null
@@ -2241,7 +2253,7 @@ class BensonForegroundService : Service() {
   // untouched.
   private fun tryNativeGeneralSearch(command: String): String? {
     val query = GeneralSearchMatcher.extractQuery(command) ?: return null
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=web_search target=\"$query\"")
+    logRoute("NATIVE_ROUTE", "action=web_search target=\"$query\"")
     val encoded = try { java.net.URLEncoder.encode(query, "UTF-8") } catch (_: Exception) { return null }
     val ok = try {
       startActivity(
@@ -2312,10 +2324,10 @@ class BensonForegroundService : Service() {
     if (query.isBlank()) return null
     // RUNDA CAR-1 — vezi tryNativeYoutubeOpenSearch; aceeași refuzare în modul mașină.
     if (isCarModeActive()) {
-      AudioDiag.log(this, "NATIVE_ROUTE", "action=yt_search_refused reason=car_mode target=\"$query\"")
+      logRoute("NATIVE_ROUTE", "action=yt_search_refused reason=car_mode target=\"$query\"")
       return "Nu pornesc video cât conduci."
     }
-    AudioDiag.log(this, "NATIVE_ROUTE", "action=yt_search target=\"$query\"")
+    logRoute("NATIVE_ROUTE", "action=yt_search target=\"$query\"")
     val encoded = try { java.net.URLEncoder.encode(query, "UTF-8") } catch (_: Exception) { return null }
     val ok = try {
       val searchIntent = Intent(Intent.ACTION_SEARCH).apply {
@@ -2622,7 +2634,7 @@ class BensonForegroundService : Service() {
       searchM != null -> { kind = "search_followup"; nameRaw = searchM.groupValues[1].trim(); messageText = null }
       else -> return false
     }
-    AudioDiag.log(this, "WA_PARSE", "kind=$kind")
+    logRoute("WA_PARSE", "kind=$kind")
     val candidates = findWaContacts(nameRaw)
     // ADAOS CONTACT_ALIAS_LEARN (2026-10-03, user-directed) — a learned spoken form resolves
     // directly, skipping the numbered list entirely. Still asks the normal confirm question right
@@ -3128,7 +3140,7 @@ class BensonForegroundService : Service() {
     // even enough to log a miss). Only hand off when BENSON's own screen is actually visible
     // (JS demonstrably alive); otherwise speak+show the fallback natively and keep listening.
     if (isBensonForeground()) {
-      AudioDiag.log(this, "NATIVE_ROUTE", "action=js_handoff")
+      logRoute("NATIVE_ROUTE", "action=js_handoff")
       // FIX_SINGLE_TRANSCRIPTION_1 (2026-10-04, device-proven on highway) — passing
       // (originalPhrase, originalWavPath) here made JS re-transcribe the SAME clip from scratch
       // via its own Deepgram call; that second, independent transcription disagreed with
@@ -3139,7 +3151,7 @@ class BensonForegroundService : Service() {
       onHotwordDetected(command, null)
       rearmWakeNative("js_handoff")
     } else {
-      AudioDiag.log(this, "NATIVE_ROUTE", "action=native_fallback reason=benson_backgrounded")
+      logRoute("NATIVE_ROUTE", "action=native_fallback reason=benson_backgrounded")
       val fallback = "Încă nu știu să fac asta."
       updateBubbleNative(fallback, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
       speakNativeFallbackThenCapture(fallback)
@@ -3161,6 +3173,99 @@ class BensonForegroundService : Service() {
   private val CMD_MAX_MS = 10_000L
   private val CMD_VAD_SILENCE_MS = 800L
 
+  // V4a (08.10.2026) — flag + revert (G2). Shadow-only: runs on EVERY transcript, logs, executes
+  // nothing. Revert: V4_SHADOW = false.
+  private val V4_SHADOW = true
+  private val interpHttpClient = OkHttpClient.Builder()
+    .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS).build()
+
+  private val INTERP_SCHEMA = """
+    {"type":"object","properties":{
+      "action":{"type":"string","enum":["WA_CALL","WA_VIDEO","WA_MESSAGE","APP_OPEN","YT_SEARCH","MEDIA_STOP","CLARIFY","CHAT","UNKNOWN"]},
+      "contact":{"type":["string","null"]},"message":{"type":["string","null"]},"app":{"type":["string","null"]},
+      "query":{"type":["string","null"]},"question":{"type":["string","null"]}},
+     "required":["action","contact","message","app","query","question"],"additionalProperties":false}
+  """.trimIndent()
+
+  private val INTERP_SYSTEM_PROMPT = "Ești interpretorul BENSON. Clasifici o comandă rostită " +
+    "(română/germană/engleză) într-un singur obiect JSON, exact schema dată. action: WA_CALL/" +
+    "WA_VIDEO (contact=numele persoanei), WA_MESSAGE (contact+message), APP_OPEN (app=numele " +
+    "aplicației), YT_SEARCH (query=ce se caută), MEDIA_STOP (fără alte câmpuri), CLARIFY " +
+    "(question=o întrebare scurtă, dacă nu e clar ce vrea), CHAT (conversație liberă, întrebare " +
+    "sau afirmație fără acțiune de executat), UNKNOWN (nimic din astea/comandă fără sens). " +
+    "Câmpurile nefolosite = null."
+
+  // V4 — real usage from the chat/completions response (unlike V3's STT estimate: this endpoint
+  // DOES return a `usage` field with real token counts).
+  private fun interpretCommand(transcript: String): JSONObject? {
+    if (transcript.isBlank()) return null
+    if (OpenAiUsageMeter.isBudgetExceeded(this)) { AudioDiag.log(this, "INTERP_SKIPPED", "reason=budget_exceeded"); return null }
+    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    val apiKey = prefs.getString("brain_api_key", "") ?: ""
+    if (apiKey.isBlank()) return null
+    val baseUrl = (prefs.getString("brain_base_url", "")?.takeIf { it.isNotBlank() } ?: "https://api.openai.com/v1").trimEnd('/')
+    val body = JSONObject().apply {
+      put("model", "gpt-5-nano")
+      put(
+        "messages",
+        org.json.JSONArray().apply {
+          put(JSONObject().apply { put("role", "system"); put("content", INTERP_SYSTEM_PROMPT) })
+          put(JSONObject().apply { put("role", "user"); put("content", transcript) })
+        },
+      )
+      put(
+        "response_format",
+        JSONObject().apply {
+          put("type", "json_schema")
+          put(
+            "json_schema",
+            JSONObject().apply {
+              put("name", "benson_intent"); put("strict", true); put("schema", JSONObject(INTERP_SCHEMA))
+            },
+          )
+        },
+      )
+    }
+    val request = Request.Builder().url("$baseUrl/chat/completions")
+      .addHeader("Authorization", "Bearer $apiKey")
+      .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+    return try {
+      interpHttpClient.newCall(request).execute().use { resp ->
+        if (!resp.isSuccessful) { AudioDiag.logError("INTERP_ERROR", "http=${resp.code}"); return null }
+        val json = resp.body?.string() ?: return null
+        val root = JSONObject(json)
+        val content = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")
+        val usage = root.optJSONObject("usage")
+        if (usage != null) {
+          val inTok = usage.optInt("prompt_tokens", 0)
+          val outTok = usage.optInt("completion_tokens", 0)
+          val cost = (inTok / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_INPUT_PER_1M_USD +
+            (outTok / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_OUTPUT_PER_1M_USD
+          OpenAiUsageMeter.recordUsage(this, "interp_gpt5nano", cost)
+        }
+        if (content.isNullOrBlank()) return null
+        JSONObject(content)
+      }
+    } catch (e: Exception) {
+      AudioDiag.logError("INTERP_ERROR", "type=${e.javaClass.simpleName}")
+      null
+    }
+  }
+
+  // V4a — maps the old parser's many internal action names onto the interpreter's enum, for a
+  // meaningful match= comparison (not a raw string compare — the vocabularies differ on purpose,
+  // old names are internal routing detail, new ones are the public enum from the spec).
+  private fun normalizeOldAction(old: String): String = when (old) {
+    "open_app" -> "APP_OPEN"
+    "yt_search", "yt_open_and_search", "youtube_search_confirm", "context_search" -> "YT_SEARCH"
+    "media_ctl", "music_play" -> "MEDIA_STOP"
+    "wa_call" -> "WA_CALL"
+    "wa_video" -> "WA_VIDEO"
+    "wa_message" -> "WA_MESSAGE"
+    "native_fallback", "js_handoff", "none" -> "UNKNOWN"
+    else -> old.uppercase()
+  }
+
   // E0.2/E0.3 (08.10.2026, self-echo) — dropped BEFORE handleNativeCommandFlow, so a pending
   // confirmation's own classifyConfirmationNative never even sees this transcript. This is the
   // actual fix for the original bug: BENSON's own fallback text contains "nu" as a bare word,
@@ -3179,7 +3284,26 @@ class BensonForegroundService : Service() {
       mainHandler.post {
         handleNativeCommandFlow(transcript ?: "", isFollowUp = true, originalPhrase = "", originalWavPath = null)
       }
+      if (V4_SHADOW && !transcript.isNullOrBlank()) triggerShadowInterpretation(transcript)
     }
+  }
+
+  // V4a (08.10.2026) — shadow only: the old parser has already routed/executed by the time this is
+  // called (caller posts that to mainHandler first), unmodified. Runs independently, in parallel,
+  // and NEVER touches pendingWaAction or any executor. The 2s delay gives the old parser's own
+  // logRoute() call (sync for simple actions, async for WA via runOnServiceScope) time to land
+  // before comparing old= here.
+  private fun triggerShadowInterpretation(transcript: String) {
+    val epochAtDispatch = lastOldParserAction
+    Thread({
+      val interp = interpretCommand(transcript)
+      mainHandler.postDelayed({
+        val newAction = interp?.optString("action") ?: "call_failed"
+        val oldNorm = normalizeOldAction(if (lastOldParserAction != epochAtDispatch) lastOldParserAction else "none")
+        val match = oldNorm == newAction
+        AudioDiag.log(this, "INTERP_SHADOW", "old=$oldNorm new=$newAction match=$match text=\"$transcript\"")
+      }, 2000)
+    }, "benson-interp-shadow").start()
   }
 
   private fun startFollowUpCapture() {
@@ -3457,6 +3581,7 @@ class BensonForegroundService : Service() {
           mainHandler.post {
             handleNativeCommandFlow(text, isFollowUp = true, originalPhrase = "DEBUG_INJECT", originalWavPath = null)
           }
+          if (V4_SHADOW) triggerShadowInterpretation(text)
         }
         // V3-VERIFICARE (08.10.2026) — debug-only, injects a REAL WAV file (synthesized speech,
         // pushed to the device beforehand) directly into nativeTranscribe — the actual STT call
@@ -3566,7 +3691,7 @@ class BensonForegroundService : Service() {
         if (longPress) {
           triggerWakeFromHeadsetButton()
         } else {
-          AudioDiag.log(this, "NATIVE_ROUTE", "action=headset_short_press")
+          logRoute("NATIVE_ROUTE", "action=headset_short_press")
           expo.modules.notificationlistener.MediaTransport.control(applicationContext, "", "toggle")
         }
       }
