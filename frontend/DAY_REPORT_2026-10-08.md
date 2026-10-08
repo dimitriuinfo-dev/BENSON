@@ -224,3 +224,55 @@ confirmat cu vocea reală a lui Rareș diseară.
 Regresie G3: 9/10 (G3 nu atinge deloc `nativeTranscribe` — toate testele folosesc `DEBUG_INJECT`,
 care ocolește STT-ul complet).
 Build `03fb72a3...`, instalat. Commit `ddd3f54`.
+
+### V4a — Interpretor în umbră, cod ✅ VERDE · corpus pe dispozitiv 🔴 POARTĂ ROȘIE (ramură oprită, onest)
+
+**Codul** (`738b794`): `interpretCommand` (POST la `/chat/completions`, `gpt-5-nano`, Structured
+Outputs strict, schema `INTERP_SCHEMA`), `normalizeOldAction`, `logRoute` (wrapper mecanic peste
+toate cele 21 de apeluri `AudioDiag.log(..., "NATIVE_ROUTE"/"WA_PARSE", ...)` — captează
+`lastOldParserAction` fără să restructureze parserul vechi), `triggerShadowInterpretation`
+(apelează interpretorul pe fundal, loghează `INTERP_SHADOW old=… new=… match=…` după 2s, NU
+execută nimic). Cost real (din `usage.prompt_tokens`/`completion_tokens`, nu estimat) înregistrat
+în contor (V2) la fiecare apel. Cablat în `dispatchFollowUpTranscript` + `DEBUG_INJECT`.
+
+**Corpusul de 50 de comenzi, pe dispozitiv** (`scripts/regression/v4a_corpus.sh`): telefonul lui
+Rareș a plecat fizic din priza de testare în timpul rulării. Rezultat onest, verificat direct din
+fișierele de captură:
+- Prima rulare (fără `DEVICE_SERIAL`): coruptă de la comanda ~18, când emulatorul API 36.1 a
+  pornit în paralel și `adb` a devenit ambiguu (`more than one device/emulator`) — capturile ei
+  au fost oricum rescrise de a doua rulare (`: > "$CAPTURE"` la fiecare start), deci nu mai există.
+- A doua rulare (cu `-s <serial>`, repornită): `v4a_corpus_capture.log` conține O SINGURĂ linie —
+  `- waiting for device -`. Telefonul a deconectat ÎNAINTE ca logcat-ul să se conecteze măcar o
+  dată. `grep -c INTERP_SHADOW` → **0**. `grep -c "NATIVE_ROUTE\|WA_PARSE\|DEBUG_INJECT"` → **0**.
+
+**Verdict onest: 0/50 date valide din corpusul pe dispozitiv azi.** Nu invent procente. Nu e un
+bug de cod (interpretorul + `logRoute` nu au fost puse sub semn de întrebare de asta — codul e
+verde, doar dovada pe dispozitiv a picat din cauza plecării telefonului). Conform regulii
+„la o poartă roșie oprești DOAR ramura aceea": ramura „corpus 50 comenzi pe dispozitiv, comparat
+cu parserul vechi" se oprește aici azi. Comutarea interpretorului ca rutare principală rămâne,
+cum era deja decis, **NU azi** — iar acum nici nu există date proaspete care ar fi putut schimba
+decizia.
+
+**Redirecționat conform pivotului**: un corpus echivalent, dar de pe PC, direct către API-ul
+OpenAI (același prompt + aceeași schemă `INTERP_SCHEMA`/`INTERP_SYSTEM_PROMPT`, prin `brain_api_key`,
+cu propria contorizare) — vezi mai jos. Nu compară cu parserul vechi (nu există pe PC), ci produce
+clasificările interpretorului pe cele 50 de comenzi, verificabile manual/printr-o listă de
+răspunsuri-așteptate, ca dovadă indirectă a calității înainte de testul real cu Rareș.
+
+FLAG: `V4_SHADOW` (implicit `true`, umbră pur, zero execuție). REVERT: `false`.
+Build `738b794` (cod), neverificat live azi din motivul de mai sus.
+
+**Corpusul PC (`scripts/regression/v4a_corpus_pc.mjs`, nou)** — ACEEAȘI schemă/prompt, copiate
+verbatim din `BensonForegroundService.kt`, apelate direct la OpenAI, cu o coloană "expected"
+scrisă independent (nu există parser vechi pe PC pentru comparație reală) + contorizare proprie
+(cost real din `usage`, separat de contorul de pe telefon). Scriptul e scris și gata de rulare.
+
+🔴 **POARTĂ ROȘIE, altă cauză — lipsă credențial, nu cod**: cheia OpenAI trăiește doar în
+seiful de pe dispozitiv (SecureStore, împinsă nativ prin `setBrainCredentials`), conform doctrinei
+„nicio cheie în cod/fișiere/bundle" — nu există și nu trebuie să existe o copie pe acest PC. Fără
+telefon, nu pot rula corpusul real azi. Întrebare pentru Rareș, în `DAY_REPORT`, nu blocant pentru
+restul zilei: **dacă vrei corpusul PC rulat înainte de seară, trimite cheia o singură dată prin
+`OPENAI_API_KEY=sk-... node scripts/regression/v4a_corpus_pc.mjs` chiar tu, de pe orice masină cu
+Node — eu nu am de unde să o iau.** Altfel, rămâne pentru verificare diseară, direct pe telefon,
+cu `v4a_corpus.sh` original (varianta cu parser vechi, mai utilă oricum).
+Ramura asta se oprește aici; continui cu A.
