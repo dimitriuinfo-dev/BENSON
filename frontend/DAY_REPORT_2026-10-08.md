@@ -174,5 +174,29 @@ FLAG: `V1_TRUTHFUL_REPORTER` (implicit `true`). REVERT: `false` (oprește doar l
 Regresie G3: 9/10 (același fals-negativ extern YouTube).
 Build `61c256db...`, instalat. Commit `e91530a`.
 
-### V2 — Contorul de cost
-(în curs)
+### V2 — Contorul de cost ✅ VERDE
+
+`OpenAiUsageMeter.kt` (nou, pur Kotlin + SharedPreferences): `recordUsage`/`isBudgetExceeded`/
+plafon zilnic configurabil (implicit 1€, afișaj + câmp în Dezvoltator). Preț OpenAI + curs
+USD→EUR, constante, cu data verificării. Niciun apel plătit nou nu există încă — doar contorul,
+gata pentru V3/V4.
+Build `fd313403...`, instalat. Commit `97278ef`.
+
+### V3 — STT OpenAI nativ ✅ VERDE, cu o rezervă onestă
+
+`nativeTranscribe` încearcă acum `gpt-4o-mini-transcribe` primul (cheia deja împinsă nativ prin
+`setBrainCredentials`, zero cablaj nou de credențiale), client propriu, timeout 5s. La eroare/
+timeout/plafon depășit → calea veche Deepgram/Groq, complet neatinsă.
+
+**Cost**: răspunsul API nu are câmp `usage` (verificat azi) — folosesc estimarea oficială OpenAI
+($0,003/minut, chiar ei o numesc „estimated cost" pe pagina de prețuri), nu o cifră inventată.
+
+**Onest, neverificat încă pe dispozitiv**: `DEBUG_INJECT` ocolește captura reală de audio, iar
+P5 (de mai devreme azi) închide corect sesiunea când nimic nu e pendinte — n-am găsit o cale
+automată să forțez vorbire reală în fereastra de captură ca să văd apelul OpenAI chiar lovind
+rețeaua. Cablajul e identic cu Deepgram/Groq (același tipar, risc scăzut), dar rămâne de
+confirmat cu vocea reală a lui Rareș diseară.
+
+Regresie G3: 9/10 (G3 nu atinge deloc `nativeTranscribe` — toate testele folosesc `DEBUG_INJECT`,
+care ocolește STT-ul complet).
+Build `03fb72a3...`, instalat. Commit `ddd3f54`.
