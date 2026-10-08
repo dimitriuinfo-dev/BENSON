@@ -1,5 +1,6 @@
 package expo.modules.foregroundservice
 
+import android.app.role.RoleManager
 import android.content.Intent
 import android.media.AudioManager
 import android.net.Uri
@@ -9,6 +10,12 @@ import android.provider.Settings
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
+
+// PASUL 2a (07.10.2026) — revert constant: false turns requestAssistantRole()/isAssistantRoleHeld()
+// into no-ops without touching the manifest-registered VoiceInteractionService trio (harmless
+// while unused — RoleManager only binds them if the role is actually granted).
+private const val ASSISTANT_ROLE_ENABLED = true
+private const val ASSISTANT_ROLE_REQUEST_CODE = 9421
 
 class BensonForegroundServiceModule : Module() {
   private fun systemCallAudioActive(): Boolean {
@@ -161,6 +168,48 @@ class BensonForegroundServiceModule : Module() {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       }
       try { context.startActivity(intent) } catch (_: Exception) {}
+    }
+
+    // PASUL 2a (07.10.2026) — one-time, explicit, user-consented request for ROLE_ASSISTANT
+    // (system shows its own confirmation dialog; replaces Gemini/Google Assistant as the default
+    // assist app). NOT auto-triggered like battery optimization above — only from a Developer
+    // settings button. Revert: ASSISTANT_ROLE_ENABLED = false.
+    // FIX_ASSISTANT_ROLE_CALLING_PACKAGE_1 (07.10.2026, device-proven) — the first attempt used
+    // appContext.reactContext.startActivity(intent.addFlags(FLAG_ACTIVITY_NEW_TASK)), which failed
+    // on-device with "Package name cannot be null or empty: null" (RequestRoleActivity logcat,
+    // requestingPackageName=null) and closed without showing a dialog. RequestRoleActivity reads
+    // the caller via Activity.getCallingPackage(), which is only populated by
+    // startActivityForResult from a real Activity — not by any form of Context.startActivity, and
+    // FLAG_ACTIVITY_NEW_TASK on this specific intent is documented to break the calling-package
+    // lookup outright. Must come from appContext.currentActivity, no NEW_TASK flag.
+    Function("requestAssistantRole") {
+      if (!ASSISTANT_ROLE_ENABLED) return@Function Unit
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return@Function Unit
+      val activity = appContext.currentActivity ?: return@Function Unit
+      val roleManager = activity.getSystemService(RoleManager::class.java) ?: return@Function Unit
+      if (!roleManager.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) return@Function Unit
+      val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT)
+      try { activity.startActivityForResult(intent, ASSISTANT_ROLE_REQUEST_CODE) } catch (_: Exception) {}
+    }
+
+    // PASUL 2 TEST B (07.10.2026) — passive kill/recovery counters, written by
+    // BensonForegroundService.logProcessStartAndCountKill()/scheduleWakeAliveCheck(). Read-only
+    // here; Dezvoltator displays them.
+    Function("getProcessKillStats") {
+      val context = appContext.reactContext ?: return@Function mapOf("killCount" to 0, "recoveryCount" to 0)
+      val prefs = context.getSharedPreferences("benson_watchdog_prefs", android.content.Context.MODE_PRIVATE)
+      mapOf(
+        "killCount" to prefs.getInt("process_kill_count", 0),
+        "recoveryCount" to prefs.getInt("process_recovery_count", 0)
+      )
+    }
+
+    Function("isAssistantRoleHeld") {
+      if (!ASSISTANT_ROLE_ENABLED) return@Function false
+      val context = appContext.reactContext ?: return@Function false
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return@Function false
+      val roleManager = context.getSystemService(RoleManager::class.java) ?: return@Function false
+      roleManager.isRoleHeld(RoleManager.ROLE_ASSISTANT)
     }
 
     // Pause/resume the native "Benson" hotword loop — JS awaits pause right before starting its

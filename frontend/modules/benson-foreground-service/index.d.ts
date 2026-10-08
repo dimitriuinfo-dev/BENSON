@@ -72,6 +72,9 @@ export declare function isNativeCloudWakeConfigured(): boolean | Promise<boolean
 export declare function bringToForeground(): void;
 export declare function isIgnoringBatteryOptimizations(): boolean;
 export declare function requestIgnoreBatteryOptimizations(): void;
+export declare function requestAssistantRole(): void;
+export declare function isAssistantRoleHeld(): boolean;
+export declare function getProcessKillStats(): { killCount: number; recoveryCount: number };
 export declare function pauseHotword(): Promise<void>;
 export declare function resumeHotword(): Promise<void>;
 export declare function setSystemSoundsMuted(muted: boolean): void;

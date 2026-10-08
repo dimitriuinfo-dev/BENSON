@@ -18,6 +18,7 @@ import {
   startListeningService, stopListeningService, addStopRequestedListener,
   addListenRequestedListener, addWakePokeListener, bringToForeground,
   isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations, addCallAudioStateListener, isCallAudioBlocked,
+  requestAssistantRole, isAssistantRoleHeld, getProcessKillStats,
   pauseHotword, resumeHotword, setSystemSoundsMuted, consumeRecoveryFlag, logAudioDiag,
   setSttLanguage, setWakeWordEnabled, isWakeWordEnabled, updateNotification,
   setPorcupineAccessKey, getPorcupineStatus, getActiveWakeEngine,
@@ -391,6 +392,8 @@ export default function BensonApp() {
   const [convMode, setConvMode]       = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [devOpen, setDevOpen] = useState(false);
+  const [assistantRoleHeld, setAssistantRoleHeld] = useState(false);
+  const [processKillStats, setProcessKillStats] = useState({ killCount: 0, recoveryCount: 0 });
   const [appPermOpen, setAppPermOpen] = useState(false);
   const [setupWizardOpen, setSetupWizardOpen] = useState(false);
   const [showQuickContacts, setShowQuickContacts] = useState(false);
@@ -5806,7 +5809,12 @@ export default function BensonApp() {
               </View>
 
               <TouchableOpacity style={[s.dangerBtn, { borderColor: GOLD, marginTop: 20 }]}
-                onPress={() => { tap(); setDevOpen(true); }}
+                onPress={() => {
+                  tap();
+                  setDevOpen(true);
+                  Promise.resolve(isAssistantRoleHeld()).then(setAssistantRoleHeld).catch(() => {});
+                  Promise.resolve(getProcessKillStats()).then(setProcessKillStats).catch(() => {});
+                }}
                 accessibilityLabel="Developer settings" accessibilityRole="button">
                 <Text style={[s.dangerTxt, { color: GOLD }]}>Dezvoltator</Text>
               </TouchableOpacity>
@@ -5892,6 +5900,24 @@ export default function BensonApp() {
               {!!llmTestResult && (
                 <Text style={[s.label, { marginTop: 6 }]} selectable>{llmTestResult}</Text>
               )}
+
+              {/* PASUL 2a (07.10.2026) — explicit, one-time, user-consented ROLE_ASSISTANT
+                  request (test: does holding it let the AlarmManager/WorkManager watchdogs start
+                  the microphone FGS after `am kill`, via the VoiceInteractionService exemption).
+                  Replaces Gemini/Google Assistant as the default assist app — never auto-triggered. */}
+              <Text style={[s.label, { marginTop: 14 }]}>ASISTENT IMPLICIT (experimental, Pasul 2a)</Text>
+              <Text style={s.groupLabel}>{assistantRoleHeld ? 'Rol deținut: BENSON' : 'Rol neacordat'}</Text>
+              <TouchableOpacity style={[s.btn, { marginTop: 10 }]}
+                onPress={() => { tap(); requestAssistantRole(); }}
+                accessibilityLabel="Request assistant role" accessibilityRole="button">
+                <Text style={s.btnText}>CERE ROL ASSISTANT</Text>
+              </TouchableOpacity>
+              {/* PASUL 2 TEST B — monitorizare pasivă a uciderilor de proces nedeclanșabile prin
+                  adb (OxygenOS). killCount = porniri de proces cu un exit anterior înregistrat;
+                  recoveryCount = câte dintre acelea au confirmat bucla de wake activă din nou. */}
+              <Text style={[s.groupLabel, { marginTop: 6 }]}>
+                Procese ucise: {processKillStats.killCount} · Recuperări confirmate: {processKillStats.recoveryCount}
+              </Text>
 
               {/* ROUND_WAKE_NATIVE_GENERIC_1 — the ONE authoritative wake-name config. Applied
                   live (no separate save button, not a secret): every change is persisted and

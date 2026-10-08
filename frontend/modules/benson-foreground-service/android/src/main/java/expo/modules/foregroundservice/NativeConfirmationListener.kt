@@ -37,7 +37,13 @@ class NativeConfirmationListener(
     private const val RMS_THRESHOLD = 700.0
     private const val MIN_SPEECH_MS = 500L
     private const val SILENCE_TIMEOUT_MS = 1200L
-    private const val MAX_UTTERANCE_MS = 6000L
+    // PASUL 3 (07.10.2026, Dovada 3) — SPEECH_ONSET_TIMEOUT_MS replaces the old implicit behavior
+    // of waiting on the CALLER's overallTimeoutMs for "nobody spoke yet" (8000ms from JS, far
+    // looser than this contract). MAX_TOTAL_MS is now an ABSOLUTE ceiling from mic-open
+    // (startedAt), not a speech-duration-relative one like the old MAX_UTTERANCE_MS was — a late
+    // speech onset (close to the 4s mark) no longer lets total capture run past 6s.
+    private const val SPEECH_ONSET_TIMEOUT_MS = 4000L
+    private const val MAX_TOTAL_MS = 6000L
     private const val PRE_ROLL_CHUNKS = 11
     // ROUND_CONFIRM_SELF_ECHO_1 — self-echo fix (2026-09-15: BENSON's own spoken disambiguation
     // question was captured by this exact listener and mis-heard as the user's reply, which then
@@ -153,6 +159,10 @@ class NativeConfirmationListener(
       onResult(verdict, transcript)
     }
 
+    // PASUL 3 — the caller (BensonForegroundService.startConfirmationListening) invokes start()
+    // synchronously right after TTS_DONE, so this is that baseline for CONFIRM_CAPTURE's "start=".
+    val ttsDoneAt = System.currentTimeMillis()
+
     // ROUND_CONFIRM_SELF_ECHO_1 — deliberate settle window BEFORE the mic even opens: TTS_COMPLETE
     // → mic ownership already released to CONFIRMATION_STT by the caller → this short sleep →
     // AudioRecord created/started. Not a JS setTimeout (those go inert while backgrounded) — a
@@ -206,11 +216,18 @@ class NativeConfirmationListener(
     var phase = "pre_speech"
     var speechStartedAt = 0L
     var lastLoudAt = 0L
+    var peakRmsObserved = 0.0
     val startedAt = System.currentTimeMillis()
     val preRoll = ArrayDeque<ByteArray>()
 
     fun finishWithCapture(reason: String) {
       log("CONFIRM_LISTEN_VAD_END", "reason=$reason bytes=${pcm.size()}")
+      // PASUL 3 (07.10.2026, Dovada 3) — the summary line this round was built for. speechOnsetMs
+      // stays -1 for the "timeout" (never heard speech) case, same convention as
+      // diagSaveAc2fConfirmClip below.
+      val nowMs = System.currentTimeMillis()
+      val speechOnsetMs = if (speechStartedAt > 0) speechStartedAt - startedAt else -1L
+      log("CONFIRM_CAPTURE", "start=${startedAt - ttsDoneAt} speechOnsetMs=$speechOnsetMs durMs=${nowMs - startedAt} peakRms=${"%.1f".format(peakRmsObserved)} reasonEnd=$reason")
       val bytes = pcm.toByteArray()
       // RUNDA AC2-F — PASUL 0 (07.10.2026, DEBUG ONLY, diagnostic, product-owner-directed):
       // salvează clipul de confirmare necondiționat, pentru analiza manuală alături de clipurile
@@ -234,11 +251,18 @@ class NativeConfirmationListener(
           deliver("TIMEOUT", "")
           break
         }
-        if (phase == "in_speech" && (now - lastLoudAt) > SILENCE_TIMEOUT_MS && (now - speechStartedAt) > MIN_SPEECH_MS) {
-          finishWithCapture("vad_silence"); break
+        // PASUL 3 (07.10.2026, Dovada 3) — three explicit, named endings, checked in this order:
+        // (1) absolute ceiling, never exceeded regardless of phase; (2) no speech heard within the
+        // onset window — "niciodată pe tăcerea inițială" means this is a plain elapsed-time check,
+        // not VAD-based; (3) the pre-existing post-speech VAD-silence close, unchanged.
+        if ((now - startedAt) >= MAX_TOTAL_MS) {
+          finishWithCapture(if (phase == "in_speech") "max" else "timeout"); break
         }
-        if (phase == "in_speech" && (now - speechStartedAt) > MAX_UTTERANCE_MS) {
-          finishWithCapture("max_duration"); break
+        if (phase == "pre_speech" && (now - startedAt) >= SPEECH_ONSET_TIMEOUT_MS) {
+          finishWithCapture("timeout"); break
+        }
+        if (phase == "in_speech" && (now - lastLoudAt) > SILENCE_TIMEOUT_MS && (now - speechStartedAt) > MIN_SPEECH_MS) {
+          finishWithCapture("vad"); break
         }
 
         val read = record.read(readBuffer, 0, chunkSamples)
@@ -246,6 +270,7 @@ class NativeConfirmationListener(
         var sumSquares = 0.0
         for (i in 0 until read) { val s = readBuffer[i].toDouble(); sumSquares += s * s }
         val rms = sqrt(sumSquares / read)
+        if (rms > peakRmsObserved) peakRmsObserved = rms
         val bytes = shortsToBytes(readBuffer, read)
         if (phase == "in_speech") {
           pcm.write(bytes)

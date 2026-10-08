@@ -28,6 +28,35 @@
       android:name=".BensonWatchdogReceiver"
       android:exported="false" />
 
+    <!-- PASUL 2a (07.10.2026) — minimal VoiceInteractionService trio, exists only to qualify
+         BENSON for RoleManager.ROLE_ASSISTANT and test the "app which provides the
+         VoiceInteractionService" FGS background-start exemption. See BensonVoiceInteractionService.kt. -->
+    <service
+      android:name=".BensonVoiceInteractionService"
+      android:exported="true"
+      android:permission="android.permission.BIND_VOICE_INTERACTION">
+      <intent-filter>
+        <action android:name="android.service.voice.VoiceInteractionService" />
+      </intent-filter>
+      <meta-data
+        android:name="android.voice_interaction"
+        android:resource="@xml/benson_voice_interaction_service" />
+    </service>
+
+    <service
+      android:name=".BensonVoiceInteractionSessionService"
+      android:exported="true"
+      android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+    <service
+      android:name=".BensonRecognitionService"
+      android:exported="true"
+      android:permission="android.permission.BIND_VOICE_RECOGNITION">
+      <intent-filter>
+        <action android:name="android.speech.RecognitionService" />
+      </intent-filter>
+    </service>
+
     <receiver
       android:name=".BensonBootReceiver"
       android:exported="false">

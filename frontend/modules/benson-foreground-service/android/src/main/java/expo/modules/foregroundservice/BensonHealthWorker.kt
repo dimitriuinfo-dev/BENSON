@@ -20,10 +20,18 @@ class BensonHealthWorker(context: Context, params: WorkerParameters) : Coroutine
   override suspend fun doWork(): Result {
     if (!BensonForegroundService.isRunning) {
       val intent = Intent(applicationContext, BensonForegroundService::class.java)
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        applicationContext.startForegroundService(intent)
-      } else {
-        applicationContext.startService(intent)
+      // PASUL 2a (07.10.2026) — same "fără excepții în buclă" requirement as the AlarmManager
+      // watchdog: catch instead of letting WorkManager retry/backoff on an uncaught
+      // ForegroundServiceStartNotAllowedException. See BensonWatchdogReceiver for FGS_START.
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+          applicationContext.startForegroundService(intent)
+        } else {
+          applicationContext.startService(intent)
+        }
+        AudioDiag.log(applicationContext, "FGS_START", "source=health_worker allowed=true exemption=voice_interaction_service")
+      } catch (e: Exception) {
+        AudioDiag.log(applicationContext, "FGS_START", "source=health_worker allowed=false exemption=voice_interaction_service error=${e.javaClass.simpleName}")
       }
     }
     return Result.success()

@@ -221,6 +221,20 @@ export function requestIgnoreBatteryOptimizations() {
   return NativeModule.requestIgnoreBatteryOptimizations();
 }
 
+// PASUL 2a (07.10.2026) — shows the system ROLE_ASSISTANT consent dialog once. Only call from an
+// explicit Developer settings button, never auto-triggered.
+export function requestAssistantRole() {
+  return NativeModule.requestAssistantRole();
+}
+
+export function isAssistantRoleHeld() {
+  return NativeModule.isAssistantRoleHeld();
+}
+
+export function getProcessKillStats() {
+  return NativeModule.getProcessKillStats();
+}
+
 // Suppresses the system STT start/stop tone (the "xylophone" beep) — call with true right
 // before starting a JS-side recognition session, false right after it ends.
 export function setSystemSoundsMuted(muted) {

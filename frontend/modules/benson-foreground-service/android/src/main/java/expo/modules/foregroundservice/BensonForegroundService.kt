@@ -1,5 +1,6 @@
 package expo.modules.foregroundservice
 
+import android.app.ActivityManager
 import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -121,6 +122,43 @@ class BensonForegroundService : Service() {
   @Volatile private var lastHeedDetectAt: Long = 0L
   private val WAKE_ALIVE_INTERVAL_MS = 30_000L
 
+  // PASUL 2 TEST B (07.10.2026) — passive monitoring for OxygenOS-style kills that no adb command
+  // can trigger on demand (am kill no-ops on an FGS-hosting process; am force-stop enters stopped
+  // state, which defeats the point). Set once in logProcessStartAndCountKill(), read once by the
+  // first scheduleWakeAliveCheck() tick after this process start.
+  @Volatile private var pendingRecoveryCredit = false
+  @Volatile private var recoveryCounted = false
+
+  // PASUL 2 TEST B — getHistoricalProcessExitReasons (API 30+) is the only source for WHY the
+  // previous process instance ended; there is no broadcast/callback for it. A non-empty result at
+  // onCreate means a prior process for this app existed and ended — not necessarily a "kill" in
+  // the hostile sense (REASON_USER_REQUESTED from force-stop would also show up here), so the
+  // counter is honestly "process restarts observed", not strictly "hostile kills". reason is the
+  // raw android.app.ApplicationExitInfo.REASON_* int — deliberately not remapped to a name here,
+  // to avoid guessing at a mapping I haven't verified against today's SDK.
+  private fun logProcessStartAndCountKill() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+      AudioDiag.log(this, "PROCESS_START", "reason=unavailable_below_api30")
+      return
+    }
+    try {
+      val am = getSystemService(ActivityManager::class.java)
+      val exits = am?.getHistoricalProcessExitReasons(packageName, 0, 1)
+      if (exits.isNullOrEmpty()) {
+        AudioDiag.log(this, "PROCESS_START", "reason=none")
+        return
+      }
+      val info = exits[0]
+      AudioDiag.log(this, "PROCESS_START", "reason=${info.reason} description=\"${info.description}\"")
+      pendingRecoveryCredit = true
+      val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+      val count = prefs.getInt("process_kill_count", 0) + 1
+      prefs.edit().putInt("process_kill_count", count).apply()
+    } catch (e: Exception) {
+      AudioDiag.log(this, "PROCESS_START", "reason=query_failed error=${e.javaClass.simpleName}")
+    }
+  }
+
   private fun scheduleWakeAliveCheck() {
     mainHandler.postDelayed({
       val running = heedWakeWord?.isRunning() == true
@@ -130,6 +168,15 @@ class BensonForegroundService : Service() {
       if (!running && micOwner == "WAKE") {
         rearmWakeNative("wake_alive_check")
         AudioDiag.log(this, "WAKE_HEALED", "reason=loop_not_running")
+      }
+      // PASUL 2 TEST B — credits one recovery per process start, on the first tick that finds the
+      // wake loop actually running again after a counted prior exit.
+      if (running && pendingRecoveryCredit && !recoveryCounted) {
+        recoveryCounted = true
+        val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+        val count = prefs.getInt("process_recovery_count", 0) + 1
+        prefs.edit().putInt("process_recovery_count", count).apply()
+        AudioDiag.log(this, "PROCESS_RECOVERY", "count=$count")
       }
       scheduleWakeAliveCheck()
     }, WAKE_ALIVE_INTERVAL_MS)
@@ -854,17 +901,90 @@ class BensonForegroundService : Service() {
   // Single reused client (unchanged — this was always one instance) + connectionPool so a kept-
   // alive socket from a recent call (including the warm-up ping) can be reused, skipping a fresh
   // TCP+TLS handshake. Revert: callTimeout back to 1200.
+  // PASUL 3b (07.10.2026) — warm-up's own timeout stays on the base client (unchanged, 2000ms);
+  // the verify call gets its own, separate, longer timeout below (WAKE_VERIFY_CALL_TIMEOUT_MS).
+  // Revert: WAKE_VERIFY_WARM_CALL_TIMEOUT_MS = 2000L (no change needed, already that value).
+  private val WAKE_VERIFY_WARM_CALL_TIMEOUT_MS = 2000L
   private val wakeVerifyHttpClient = OkHttpClient.Builder()
-    .callTimeout(2000, java.util.concurrent.TimeUnit.MILLISECONDS)
+    .callTimeout(WAKE_VERIFY_WARM_CALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
     .connectionPool(okhttp3.ConnectionPool(1, 5, java.util.concurrent.TimeUnit.MINUTES))
     .build()
 
-  // FIX_WAKE_VERIFY_LATENCY_1 — tracks whether THIS call reused a pooled connection (connectStart
-  // firing means a fresh TCP+TLS handshake was needed) for the WAKE_VERIFY connReused= log field.
-  private class ConnReuseTracker : okhttp3.EventListener() {
+  // PASUL 3b point 4 (07.10.2026, Cauza 3b) — separate, longer timeout for the real verify call
+  // only; the warm-up ping above keeps its original 2000ms. Revert: WAKE_VERIFY_CALL_TIMEOUT_MS = 2000L.
+  private val WAKE_VERIFY_CALL_TIMEOUT_MS = 3000L
+
+  // PASUL 3b point 1/2 (07.10.2026) — connection AGE tracking: OkHttp's EventListener never
+  // exposes "how long has this pooled connection been idle", so this map does it ourselves —
+  // stamped in connectionReleased (call finished using it), read in connectionAcquired (next call
+  // picks it back up). Keyed by the okhttp3.Connection instance itself (stable identity per TCP
+  // connection), shared across warm-up and verify calls since both go through wakeVerifyHttpClient
+  // and therefore the SAME ConnectionPool — this directly answers "is the shared pool actually the
+  // cause, or is the server closing the socket under our 30s warm-up interval".
+  private val wakeVerifyConnLastUsedAt = java.util.concurrent.ConcurrentHashMap<okhttp3.Connection, Long>()
+
+  // PASUL 3b point 1 (07.10.2026, Cauza 3b) — full OkHttp waterfall timing, self-logging on
+  // callEnd/callFailed so a timeout (which never reaches callEnd) still gets a WAKE_VERIFY_TIMING
+  // line via callFailed. Used for BOTH the warm-up ping and the real verify call (callType
+  // distinguishes them in the log). connReused/newConnection kept from the prior ConnReuseTracker
+  // this replaces — same field, same meaning, now alongside the rest of the waterfall.
+  private inner class WakeVerifyTimingListener(private val callType: String) : okhttp3.EventListener() {
     @Volatile var newConnection = false
+    private var callStartNs = 0L
+    private var dnsStartNs = 0L
+    private var dnsMs = -1L
+    private var connectStartNs = 0L
+    private var connectMs = -1L
+    private var secureStartNs = 0L
+    private var tlsMs = -1L
+    private var requestSentNs = 0L
+    private var uploadStartNs = 0L
+    private var uploadMs = -1L
+    private var ttfbMs = -1L
+    private var connAgeMs = -1L
+
+    override fun callStart(call: okhttp3.Call) { callStartNs = System.nanoTime() }
+    override fun dnsStart(call: okhttp3.Call, domainName: String) { dnsStartNs = System.nanoTime() }
+    override fun dnsEnd(call: okhttp3.Call, domainName: String, inetAddressList: List<java.net.InetAddress>) {
+      if (dnsStartNs > 0) dnsMs = (System.nanoTime() - dnsStartNs) / 1_000_000
+    }
     override fun connectStart(call: okhttp3.Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) {
       newConnection = true
+      connectStartNs = System.nanoTime()
+    }
+    override fun secureConnectStart(call: okhttp3.Call) {
+      secureStartNs = System.nanoTime()
+      // Pure TCP handshake portion — everything from connectStart up to the TLS handshake beginning.
+      if (connectStartNs > 0) connectMs = (secureStartNs - connectStartNs) / 1_000_000
+    }
+    override fun secureConnectEnd(call: okhttp3.Call, handshake: okhttp3.Handshake?) {
+      if (secureStartNs > 0) tlsMs = (System.nanoTime() - secureStartNs) / 1_000_000
+    }
+    override fun connectionAcquired(call: okhttp3.Call, connection: okhttp3.Connection) {
+      if (!newConnection) connAgeMs = (System.currentTimeMillis() - (wakeVerifyConnLastUsedAt[connection] ?: return))
+    }
+    override fun connectionReleased(call: okhttp3.Call, connection: okhttp3.Connection) {
+      wakeVerifyConnLastUsedAt[connection] = System.currentTimeMillis()
+    }
+    override fun requestHeadersEnd(call: okhttp3.Call, request: okhttp3.Request) {
+      if (uploadStartNs == 0L) uploadStartNs = System.nanoTime()
+      if (request.body == null) requestSentNs = System.nanoTime() // no body (warm-up HEAD) — request is fully sent now
+    }
+    override fun requestBodyStart(call: okhttp3.Call) { if (uploadStartNs == 0L) uploadStartNs = System.nanoTime() }
+    override fun requestBodyEnd(call: okhttp3.Call, byteCount: Long) {
+      requestSentNs = System.nanoTime()
+      if (uploadStartNs > 0) uploadMs = (requestSentNs - uploadStartNs) / 1_000_000
+    }
+    override fun responseHeadersStart(call: okhttp3.Call) {
+      if (requestSentNs > 0) ttfbMs = (System.nanoTime() - requestSentNs) / 1_000_000
+    }
+    override fun callEnd(call: okhttp3.Call) { emit() }
+    override fun callFailed(call: okhttp3.Call, ioe: java.io.IOException) { emit() }
+
+    private fun emit() {
+      val totalMs = if (callStartNs > 0) (System.nanoTime() - callStartNs) / 1_000_000 else -1L
+      AudioDiag.log(this@BensonForegroundService, "WAKE_VERIFY_TIMING",
+        "callType=$callType dnsMs=$dnsMs connectMs=$connectMs tlsMs=$tlsMs uploadMs=$uploadMs ttfbMs=$ttfbMs totalMs=$totalMs connReused=${!newConnection} connAgeMs=$connAgeMs")
     }
   }
 
@@ -884,7 +1004,8 @@ class BensonForegroundService : Service() {
       Thread({
         try {
           val req = Request.Builder().url("https://api.deepgram.com/v1/listen").head().build()
-          wakeVerifyHttpClient.newCall(req).execute().close()
+          val client = wakeVerifyHttpClient.newBuilder().eventListener(WakeVerifyTimingListener("warmup")).build()
+          client.newCall(req).execute().close()
           AudioDiag.log(this@BensonForegroundService, "WAKE_VERIFY_WARM", "ok=true")
         } catch (e: Exception) {
           AudioDiag.log(this@BensonForegroundService, "WAKE_VERIFY_WARM", "ok=false type=${e.javaClass.simpleName}")
@@ -1003,20 +1124,35 @@ class BensonForegroundService : Service() {
     // Revert: drop "&keyterm=..." from this URL.
     val keyterm = java.net.URLEncoder.encode(NativeCloudWake.currentWakeName(this), "UTF-8")
     val url = "https://api.deepgram.com/v1/listen?model=nova-3&language=${cmdLanguage()}&keyterm=$keyterm"
-    val tracker = ConnReuseTracker()
-    val client = wakeVerifyHttpClient.newBuilder().eventListener(tracker).build()
+    val timing = WakeVerifyTimingListener("verify")
+    // PASUL 3b point 4 — this client's OWN callTimeout (3000ms), separate from the warm-up ping's
+    // 2000ms on wakeVerifyHttpClient itself; same ConnectionPool either way (newBuilder() copies
+    // the reference, doesn't clone it), so pooled-connection reuse is unaffected by this override.
+    val client = wakeVerifyHttpClient.newBuilder()
+      .eventListener(timing)
+      .callTimeout(WAKE_VERIFY_CALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+      .build()
     val request = Request.Builder().url(url).addHeader("Authorization", "Token $dgKey")
       .post(bytes.toRequestBody("audio/wav".toMediaType())).build()
     return try {
       client.newCall(request).execute().use { resp ->
-        val connReused = !tracker.newConnection
-        if (!resp.isSuccessful) return Triple(null, connReused, clipMs)
+        val connReused = !timing.newConnection
+        if (!resp.isSuccessful) {
+          AudioDiag.log(this, "WAKE_VERIFY_ERROR", "reason=http_error code=${resp.code} connReused=$connReused")
+          return Triple(null, connReused, clipMs)
+        }
         val json = resp.body?.string() ?: return Triple(null, connReused, clipMs)
         val alt = JSONObject(json).optJSONObject("results")?.optJSONArray("channels")
           ?.optJSONObject(0)?.optJSONArray("alternatives")?.optJSONObject(0)
         Triple((alt?.optString("transcript", "") ?: "").trim(), connReused, clipMs)
       }
-    } catch (_: Exception) { Triple(null, !tracker.newConnection, clipMs) }
+    } catch (e: Exception) {
+      // PASUL 3 (07.10.2026) — was catch (_: Exception), swallowing the exception type entirely.
+      // Made it impossible to answer "DNS/timeout/TLS/socket closed?" for any past "offline" wake
+      // result — this is the fix for that, going forward only (no way to recover past occurrences).
+      AudioDiag.log(this, "WAKE_VERIFY_ERROR", "reason=exception type=${e.javaClass.simpleName} message=\"${e.message}\" connReused=${!timing.newConnection}")
+      Triple(null, !timing.newConnection, clipMs)
+    }
   }
 
   // FIX_WAKE_VERIFY_FAILSAFE_1 (2026-10-03, device-proven) — the original heedScore>=0.90
@@ -3061,6 +3197,13 @@ class BensonForegroundService : Service() {
     isRunning = true
     instance = this
     AudioDiag.log(this, "SERVICE_CREATE", "")
+    // PASUL 2a (07.10.2026) — correlates with FGS_START in BensonWatchdogReceiver/BensonHealthWorker:
+    // was ROLE_ASSISTANT actually held at the moment this service (re)started.
+    val roleHeld = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+      try { getSystemService(android.app.role.RoleManager::class.java)?.isRoleHeld(android.app.role.RoleManager.ROLE_ASSISTANT) ?: false } catch (_: Exception) { false }
+    } else false
+    AudioDiag.log(this, "ASSISTANT_ROLE", "held=$roleHeld")
+    logProcessStartAndCountKill()
     initNativeAck()
     initCarConnectionObserver()
     scheduleWakeAliveCheck()

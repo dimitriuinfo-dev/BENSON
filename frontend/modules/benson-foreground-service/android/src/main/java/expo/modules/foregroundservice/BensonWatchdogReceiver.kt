@@ -31,10 +31,19 @@ class BensonWatchdogReceiver : BroadcastReceiver() {
         .putLong(KEY_LAST_HEARTBEAT, System.currentTimeMillis()).apply()
     } else {
       val serviceIntent = Intent(context, BensonForegroundService::class.java)
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        context.startForegroundService(serviceIntent)
-      } else {
-        context.startService(serviceIntent)
+      // PASUL 2a (07.10.2026) — "fără excepții în buclă": catch instead of letting the OS kill
+      // this BroadcastReceiver on an uncaught ForegroundServiceStartNotAllowedException. FGS_START
+      // logs whether the exemption being tested this round (holding ROLE_ASSISTANT / providing a
+      // VoiceInteractionService) actually let this background start through.
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+          context.startForegroundService(serviceIntent)
+        } else {
+          context.startService(serviceIntent)
+        }
+        AudioDiag.log(context, "FGS_START", "source=watchdog allowed=true exemption=voice_interaction_service")
+      } catch (e: Exception) {
+        AudioDiag.log(context, "FGS_START", "source=watchdog allowed=false exemption=voice_interaction_service error=${e.javaClass.simpleName}")
       }
     }
     checkAccessibilityServiceAndNotify(context)
