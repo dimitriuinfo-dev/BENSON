@@ -147,6 +147,30 @@ FLAG: `E0_SELF_ECHO` (implicit `true`). REVERT: `false`.
 Regresie G3: 9/10 (fals-negativ extern, YouTube `found=false` — nu ține de niciun cod de azi).
 Build `0055d60f...`, instalat. Commit `e9f6064`.
 
+## L8-EXT — O singură identitate de voce ✅ VERDE
+
+`TTS_SPEAK kind=ack|confirm|report lang=ro voice=<id>` loghează acum fiecare rostire. Audit
+(grep, nu presupunere): UN SINGUR `TextToSpeech` în tot codul nativ — ack-ul și
+`speakNativeFallbackThenCapture` foloseau deja același obiect (voce fixată o dată la D0). Linia
+nouă face vizibil ce era deja adevărat. `speakNativeAckThenCapture` (betonat) atins cu EXACT o
+linie nouă de log — text/timing „Da, Master" neschimbate, verificat prin diff.
+
+## V3-VERIFICARE — dovadă reală pe rețea ✅ VERDE (completează V3)
+
+`DEBUG_INJECT_WAV` (debug-only): injectează un WAV real direct în `nativeTranscribe`, deci STT-ul
+OpenAI e apelat pe rețea, nu ocolit. 3 fișiere sintetizate cu Windows System.Speech: „deschide
+calculator", „suna-o pe Ingrid pe WhatsApp", „wie spät ist es".
+
+**3/3 cereri reale reușite**: `provider=openai`, latențe 2380ms/657ms/568ms (prima mai lentă, TLS
+nou). „Wie spät ist es?" (voce germană nativă) → transcris PERFECT, cu „?". Frazele RO, citite cu
+voce en-US (fără voce RO instalată pe acest Windows), au ieșit parțial garblate — onest, așteptat.
+`USAGE_ADD` confirmă contorul V2 funcțional: 0,0001 → 0,0003 → 0,0004 USD. `TTS_SPEAK
+voice=ro-ro-x-vfv-local` identic pe toate 3 (L8-EXT).
+
+(b) buclă fizică PC→telefon: nerulată — (a) a dat deja dovada cap-coadă cerută.
+
+Regresie G3: 9/10 (același fals-negativ extern). Build `34fbdf8f...`, instalat. Commit `8a9baed`.
+
 ## V — Vocea guvernată de ChatGPT (6 sub-pași, fiecare cu poartă+flag+commit propriu)
 
 ### V0 — Verificare, fără cod ✅
