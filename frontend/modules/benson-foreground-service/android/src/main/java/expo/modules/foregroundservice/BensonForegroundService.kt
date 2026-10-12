@@ -276,6 +276,12 @@ class BensonForegroundService : Service() {
   // finale). Revert: AC2F_P5_SESSION_CLOSE = false.
   private val AC2F_P5_SESSION_CLOSE = true
 
+  // J1 (12.10.2026, PLANUL_FINAL, RUNDA J) — "un singur creier pe drumul vocal": JS nu mai preia
+  // NICIO comandă nerecunoscută de drumul nativ, indiferent dacă BENSON e în prim-plan. Revert:
+  // JS_VOICE_HANDOFF = true => comportamentul vechi exact (isBensonForeground() ? js_handoff :
+  // native fallback).
+  private val JS_VOICE_HANDOFF = false
+
   // V1 (08.10.2026, Motor M1) — flag + revert (G2). Pure logging addition: the actual "zero Gata
   // fără dovadă" decisions (result.success / verified) already existed and were already correct in
   // both call sites this touches (WA actions, YouTube play) — this only adds the standardized
@@ -626,6 +632,14 @@ class BensonForegroundService : Service() {
   private var micOwnerEpoch = 0
   private object OwnerWatchdog { const val TIMEOUT_MS = 45_000L }
 
+  // J4 (12.10.2026, PLANUL_FINAL, RUNDA J) — plasă separată, pe proprietar, mai scurtă decât cei
+  // 45s de mai sus (neatinși): dacă proprietarul ≠ WAKE/NONE și NU există o sesiune activă
+  // (sessionOpenUntil == 0L — nici o captură/TTS legitim în curs nu o ține deschisă), 10s sunt
+  // suficiente ca să fie sigur o stare blocată, nu un răspuns lung normal. Flag + revert propriu
+  // (independent de JS_VOICE_HANDOFF): J4_SAFETY_RELEASE = false => se păstrează doar paza de 45s.
+  private val J4_SAFETY_RELEASE = true
+  private val J4_SAFETY_RELEASE_MS = 10_000L
+
   private fun setMicOwner(next: String, reason: String) {
     if (micOwner == next) return
     AudioDiag.log(this, "MIC_OWNER", "from=$micOwner to=$next reason=$reason")
@@ -641,6 +655,15 @@ class BensonForegroundService : Service() {
           armNativeWake("owner_timeout_recover")
         }
       }, OwnerWatchdog.TIMEOUT_MS)
+      if (J4_SAFETY_RELEASE) {
+        mainHandler.postDelayed({
+          if (micOwner == owner && micOwnerEpoch == epoch && sessionOpenUntil == 0L) {
+            AudioDiag.logError("SAFETY_RELEASE", "owner=$owner reason=no_active_session_${J4_SAFETY_RELEASE_MS}ms")
+            setMicOwner("NONE", "safety_release")
+            armNativeWake("safety_release")
+          }
+        }, J4_SAFETY_RELEASE_MS)
+      }
     }
   }
 
@@ -936,9 +959,17 @@ class BensonForegroundService : Service() {
         // BENSON's own TTS so "Benson" said mid-playback can barge in. Revert: fold "TTS" back
         // into the branch below (suspendNativeWake(owner); no startHeedEngineOnly call).
         "TTS" -> {
-          AudioDiag.log(this, "WAKE_AUDIO_BLOCKED", "reason=js_request owner=$owner note=heed_kept_running")
-          setMicOwner(owner, "js_request")
-          startHeedEngineOnly("tts_barge_in_listen")
+          // J3 (12.10.2026) — JS nu mai poate cere microfonul pe drumul vocal cât JS_VOICE_HANDOFF
+          // e OFF: singurul apelant real al acestei ramuri e lib/headless/presentWakeResult.ts, chiar
+          // calea js_handoff pe care J1 o dezactivează — refuzul e defense-in-depth, nu doar oprirea
+          // sursei. Revert: JS_VOICE_HANDOFF = true readuce și acest refuz la comportamentul vechi.
+          if (!JS_VOICE_HANDOFF) {
+            AudioDiag.log(this, "JS_MIC_REQUEST_DENIED", "owner=$owner reason=js_voice_handoff_off")
+          } else {
+            AudioDiag.log(this, "WAKE_AUDIO_BLOCKED", "reason=js_request owner=$owner note=heed_kept_running")
+            setMicOwner(owner, "js_request")
+            startHeedEngineOnly("tts_barge_in_listen")
+          }
         }
         "COMMAND_STT", "CALL" -> {
           AudioDiag.log(this, "WAKE_AUDIO_BLOCKED", "reason=js_request owner=$owner")
@@ -3222,7 +3253,7 @@ class BensonForegroundService : Service() {
     // consecutive unrecognized commands with zero log activity past STT — JS never ran at all, not
     // even enough to log a miss). Only hand off when BENSON's own screen is actually visible
     // (JS demonstrably alive); otherwise speak+show the fallback natively and keep listening.
-    if (isBensonForeground()) {
+    if (JS_VOICE_HANDOFF && isBensonForeground()) {
       logRoute("NATIVE_ROUTE", "action=js_handoff")
       // FIX_SINGLE_TRANSCRIPTION_1 (2026-10-04, device-proven on highway) — passing
       // (originalPhrase, originalWavPath) here made JS re-transcribe the SAME clip from scratch
@@ -3234,8 +3265,12 @@ class BensonForegroundService : Service() {
       onHotwordDetected(command, null)
       rearmWakeNative("js_handoff")
     } else {
-      logRoute("NATIVE_ROUTE", "action=native_fallback reason=benson_backgrounded")
-      val fallback = "Încă nu știu să fac asta."
+      // J2 (12.10.2026) — un singur drum, indiferent de prim-plan, cât JS_VOICE_HANDOFF e OFF.
+      // Textul exact cerut de RUNDA J, nu vechiul "Încă nu știu să fac asta." (păstrat pe celelalte
+      // căi — dezambiguizare/numere — neatinse).
+      val reason = if (JS_VOICE_HANDOFF) "benson_backgrounded" else "js_voice_handoff_off"
+      logRoute("NATIVE_ROUTE", "action=native_fallback reason=$reason")
+      val fallback = if (JS_VOICE_HANDOFF) "Încă nu știu să fac asta." else "Nu am înțeles. Repetă, te rog."
       updateBubbleNative(fallback, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
       speakNativeFallbackThenCapture(fallback)
     }
