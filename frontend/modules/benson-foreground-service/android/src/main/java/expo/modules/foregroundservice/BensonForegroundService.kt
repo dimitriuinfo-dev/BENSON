@@ -332,6 +332,14 @@ class BensonForegroundService : Service() {
   // call site in onHeedWakeDetected, and the shutdown call in onDestroy.
   private var nativeTts: android.speech.tts.TextToSpeech? = null
   @Volatile private var nativeTtsReady = false
+  // URGENT (12.10.2026, user-reported) — Rareș a schimbat motorul TTS de sistem pe Google; vocea
+  // ro-RO aleasă o singură dată la initNativeAck() a rămas legată de motorul VECHI —
+  // TextToSpeech() leagă instanța de motorul activ DOAR la construcție, nu urmărește schimbările
+  // ulterioare din Setări — fără nicio voce ro-RO pe noul motor, engine-ul a căzut pe vocea lui
+  // implicită (en-IN). Fix: verificare + re-selecție înaintea FIECĂREI rostiri, în applyTtsRouting
+  // (singurul loc deja comun ambelor căi de speak, cf. L8-EXT), nu doar o dată la pornirea
+  // serviciului — detectat prin t.defaultEngine, ieftin, fără apel de rețea.
+  private var lastBoundTtsEngine: String? = null
   // FIX_WAKE_SELF_ECHO_GUARD_1 (2026-10-03) — see SelfTtsGuard. 0L = "never"/"not speaking".
   @Volatile private var ttsSpeakingSince = 0L
   @Volatile private var ttsLastDoneAt = 0L
@@ -351,15 +359,12 @@ class BensonForegroundService : Service() {
     nativeTts = android.speech.tts.TextToSpeech(applicationContext) { status ->
       if (status == android.speech.tts.TextToSpeech.SUCCESS) {
         val t = nativeTts
-        var voiceId = "unset"
-        try {
-          t?.language = java.util.Locale("ro", "RO")
-          val bestVoice = t?.voices?.filter { it.locale.language == "ro" }
-            ?.let { ro -> ro.firstOrNull { it.name.contains("-local") } ?: ro.firstOrNull() }
-          if (bestVoice != null) { t?.voice = bestVoice; voiceId = bestVoice.name }
-        } catch (_: Exception) {}
+        // Selecția reală trăiește acum în ensureNativeTtsVoiceCurrent (rulează oricum la prima
+        // rostire, cf. applyTtsRouting) — aici doar o forțăm o dată, imediat, ca NATIVE_TTS_INIT
+        // să raporteze deja vocea corectă, nu "unset".
+        if (t != null) ensureNativeTtsVoiceCurrent(t)
         nativeTtsReady = true
-        AudioDiag.log(this, "NATIVE_TTS_INIT", "status=success lang=ro voice=$voiceId")
+        AudioDiag.log(this, "NATIVE_TTS_INIT", "status=success lang=ro voice=${t?.voice?.name ?: "unset"}")
       } else {
         AudioDiag.logError("NATIVE_TTS_INIT", "status=failed code=$status")
       }
@@ -467,8 +472,42 @@ class BensonForegroundService : Service() {
     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
     .build()
 
+  // Cascadă ro-RO -> de-DE -> en-GB, preferă o voce fără "-network" (local, fără latență/cost de
+  // rețea) când există mai multe pe aceeași limbă.
+  private fun selectBestTtsVoice(t: android.speech.tts.TextToSpeech): android.speech.tts.Voice? {
+    val voices = try { t.voices } catch (_: Exception) { null } ?: return null
+    fun pick(lang: String, country: String? = null) = voices
+      .filter { it.locale.language == lang && (country == null || it.locale.country == country) }
+      .let { pool -> pool.firstOrNull { !it.name.contains("-network") } ?: pool.firstOrNull() }
+    return pick("ro") ?: pick("de") ?: pick("en", "GB") ?: pick("en")
+  }
+
+  // Re-rulează selecția de voce doar când motorul activ s-a schimbat fată de ultima rostire (ieftin
+  // altfel: un singur getter, fără query pe voices). TTS_NO_RO_VOICE + flag persistat (citibil de
+  // ecranul Dezvoltator) doar când NICIO voce ro-RO nu există pe motorul curent — cascada de mai jos
+  // tot alege ce e mai bun disponibil, dar raportează explicit lipsa românei.
+  private fun ensureNativeTtsVoiceCurrent(t: android.speech.tts.TextToSpeech) {
+    val engine = try { t.defaultEngine } catch (_: Exception) { null }
+    if (engine == lastBoundTtsEngine) return
+    lastBoundTtsEngine = engine
+    val voices = try { t.voices } catch (_: Exception) { null } ?: emptySet()
+    val hasRo = voices.any { it.locale.language == "ro" }
+    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    if (!hasRo) {
+      AudioDiag.log(this, "TTS_NO_RO_VOICE", "engine=$engine")
+      prefs.edit().putBoolean("tts_no_ro_voice", true).apply()
+    } else {
+      prefs.edit().putBoolean("tts_no_ro_voice", false).apply()
+    }
+    val chosen = selectBestTtsVoice(t)
+    try { t.language = chosen?.locale ?: java.util.Locale("ro", "RO") } catch (_: Exception) {}
+    if (chosen != null) t.voice = chosen
+    AudioDiag.log(this, "TTS_VOICE_SELECT", "engine=$engine requested=${chosen?.name ?: "none"} locale=${chosen?.locale}")
+  }
+
   // Applied right before every speak() — car mode can toggle mid-session (cable plugged/unplugged).
   private fun applyTtsRouting(t: android.speech.tts.TextToSpeech) {
+    ensureNativeTtsVoiceCurrent(t)
     logCarModeIfChanged()
     val carMode = lastCarModeLogged == true
     try { t.setAudioAttributes(currentTtsAudioAttributes(carMode)) } catch (_: Exception) {}
@@ -1624,7 +1663,9 @@ class BensonForegroundService : Service() {
     val ok = launchPackageNative(pkg)
     AudioDiag.log(this, "APP_LAUNCH", "pkg=$pkg ok=$ok")
     if (!ok) return null
-    val label = try {
+    // F2 punctul 4 — numele rostit e in limba turei (ex. "Calculatorul"), nu eticheta de sistem
+    // ("Rechner", germana) decat daca targetul rostit nu apartine niciunui grup cunoscut.
+    val label = AppNameSynonyms.canonicalName(target, cmdLanguage()) ?: try {
       packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
     } catch (_: Exception) { target }
     return "Deschid $label."
@@ -2086,12 +2127,16 @@ class BensonForegroundService : Service() {
     val pm = packageManager
     val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
     val apps = try { pm.queryIntentActivities(intent, 0) } catch (_: Exception) { return null }
+    // F2 (12.10.2026) — targetul rostit (RO) vs. eticheta instalata (DE, sistem german) nu se
+    // suprapun textual; AppNameSynonyms genereaza variante (articol taiat + sinonime RO/DE/EN),
+    // scorul final ramane maxOf peste toate — o varianta proasta nu poate strica un match bun.
+    val targetVariants = AppNameSynonyms.expandTarget(target)
     var best: String? = null
     var bestScore = -1
     for (ri in apps) {
       val label = try { normalizeForMatch(ri.loadLabel(pm).toString()) } catch (_: Exception) { continue }
       val pkg = ri.activityInfo.packageName
-      val score = AppNameMatcher.score(target, label, ::levenshtein)
+      val score = targetVariants.maxOf { AppNameMatcher.score(it, label, ::levenshtein) }
       if (score > bestScore) { bestScore = score; best = pkg }
     }
     return if (bestScore >= 0) best else null
