@@ -386,7 +386,16 @@ class BensonForegroundService : Service() {
         // order) and only clears it once answered, so "nothing pending" at this exact instant means
         // the utterance that just finished WAS the final report, not a question.
         if (AC2F_P5_SESSION_CLOSE && utteranceId.startsWith("wake_say_") && !hasAnyPendingNativeState()) {
-          mainHandler.post { closeSession("command_done") }
+          // F1 (12.10.2026, arhitect-aprobat) — closeSession() singur nu atinge niciodată micOwner/
+          // HEED; până acum doar OwnerWatchdog (45s) recupera după un raport final fără întrebare.
+          // Același drum, idempotent, folosit deja la sfârșitul capturii de follow-up goale
+          // (line ~3136, reason=no_followup_command) — reutilizat aici verbatim, nu un drum nou.
+          mainHandler.post {
+            closeSession("command_done")
+            setMicOwner("NONE", "native_report_done")
+            hideWakeRingNative()
+            rearmWakeNative("command_done")
+          }
         } else {
           // E0.1 (08.10.2026, self-echo) — capture stays closed from TTS_START to TTS_DONE+300ms,
           // not opened the instant onDone fires. HeedWakeWord/wake keeps listening the whole time
@@ -908,6 +917,15 @@ class BensonForegroundService : Service() {
   fun isNativeWakeAudioActive(): Boolean =
     heedWakeWord?.isAudioInputActive() == true || microWakeWord?.isRunning() == true || nativeCloudWake?.isAudioInputActive() == true
 
+  // WAKE_FULL_STT (08.10.2026, Rareș-directed, lacăt explicit pe onHeedWakeDetected — doar sursa
+  // textului de comandă). Regula: transcriptul WAKE_VERIFY (clipMs=2500, trunchiat pe comenzi
+  // "dintr-o suflare" mai lungi — bug confirmat device, "benson sună" dintr-un "sună-o pe Baby pe
+  // whatsapp" real) servește EXCLUSIV deciziei accept/reject, niciodată ca text de comandă. Textul
+  // vine ÎNTOTDEAUNA din STT complet (nativeTranscribe, V3, OpenAI-first) pe captura întreagă
+  // (HEED_COMMAND_BUFFER/wake_command_*.wav — verificat: VAD pe 1,2s tăcere, plafon 8s, NU o limită
+  // fixă care taie vorbirea reală). Revert: WAKE_FULL_STT=false = comportamentul vechi exact.
+  private val WAKE_FULL_STT = true
+
   private fun onHeedWakeDetected(phrase: String, score: Float, wavPath: String, triggeredAtMs: Long) {
     mainHandler.post {
       if (isCallAudioBlockedNow()) {
@@ -974,8 +992,20 @@ class BensonForegroundService : Service() {
           openSession(if (bargeIn) "barge_in" else "wake_detected", mayDuck = !bargeIn)
           applyWakeForegroundPolicy()
           AudioDiag.log(this, "WAKE_COMMAND_AUDIO_READY", "engine=heed path=${java.io.File(wavPath).name}")
-          if (verifyTranscript != null) {
-            // Verify's own transcript already covers this clip — no second Deepgram call.
+          if (WAKE_FULL_STT) {
+            val sttStartMs = System.currentTimeMillis()
+            Thread({
+              val transcript = nativeTranscribe(wavPath)
+              val sttMs = System.currentTimeMillis() - sttStartMs
+              val durMs = (java.io.File(wavPath).length() - 44).coerceAtLeast(0) * 1000 / (16_000 * 2)
+              AudioDiag.log(this, "CMD_SOURCE", "full_capture durMs=$durMs sttMs=$sttMs text=\"${transcript ?: ""}\"")
+              mainHandler.post {
+                handleNativeCommandFlow(transcript ?: "", isFollowUp = false, originalPhrase = phrase, originalWavPath = wavPath)
+              }
+            }, "benson-native-cmd-stt").start()
+          } else if (verifyTranscript != null) {
+            // Revert (WAKE_FULL_STT=false) — comportamentul vechi: verify's own transcript, posibil
+            // trunchiat la clipMs=2500, folosit direct ca text de comandă.
             handleNativeCommandFlow(verifyTranscript, isFollowUp = false, originalPhrase = phrase, originalWavPath = wavPath)
           } else {
             // Accepted only via the score>=0.90 offline fallback — verify never got a transcript,
@@ -1394,8 +1424,11 @@ class BensonForegroundService : Service() {
         val openAiKey = prefs.getString("brain_api_key", "") ?: ""
         if (openAiKey.isNotBlank()) {
           val t = postToOpenAiTranscribe(bytes, openAiKey, prefs)
-          if (t != null) return t
-          AudioDiag.log(this, "STT_FALLBACK", "reason=openai_error_or_timeout")
+          // FIX_STT_OPENAI_EMPTY_FALLTHROUGH_1 (12.10.2026) — t=="" (succes HTTP, transcript gol)
+          // scurtcircuita rezerva Deepgram/Groq identic cu t=null (eroare/timeout); `isNullOrBlank`
+          // le separă: doar un transcript real oprește căutarea rezervei.
+          if (!t.isNullOrBlank()) return t
+          AudioDiag.log(this, "STT_FALLBACK", "reason=${if (t == null) "openai_error_or_timeout" else "openai_empty_transcript"}")
         }
       }
     }
@@ -1437,6 +1470,11 @@ class BensonForegroundService : Service() {
         val transcript = JSONObject(json).optString("text", "").trim()
         AudioDiag.log(this, "STT_RESULT", "provider=openai text=\"$transcript\" chars=${transcript.length}")
         val clipMs = (wav.size - 44).coerceAtLeast(0) * 1000.0 / (16_000 * 2)
+        if (transcript.isEmpty()) {
+          // Diagnostic (12.10.2026): de ce OpenAI întoarce HTTP 200 cu text gol — audio, format
+          // sau model. Nu e un fix, doar datele cerute pentru runda următoare.
+          AudioDiag.log(this, "STT_OPENAI_EMPTY", "durMs=${"%.0f".format(clipMs)} bytes=${wav.size} sampleRate=16000 model=gpt-4o-mini-transcribe http=${resp.code}")
+        }
         val estimatedCostUsd = (clipMs / 60_000.0) * OpenAiUsageMeter.GPT4O_MINI_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE
         OpenAiUsageMeter.recordUsage(this, "stt_openai_estimated", estimatedCostUsd)
         transcript
