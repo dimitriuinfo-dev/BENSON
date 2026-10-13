@@ -47,6 +47,19 @@ internal class HeedWakeWord(
     private const val MODEL_ASSET = "wakeword/heed_candidate.onnx"
     private const val META_ASSET = "wakeword/heed_candidate.json"
 
+    // WAKE_SCORE_AGGREGATION (13.10.2026, G9.2, arhitect-aprobat) — SHADOW MODE, exclusiv
+    // experimental. Metoda de agregare: ultimele AGGREGATION_WINDOW_FRAMES scoruri brute (fiecare
+    // dintr-un cadru de 100ms, CHUNK_SAMPLES), incluzand cadrul de declansare, intr-o fereastra
+    // glisanta de maxim 500ms IMEDIAT INAINTE de si pana la declansare (nu si dupa — captura
+    // continua dupa trigger e deja alt scop, comanda, nu wake-ul). Se calculeaza media si maximul
+    // acestei ferestre, logate o singura data, la exact acelasi moment ca HEED_DETECTED.
+    // NU influenteaza: threshold, aboveCount, consecutiveFrames, refractoryMs, detected, triggerScore
+    // — niciuna din variabilele care decid declansarea sau apelul catre onDetected/Deepgram. Flagul
+    // nu schimba deloc comportamentul existent cand e false (implicit). Revert: WAKE_SCORE_AGGREGATION
+    // = false (sau sterge blocul — zero alta dependinta).
+    private const val WAKE_SCORE_AGGREGATION = false
+    private const val AGGREGATION_WINDOW_FRAMES = 5
+
     private fun files(context: Context): Pair<File, File> {
       val customDir = File(context.filesDir, "wakeword")
       val customModel = File(customDir, "benson.onnx")
@@ -193,6 +206,9 @@ internal class HeedWakeWord(
     var aboveCount = 0
     var detected = false
     var trailingSilence = 0
+    // WAKE_SCORE_AGGREGATION (G9.2) — buffer rulant, intretinut DOAR daca flagul e true (zero cost
+    // cand e false, cf. conditia 4). Nu e citit de nicio logica de decizie de mai jos.
+    val recentScores = if (WAKE_SCORE_AGGREGATION) ArrayDeque<Float>() else null
     // PROBA RMS ÎN MAȘINĂ (2026-10-04, user-directed) — doar măsurare, nicio schimbare de
     // comportament pe wake: nivelul brut al canalului de ascultare, logat o dată pe secundă, ca
     // să corelăm "Benson" nedetectat cu zgomotul real din mașină. Nu alimentează threshold/score.
@@ -236,6 +252,12 @@ internal class HeedWakeWord(
         if (features != null) {
           score = infer(features)
           if (score > threshold) aboveCount++ else aboveCount = 0
+          // WAKE_SCORE_AGGREGATION (G9.2) — doar colectare, NU participa la aboveCount/threshold de
+          // mai sus (deja calculate pe linia anterioara, neatinse).
+          if (recentScores != null) {
+            recentScores.addLast(score)
+            while (recentScores.size > AGGREGATION_WINDOW_FRAMES) recentScores.removeFirst()
+          }
         } else aboveCount = 0
         if (!detected && score != null && aboveCount >= consecutiveFrames) {
           val now = System.currentTimeMillis()
@@ -247,6 +269,15 @@ internal class HeedWakeWord(
             preRoll.forEach { capture.add(it) }
             capturedCount = capture.sumOf { it.size }
             log("HEED_DETECTED", "phrase=${phrase.replace(' ', '_')} score=${"%.3f".format(score)}")
+            // WAKE_SCORE_AGGREGATION (G9.2) — log PUR observational, exact la momentul declansarii;
+            // mean/max NU sunt citite de nimic altceva in acest fisier sau transmise mai departe
+            // (onDetected ramane neschimbat la semnatura) — doar comparatie ulterioara, manuala.
+            if (recentScores != null) {
+              val windowScores = recentScores.toList()
+              val mean = windowScores.average().toFloat()
+              val max = windowScores.maxOrNull() ?: score
+              log("WAKE_SCORE_AGGREGATE", "mean=${"%.3f".format(mean)} max=${"%.3f".format(max)} frames=${windowScores.size} triggerScore=${"%.3f".format(score)}")
+            }
             log("HEED_COMMAND_BUFFER", "phase=armed prerollSamples=$capturedCount")
           }
           aboveCount = 0
