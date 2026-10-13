@@ -3318,6 +3318,10 @@ class BensonForegroundService : Service() {
       // same as the isFollowUp branch already did. Revert: restore the if/else on isFollowUp.
       onHotwordDetected(command, null)
       rearmWakeNative("js_handoff")
+    } else if (tryBrainFallback(command)) {
+      // INTEGRATION-1 (13.10.2026, B1 live) — interpretorul a preluat async; bula/vocea sunt
+      // actualizate din callback-ul lui. Nu mai rula fallback-ul static mai jos.
+      return
     } else {
       // J2 (12.10.2026) — un singur drum, indiferent de prim-plan, cât JS_VOICE_HANDOFF e OFF.
       // Textul exact cerut de RUNDA J, nu vechiul "Încă nu știu să fac asta." (păstrat pe celelalte
@@ -3328,6 +3332,51 @@ class BensonForegroundService : Service() {
       updateBubbleNative(fallback, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
       speakNativeFallbackThenCapture(fallback)
     }
+  }
+
+  // INTEGRATION-1 (13.10.2026, arhitect-aprobat) — conectează interpretorul B1 deja scris
+  // (interpretCommand/respondToChat, pana azi doar shadow/neapelat) la drumul de cadere REAL,
+  // DOAR dupa ce TOTI executorii deterministi de mai sus au esuat (niciun risc pentru comenzile
+  // canonice — raman 100% neatinse, verificate primele). Reutilizeaza exact functiile B1
+  // existente; nu creeaza un al doilea creier. Apelul HTTP ruleaza pe fir separat (acelasi
+  // tipar ca triggerShadowInterpretation) ca sa nu blocheze thread-ul principal.
+  // Returneaza true daca a preluat cererea (async in curs) — apelantul NU mai vorbeste fallback-ul static.
+  private fun tryBrainFallback(command: String): Boolean {
+    if (JS_VOICE_HANDOFF) return false
+    if (OpenAiUsageMeter.isBudgetExceeded(this)) return false
+    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    if ((prefs.getString("brain_api_key", "") ?: "").isBlank()) return false
+    val startMs = System.currentTimeMillis()
+    Thread({
+      val interp = interpretCommand(command)
+      val elapsedMs = System.currentTimeMillis() - startMs
+      val action = interp?.optString("action") ?: "UNKNOWN"
+      AudioDiag.log(this, "BRAIN_CALL", "ms=$elapsedMs type=$action ok=${interp != null}")
+      mainHandler.post {
+        when (action) {
+          "CHAT" -> respondToChat(command)
+          "CLARIFY" -> {
+            val question = interp?.optString("question")?.takeIf { it.isNotBlank() }
+              ?: "Poți spune mai clar ce vrei?"
+            updateBubbleNative(question, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+            speak(question, "clarify")
+          }
+          else -> {
+            // UNKNOWN sau o actiune canonica neconectata inca (WA_*/APP_OPEN/YT_SEARCH/MEDIA_STOP) —
+            // B1.2 cere "respinsa, log BRAIN_REJECT" pentru comenzi in afara listei; reconstructia
+            // lor prin executorii native ramane neimplementata in aceasta runda (scop redus,
+            // zero risc pe actiuni sensibile neverificate). Acelasi text/comportament ca fallback-ul
+            // static de dinainte de B1 — zero regresie.
+            if (interp != null) AudioDiag.log(this, "BRAIN_REJECT", "type=$action")
+            logRoute("NATIVE_ROUTE", "action=native_fallback reason=brain_unresolved")
+            val fallback = "Nu am înțeles. Repetă, te rog."
+            updateBubbleNative(fallback, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+            speakNativeFallbackThenCapture(fallback)
+          }
+        }
+      }
+    }, "benson-brain-fallback").start()
+    return true
   }
 
   // Reuses CaptureEngine (modules/benson-audio-capture, same VAD/pre-roll/WAV as the JS-driven
@@ -3348,8 +3397,11 @@ class BensonForegroundService : Service() {
   // V4a (08.10.2026) — flag + revert (G2). Shadow-only: runs on EVERY transcript, logs, executes
   // nothing. Revert: V4_SHADOW = false.
   private val V4_SHADOW = true
+  // INTEGRATION-1 (13.10.2026) — 6s → 10s: demonstrat azi (test live, 3 apeluri reale) — 2 din 3
+  // au picat exact la 6003ms (InterruptedIOException), al treilea a reusit la 5263ms, aproape de
+  // limita. Marja mica, justificata de date reale, nu o presupunere. Revert: 6 secunde la loc.
   private val interpHttpClient = OkHttpClient.Builder()
-    .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS).build()
+    .callTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
 
   private val INTERP_SCHEMA = """
     {"type":"object","properties":{
@@ -3443,12 +3495,14 @@ class BensonForegroundService : Service() {
   // azi) — zero risc de regresie, exact ca V4a la momentul lui. Legea vocii unice (L8-EXT):
   // răspunsul trece prin ACELAȘI speak() nativ, niciodată o voce OpenAI — doar textul e generat
   // de model, nu sunetul.
-  // FINAL (08.10.2026): OFF pentru livrare — nimic nu apelează respondToChat azi (V4b nu există),
-  // deci e inert oricum, dar setat explicit false ca să respect litera regulii "neverificat = OFF".
-  private val V5_CONVERSATION = false
+  // INTEGRATION-1 (13.10.2026) — pornit: tryBrainFallback (vezi mai sus) apelează acum
+  // respondToChat real, pe drumul de cădere, după ce toți executorii deterministi au eșuat.
+  // Revert: V5_CONVERSATION = false (respondToChat redevine neapelat, identic cu azi dimineață).
+  private val V5_CONVERSATION = true
   private val conversationHistory = ConversationHistory()
+  // INTEGRATION-1 (13.10.2026) — aceeași corecție ca interpHttpClient (vezi comentariul de acolo).
   private val chatHttpClient = OkHttpClient.Builder()
-    .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS).build()
+    .callTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
 
   private val CHAT_SYSTEM_PROMPT = "Ești BENSON, un majordom vocal prietenos. Răspunzi scurt " +
     "(1-2 fraze), în română, natural, ca într-o conversație reală — nu execuți comenzi, nu " +
@@ -3497,17 +3551,28 @@ class BensonForegroundService : Service() {
     }
   }
 
-  // V4b va apela asta când interpretorul clasifică CHAT pe drumul de cădere a parserului vechi —
-  // neapelat de nimeni azi (V4b nu e construit azi), funcție pregătită + testată izolat.
+  // Apelată de tryBrainFallback când interpretorul clasifică CHAT pe drumul de cădere.
+  // INTEGRATION-1 (13.10.2026) — BUG REAL, demonstrat azi (CHAT_ERROR type=NetworkOnMainThreadException):
+  // generateChatReply face un apel HTTP sincron; funcția asta nu fusese NICIODATĂ apelată până azi
+  // (comentariul vechi o confirma: "nu e încă apelată de nimeni"), deci bug-ul exista deja în cod,
+  // latent, dinainte de această rundă — l-am expus rulând-o live prima dată. Fix: apelul de rețea
+  // mutat pe fir propriu, exact tiparul deja folosit de tryBrainFallback/triggerShadowInterpretation
+  // din acest fișier. updateBubbleNative adăugat (funcția nu avea niciodată bulă vizibilă înainte).
   private fun respondToChat(transcript: String) {
     conversationHistory.add("user", transcript)
-    val reply = generateChatReply(transcript)
-    if (reply == null) {
-      speak("Nu pot vorbi acum.", "chat")
-      return
-    }
-    conversationHistory.add("assistant", reply)
-    speak(reply, "chat")
+    Thread({
+      val reply = generateChatReply(transcript)
+      mainHandler.post {
+        if (reply == null) {
+          updateBubbleNative("Nu pot vorbi acum.", transcript, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+          speak("Nu pot vorbi acum.", "chat")
+        } else {
+          conversationHistory.add("assistant", reply)
+          updateBubbleNative(reply, transcript, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+          speak(reply, "chat")
+        }
+      }
+    }, "benson-chat-reply").start()
   }
 
   // E0.2/E0.3 (08.10.2026, self-echo) — dropped BEFORE handleNativeCommandFlow, so a pending
