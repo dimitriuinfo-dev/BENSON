@@ -549,3 +549,139 @@ Neînceput.
 
 **Decizie arhitect, valabilă:** nu se modifică niciun prag HEED, nu se activează nicio politică
 nouă de acceptare a wake-ului, până la un benchmark pozitiv/negativ complet și aprobare explicită.
+
+---
+
+## 2026-10-13 — RUNDA ENV-1 (reparare mediu de build)
+
+**Cauza confirmată**: `android/` (proiectul nativ real, cu `gradlew`) e sibling cu `frontend/`
+(nu nested, cum presupune șablonul standard Expo), în timp ce `node_modules`/`package.json`
+reale trăiesc doar în `frontend/`. La rădăcina `BENSON-Android/` exista o copie `node_modules`
+orfană (expo 54.0.35), rest din incidentul de restaurare din 01.10.2026 — fără `package.json`
+alături. Fiecare pas al lanțului de build Gradle/Expo care presupunea structura standard
+(„`android/` conține `package.json` alături sau cu un singur nivel deasupra”) rezolva greșit
+calea, eșuând în cinci locuri succesive, descoperite unul câte unul:
+
+1. `android/settings.gradle` — `rnConfigCommand`/`useExpoModules()` nu găseau `package.json`
+   urcând din `android/` → **`expoAutolinking.projectRoot` setat explicit spre `frontend/`**.
+2. Coliziune de build compozit (`:expo-gradle-plugin` inclus de două ori, din două căi diferite)
+   → inclus doar o singură cale, consecvent cu auto-includerea internă a pluginului.
+3. Catalogul de versiuni (`agp`/`kotlin`) nu ajungea la `classpath()`-urile din
+   `android/build.gradle` → **versiuni explicite, identice cu cele din
+   `react-native/gradle/libs.versions.toml`** (zero schimbare reală de versiune).
+4. `app/build.gradle` (`resolveAppEntry`, `react.root`) calcula greșit rădăcina proiectului →
+   **`projectRoot`/`root` corectate spre `frontend/`**.
+5. `expo-constants` (`createExpoConfig`) căuta `package.json` urcând din `android/` →
+   **patch minimal în scriptul `get-app-config-android.gradle` din `node_modules`** (fallback
+   spre `frontend/` dacă există, cu backup al originalului salvat separat).
+
+Toate cele cinci fixuri sunt documentate inline (`FIX_ENV1_PROJECT_ROOT_1..5`), reversibile,
+limitate la fișiere de configurare Gradle/mediu (gitignorate sau din `node_modules`) — **zero
+atingere a codului BENSON** (Kotlin/TS neschimbate față de commit-urile G9/G9.2 deja făcute).
+
+**Build de referință**: `app-release.apk`, SHA-256
+`a32b91004639f4849f6a51099f2e8cb989fbd4149b7aeec530985c5b59817470`, semnat
+`CN=BENSON, OU=Dev, O=TOKKO, L=Unknown, ST=Unknown, C=RO` (verificat `apksigner verify
+--print-certs`). Instalat pe OnePlus Nord 4 (`adb install -r`, succes). Rol ASSISTANT intact
+(`com.benson.butler`). Pornire fără crash (`logcat -b crash` gol), wake nativ activ
+(`WAKE_READY=true`, `engine=heed running=true`), index aplicații încărcat (49), chei Groq/Deepgram
+prezente. **Suita de regresie G3: 10/10 PASS** (WA call/video/message ask+no, YT search/play/stop,
+stop muzică), 43s.
+
+**Fișiere atinse** (toate în afara git, în `android/` gitignorat, sau patch punctual în
+`node_modules`, cu backup): `android/settings.gradle`, `android/build.gradle`,
+`android/app/build.gradle`, `android/local.properties` (nou, SDK path local), `node_modules/
+expo-constants/scripts/get-app-config-android.gradle` (backup în `.benson-env-patches/`).
+
+Mediul de build e acum funcțional reproductibil. Rămâne deschis: G9.4 (benchmark pozitiv/negativ
+pentru agregarea HEED) — necesită intervenție vocală directă de la Rareș, nepornit încă în
+această rundă.
+
+---
+
+## 2026-10-13 — RUNDA G9.4 (benchmark pozitiv/negativ, închis)
+
+**Executat**: `WAKE_SCORE_AGGREGATION=true` temporar (shadow mode, `HeedWakeWord.kt`), build +
+instalare, captură live cu Rareș: 10 rostiri reale „Benson" + conversație liberă fără cuvântul
+de trezire.
+
+**Date colectate**:
+- **12 evenimente pozitive** (Benson rostit): `triggerScore` 0,803–0,978; `mean` agregat
+  0,461–0,706.
+- **11 evenimente negative** (conversație, confirmat de Rareș — fără „Benson"; corecție
+  onestă: raportate inițial 9, dar captura a continuat 2 cicluri în plus înainte să opresc
+  procesul `logcat`): `triggerScore` 0,791–0,962; `mean` agregat 0,418–0,626.
+
+**Concluzie, cu date reale din ambele clase**: **nicio separare** — intervalele de
+`triggerScore` și de `mean` se suprapun aproape complet între pozitiv și negativ. Agregarea
+(mean/max) nu oferă nicio putere de discriminare suplimentară față de scorul brut. `max` rămâne
+mereu egal cu `triggerScore` (prin construcție), deci zero informație nouă. Decizie: **nu se
+schimbă politica de acceptare wake, nu se ating pragurile, Deepgram rămâne verificatorul
+necesar**.
+
+**Fals-pozitive acceptate efectiv de sistem: 0 din 11.** Toate cele 11 declanșări HEED false au
+fost respinse — 9 prin `WAKE_OFFLINE_DECISION reason=empty_online accepted=false` (scor sub
+pragul de 0,95 sau transcript gol) sau `reason=offline` (timeout, scor 0,924 < 0,95), și 2 prin
+transcript real Deepgram nepotrivit cu „Benson" (`"aici e un fenomen"`, `"iar domnul țampa"`).
+
+**Observație de risc, relevantă pentru runda următoare**: una dintre cele 11 false declanșări
+(20:40:34, scor local 0,962) a avut scorul PESTE pragul de siguranță offline (0,95) — a fost
+respinsă corect doar pentru că Deepgram a răspuns cu text real, nepotrivit. Dacă rețeaua ar fi
+fost indisponibilă în acel moment exact, acest fals-pozitiv ar fi fost ACCEPTAT de plasa de
+siguranță offline. Confirmă empiric limita deja cunoscută (nota din 04.10, testul din mașină).
+
+**Flag revenit la `false`** (comportament implicit, identic cu înainte de G9.4). Build final
+reconstruit, SHA-256 `95567a727faec314cf13e07506b2bd9df6f53dc5cc0f889129656ca1fac26f6b`, semnat
+`CN=BENSON, OU=Dev, O=TOKKO, L=Unknown, ST=Unknown, C=RO`, instalat, rol ASSISTANT intact,
+**regresie G3: 10/10 PASS**.
+
+**G9 — închis definitiv.** Nicio modificare de prag sau politică wake în afara celor deja
+aprobate (G9.2 shadow mode, acum revenit OFF).
+
+---
+
+## 2026-10-13 — RUNDA INTEGRATION-1 (B1 live, verificare end-to-end AC1-AC8)
+
+**Audit arhitectural, confirmat**: fluxul wake→bulă→executor→rezultat→follow-up 8s există deja
+complet, cablat într-un singur loc (`handleNativeCommandFlow`, același drum pentru prima comandă
+și follow-up). Executorii (`tryNativeOpenApp`, `tryNativeWhatsApp`, `tryNativeYoutube...`,
+`tryContextSearch`, `tryUniversalHand` etc.), ConfirmationGate (`pendingWaAction`/
+`pendingYoutubePlay`/etc.) și bula (`updateBubbleNative`) — toate reutilizate, nimic rescris.
+
+**Gol real găsit și reparat**: `interpretCommand`/`respondToChat` (B1, scrise într-o rundă
+anterioară) rulau doar în shadow mode (`V4_SHADOW`), niciodată conectate la drumul real.
+`V5_CONVERSATION` pornit; `tryBrainFallback()` (nou, ~45 linii) conectează interpretorul la
+fallback-ul nativ — DOAR după ce toți executorii deterministi eșuează, zero risc pentru comenzile
+canonice. Două bug-uri reale, demonstrate live, reparate:
+1. `respondToChat` arunca `NetworkOnMainThreadException` (apel HTTP sincron pe main thread) —
+   bug preexistent, latent, niciodată expus până azi (funcția nu fusese apelată live vreodată).
+   Fix: apelul mutat pe fir separat, același tipar ca restul fișierului.
+2. Timeout 6s prea mic — demonstrat: 2 din 3 apeluri reale au picat la exact 6003ms. Mărit la 10s
+   (`interpHttpClient`/`chatHttpClient`), justificat de date reale.
+
+**Rezultate teste AC1-AC8** (executate pe dispozitiv, `INGRID_CONTACT=Baby`):
+
+| # | Test | Rezultat |
+|---|---|---|
+| AC1 | Wake + „Da, Master" + bulă transcript | Necesită test vocal direct (Rareș) — nepornit încă |
+| AC2 | „Cât e 17 ori 3?" → „51" | **PASS**, confirmat live: bulă „17 ori 3 este 51.", TTS rostit |
+| AC3 | YouTube deschide/caută/iese | **PARȚIAL**: deschide+caută confirmate funcțional (focus real pe YouTube); „ieși din YouTube" nu are executor dedicat — cade pe fallback (cunoscut, neschimbat azi) |
+| AC4 | Clarificare la comandă ambiguă | **PASS** — via parserul determinist existent („sună-l pe ăla" → întrebare „pe cine?", fără ghicire) |
+| AC5 | Confirmare apel/mesaj, respectă „Nu" | **PASS** — acoperit de G3 (WA_CALL/VIDEO/MESSAGE_ASK + NO_ACTION) |
+| AC6 | Transcript parțial live în bulă | **BLOCKED, documentat**: STT real (OpenAI/Deepgram) e exclusiv batch (upload complet → un singur răspuns final); calea veche Android SpeechRecognizer cu `onPartialResults` e cod mort (abandonat, Porcupine/hotword loop). Streaming real ar cere migrare la Deepgram WS — neimplementat azi, în afara scopului „reutilizează, nu reconstrui" |
+| AC7 | Sesiune se închide după 8s inactivitate | **PASS**, măsurat exact: open→close = 8,004s |
+| AC8 | Regresie G3 | **PASS, 10/10**, de trei ori azi (înainte, în timpul, și după fix-uri) |
+
+**Build final**: SHA-256 `c49f9a44f1abca050d6dc9636d989dfde53be625f0ba125660747d832557c022`, semnat
+`CN=BENSON, OU=Dev, O=TOKKO`, instalat, rol ASSISTANT intact, pornire fără crash.
+
+**Commit local**: `5831679` — „[INTEGRATION-1] B1 brain conectat la fallback-ul nativ (CHAT/CLARIFY)".
+
+**Rămas nefuncțional/neverificat**: AC1 (necesită rostire reală + bulă vizibilă, nu doar log);
+„ieși din YouTube" nu are un executor explicit de ieșire din aplicație (gol preexistent, nu
+introdus azi); vocea MINA (feminin/gravă/elegantă) rămâne cea aleasă automat de motorul TTS activ
+pe telefon — Android nu expune un câmp standard de gen/timbru verificabil din cod, deci nu poate
+fi garantată programatic fără ascultare directă.
+
+**Wake**: neschimbat, G9 rămâne închis (`WAKE_SCORE_AGGREGATION=false`, praguri neatinse,
+Deepgram neatins). Fiabilitate wake și funcționalitate conversație raportate separat, ca cerut.
