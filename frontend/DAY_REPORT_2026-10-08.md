@@ -507,3 +507,45 @@ reason=benson_backgrounded` (confirmă BENSON era în fundal, condiția obligato
 
 Teste 4 și 5 au nevoie de acțiune deliberată (o comandă reală cu „nu" în răspuns, urmată de o
 comandă reală; un apel WhatsApp real de 1 minut) — cerute separat, în conversație.
+
+---
+
+## 2026-10-13 — RUNDA G9 (diagnostic wake, shadow mode, audit)
+
+**G9 — diagnostic Deepgram, închis.** Mecanism de captură a payload-ului exact trimis către
+Deepgram (flag `WAKE_VERIFY_EXPORT_PAYLOAD`, SHA-256 verificat byte-cu-byte), confirmă: Deepgram
+răspunde HTTP 200, JSON valid, `confidence=0.0`, text gol — nu e eroare de rețea, nu e eroare de
+parsare. Flag revenit la OFF, nicio copie audio rămasă (șterse după verificare). Concluzie:
+**fiabilitatea wake-ului rămâne BLOCKED** — cauza empiric confirmată (Deepgram nu transcrie
+rostirea scurtă „Benson" în fereastra de verificare), fără soluție implementată încă.
+
+**G9.2 — agregare scoruri HEED, SHADOW MODE.** Flag nou `WAKE_SCORE_AGGREGATION` (implicit
+`false`), în `HeedWakeWord.kt` (fișier protejat, permisiune explicită primită per rundă).
+Calculează `mean`/`max` pe o fereastră mică de scoruri brute, DOAR logare (`WAKE_SCORE_AGGREGATE`),
+fără nicio influență asupra pragului, `aboveCount`, `consecutiveFrames`, deciziei
+accept/reject sau apelului Deepgram. Verificat flag OFF = comportament identic (build
+reproductibil, SHA-256 egal), flag ON = doar logare suplimentară. Nicio decizie de acceptare
+schimbată.
+
+**G9.3 — audit finalizat, fără date suficiente.** Doar 2 măsurători `WAKE_SCORE_AGGREGATE`
+există în total (ambele azi, clasă pozitivă — rostire reală „Benson"). Zero măsurători din clasa
+negativă (fals-pozitiv) cu agregarea activă. Concluzie: **nicio putere de discriminare
+demonstrabilă** pentru agregare față de `triggerScore` brut — nici confirmată, nici infirmată,
+din lipsă de date. Timeout-urile Deepgram (11 apariții în loguri, `InterruptedIOException
+"timeout"`) sunt confirmate distincte de transcript gol HTTP 200 — nu se confundă.
+
+**Cifre agregate pe ziua de azi (127 cicluri wake):** 21 `accepted`, 103 `rejected`, 3 `offline`.
+
+**Build de referință, semnat, SHA-256:**
+`aff42962754461f4db40381136f53dfa23e794cd2641cfebd29c8af858287c53`
+
+**G9.4 — propus, NEEXECUTAT.** Benchmark minim necesar: ≥10 cicluri pozitive („Benson" real) +
+≥10 cicluri negative garantate (conversație liberă, TV/radio, muzică, fără cuvântul de trezire),
+cu `WAKE_SCORE_AGGREGATION=true`, pentru a obține primele date comparabile din ambele clase.
+Neînceput.
+
+**B1 (creierul ChatGPT) și VITEZA-2** — rămân neîncepute; specificațiile sunt salvate verbatim
+în `docs/specs/RUNDA_B1_2026-10-13.md` / `PLAN_FINAL_2026-10-12.md`, fără implementare.
+
+**Decizie arhitect, valabilă:** nu se modifică niciun prag HEED, nu se activează nicio politică
+nouă de acceptare a wake-ului, până la un benchmark pozitiv/negativ complet și aprobare explicită.
