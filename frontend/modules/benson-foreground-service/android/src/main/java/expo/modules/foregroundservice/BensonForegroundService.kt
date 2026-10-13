@@ -3334,49 +3334,239 @@ class BensonForegroundService : Service() {
     }
   }
 
-  // INTEGRATION-1 (13.10.2026, arhitect-aprobat) — conectează interpretorul B1 deja scris
-  // (interpretCommand/respondToChat, pana azi doar shadow/neapelat) la drumul de cadere REAL,
-  // DOAR dupa ce TOTI executorii deterministi de mai sus au esuat (niciun risc pentru comenzile
-  // canonice — raman 100% neatinse, verificate primele). Reutilizeaza exact functiile B1
-  // existente; nu creeaza un al doilea creier. Apelul HTTP ruleaza pe fir separat (acelasi
-  // tipar ca triggerShadowInterpretation) ca sa nu blocheze thread-ul principal.
-  // Returneaza true daca a preluat cererea (async in curs) — apelantul NU mai vorbeste fallback-ul static.
+  // INTEGRATION-2 (13.10.2026, arhitect-aprobat) — MINA, un singur apel LLM (nu doua secventiale
+  // ca INTEGRATION-1): clasifica SI raspunde in acelasi JSON, intr-un singur round-trip. Ruleaza
+  // DOAR dupa ce toti executorii deterministi de mai sus au esuat — zero risc pentru comenzile
+  // canonice. Modelul nu atinge AccessibilityService: pentru "command", reconstruieste o fraza
+  // canonica si o retrimite prin ACEIASI executori native (tryNativeWhatsApp/tryNativeOpenApp/
+  // tryNativeYoutube*/tryNativeMediaControl/tryGlobalNav) sau apeleaza direct goBack()/goHome()
+  // (deja existente in BensonAccessibilityService, folosite si in alta parte a fisierului) —
+  // niciun executor nou. ConfirmationGate neatins: tryNativeWhatsApp isi pastreaza propria
+  // confirmare (pendingWaAction), raspunsul YES/NO al utilizatorului e interceptat normal la
+  // inceputul handleNativeCommandFlow, inainte sa ajunga vreodata aici.
+  private val conversationHistory = ConversationHistory()
+  private val brainHttpClient = OkHttpClient.Builder()
+    .callTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
+
+  private val BRAIN_TURN_SCHEMA = """
+    {"type":"object","properties":{
+      "type":{"type":"string","enum":["command","chat","clarify"]},
+      "action":{"type":["string","null"],"enum":["OPEN_APP","SEARCH_IN_APP","NAVIGATE","BACK","HOME","WHATSAPP_CALL","WHATSAPP_VIDEO","WHATSAPP_MESSAGE","MEDIA_CONTROL",null]},
+      "app":{"type":["string","null"]},"query":{"type":["string","null"]},
+      "contact":{"type":["string","null"]},"message":{"type":["string","null"]},
+      "media_action":{"type":["string","null"],"enum":["play","pause","stop","next","previous",null]},
+      "target":{"type":["string","null"]},"reply":{"type":["string","null"]},"question":{"type":["string","null"]}},
+     "required":["type","action","app","query","contact","message","media_action","target","reply","question"],
+     "additionalProperties":false}
+  """.trimIndent()
+
+  private fun brainTurnSystemPrompt(foregroundApp: String): String =
+    "Ești MINA, vocea și interpretoarea asistentului BENSON. Primești o rostire a utilizatorului " +
+      "(română, posibil germană/engleză) și istoricul conversației curente. Răspunzi STRICT cu " +
+      "schema JSON dată, într-un singur pas — nu clasifici separat de răspuns. Aplicația activă " +
+      "acum pe ecran: \"$foregroundApp\". type=\"command\": utilizatorul cere o acțiune din lista " +
+      "permisă — completează action și câmpurile relevante (OPEN_APP: app; SEARCH_IN_APP: query, " +
+      "presupune YouTube dacă nu se specifică altă aplicație media; NAVIGATE: target=destinație; " +
+      "BACK=închide/ieși din ecranul curent; HOME=ecran principal; WHATSAPP_CALL/WHATSAPP_VIDEO: " +
+      "contact; WHATSAPP_MESSAGE: contact+message EXACT, fără reformulare; MEDIA_CONTROL: " +
+      "media_action). O corecție rostită ('nu, ...') e o comandă nouă, cu valorile actualizate, " +
+      "nu o conversație. type=\"chat\": conversație liberă — scrie răspunsul scurt (1-2 fraze, " +
+      "română naturală) în reply. type=\"clarify\": cererea e ambiguă — scrie o întrebare scurtă " +
+      "în question, nu ghici. Câmpurile nefolosite = null."
+
+  // Un singur apel HTTP: clasificare + răspuns, conform cerinței explicite.
+  private fun brainTurn(transcript: String, foregroundApp: String): JSONObject? {
+    if (OpenAiUsageMeter.isBudgetExceeded(this)) { AudioDiag.log(this, "BRAIN_SKIPPED", "reason=budget_exceeded"); return null }
+    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    val apiKey = prefs.getString("brain_api_key", "") ?: ""
+    if (apiKey.isBlank()) return null
+    val baseUrl = (prefs.getString("brain_base_url", "")?.takeIf { it.isNotBlank() } ?: "https://api.openai.com/v1").trimEnd('/')
+    val messages = org.json.JSONArray().apply {
+      put(JSONObject().apply { put("role", "system"); put("content", brainTurnSystemPrompt(foregroundApp)) })
+      for (turn in conversationHistory.snapshot()) {
+        put(JSONObject().apply { put("role", turn.role); put("content", turn.text) })
+      }
+      put(JSONObject().apply { put("role", "user"); put("content", transcript) })
+    }
+    val body = JSONObject().apply {
+      put("model", "gpt-5-nano")
+      put("messages", messages)
+      put(
+        "response_format",
+        JSONObject().apply {
+          put("type", "json_schema")
+          put(
+            "json_schema",
+            JSONObject().apply { put("name", "mina_turn"); put("strict", true); put("schema", JSONObject(BRAIN_TURN_SCHEMA)) },
+          )
+        },
+      )
+    }
+    val request = Request.Builder().url("$baseUrl/chat/completions")
+      .addHeader("Authorization", "Bearer $apiKey")
+      .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+    return try {
+      brainHttpClient.newCall(request).execute().use { resp ->
+        if (!resp.isSuccessful) { AudioDiag.logError("BRAIN_ERROR", "http=${resp.code}"); return null }
+        val json = resp.body?.string() ?: return null
+        val root = JSONObject(json)
+        val content = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")
+        val usage = root.optJSONObject("usage")
+        if (usage != null) {
+          val inTok = usage.optInt("prompt_tokens", 0)
+          val outTok = usage.optInt("completion_tokens", 0)
+          val cost = (inTok / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_INPUT_PER_1M_USD +
+            (outTok / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_OUTPUT_PER_1M_USD
+          OpenAiUsageMeter.recordUsage(this, "brain_turn_gpt5nano", cost)
+        }
+        if (content.isNullOrBlank()) return null
+        JSONObject(content)
+      }
+    } catch (e: Exception) {
+      AudioDiag.logError("BRAIN_ERROR", "type=${e.javaClass.simpleName}")
+      null
+    }
+  }
+
+  private fun foregroundAppLabel(): String {
+    val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+    val pkg = svc?.currentForegroundPackageLive()
+    return if (pkg.isNullOrBlank() || pkg == packageName || pkg == launcherPackage()) "ecran principal" else pkg
+  }
+
   private fun tryBrainFallback(command: String): Boolean {
     if (JS_VOICE_HANDOFF) return false
     if (OpenAiUsageMeter.isBudgetExceeded(this)) return false
     val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
     if ((prefs.getString("brain_api_key", "") ?: "").isBlank()) return false
+    val foregroundApp = foregroundAppLabel()
     val startMs = System.currentTimeMillis()
     Thread({
-      val interp = interpretCommand(command)
+      val result = brainTurn(command, foregroundApp)
       val elapsedMs = System.currentTimeMillis() - startMs
-      val action = interp?.optString("action") ?: "UNKNOWN"
-      AudioDiag.log(this, "BRAIN_CALL", "ms=$elapsedMs type=$action ok=${interp != null}")
-      mainHandler.post {
-        when (action) {
-          "CHAT" -> respondToChat(command)
-          "CLARIFY" -> {
-            val question = interp?.optString("question")?.takeIf { it.isNotBlank() }
-              ?: "Poți spune mai clar ce vrei?"
-            updateBubbleNative(question, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
-            speak(question, "clarify")
-          }
-          else -> {
-            // UNKNOWN sau o actiune canonica neconectata inca (WA_*/APP_OPEN/YT_SEARCH/MEDIA_STOP) —
-            // B1.2 cere "respinsa, log BRAIN_REJECT" pentru comenzi in afara listei; reconstructia
-            // lor prin executorii native ramane neimplementata in aceasta runda (scop redus,
-            // zero risc pe actiuni sensibile neverificate). Acelasi text/comportament ca fallback-ul
-            // static de dinainte de B1 — zero regresie.
-            if (interp != null) AudioDiag.log(this, "BRAIN_REJECT", "type=$action")
-            logRoute("NATIVE_ROUTE", "action=native_fallback reason=brain_unresolved")
-            val fallback = "Nu am înțeles. Repetă, te rog."
-            updateBubbleNative(fallback, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
-            speakNativeFallbackThenCapture(fallback)
-          }
+      val type = result?.optString("type") ?: "none"
+      val action = result?.optString("action")?.takeIf { it.isNotBlank() && it != "null" }
+      AudioDiag.log(this, "BRAIN_CALL", "ms=$elapsedMs type=$type action=${action ?: "none"} ok=${result != null}")
+      mainHandler.post { dispatchBrainTurn(command, result) }
+    }, "benson-brain-turn").start()
+    return true
+  }
+
+  private fun dispatchBrainTurn(command: String, result: JSONObject?) {
+    when (result?.optString("type")) {
+      "chat" -> {
+        val reply = result.optString("reply").trim().takeIf { it.isNotBlank() } ?: "Nu pot vorbi acum."
+        conversationHistory.add("user", command); conversationHistory.add("assistant", reply)
+        updateBubbleNative(reply, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+        speak(reply, "chat")
+      }
+      "clarify" -> {
+        val question = result.optString("question").trim().takeIf { it.isNotBlank() } ?: "Poți spune mai clar ce vrei?"
+        conversationHistory.add("user", command); conversationHistory.add("assistant", question)
+        updateBubbleNative(question, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+        speak(question, "clarify")
+      }
+      "command" -> {
+        val action = result?.optString("action")
+        if (!executeBrainCommand(action, result!!, command)) {
+          AudioDiag.log(this, "BRAIN_REJECT", "action=${action ?: "none"}")
+          logRoute("NATIVE_ROUTE", "action=native_fallback reason=brain_unresolved")
+          val fallback = "Nu am înțeles. Repetă, te rog."
+          conversationHistory.add("user", command); conversationHistory.add("assistant", fallback)
+          updateBubbleNative(fallback, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+          speakNativeFallbackThenCapture(fallback)
         }
       }
-    }, "benson-brain-fallback").start()
-    return true
+      else -> {
+        logRoute("NATIVE_ROUTE", "action=native_fallback reason=brain_unresolved")
+        val fallback = "Nu am înțeles. Repetă, te rog."
+        updateBubbleNative(fallback, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+        speakNativeFallbackThenCapture(fallback)
+      }
+    }
+  }
+
+  private fun finishBrainCommandSuccess(resp: String, originalCommand: String, rearmReason: String) {
+    openSession("native_cmd_executed", mayDuck = true)
+    setMicOwner("NONE", "native_cmd_executed")
+    updateBubbleNative(resp, originalCommand, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+    hideWakeRingNative()
+    rearmWakeNative(rearmReason)
+  }
+
+  // Fiecare ramură reutilizează exact funcția nativă deja existentă (vezi comentariul de mai sus);
+  // zero logică de execuție nouă aici, doar reconstrucție de frază + rutare spre ea.
+  private fun executeBrainCommand(action: String?, result: JSONObject, originalCommand: String): Boolean {
+    fun remember(note: String) { conversationHistory.add("user", originalCommand); conversationHistory.add("assistant", note) }
+    return when (action) {
+      "BACK" -> {
+        val ok = expo.modules.accessibility.BensonAccessibilityService.instance?.goBack() ?: false
+        if (ok) { remember("[Am ieșit din ecranul curent]"); finishBrainCommandSuccess("Am ieșit.", originalCommand, "brain_back_done") }
+        ok
+      }
+      "HOME" -> {
+        val ok = expo.modules.accessibility.BensonAccessibilityService.instance?.goHome() ?: false
+        if (ok) { remember("[Am mers la ecranul principal]"); finishBrainCommandSuccess("Gata.", originalCommand, "brain_home_done") }
+        ok
+      }
+      "OPEN_APP" -> {
+        val app = result.optString("app").takeIf { it.isNotBlank() } ?: return false
+        val resp = tryNativeOpenApp("deschide $app") ?: return false
+        remember("[Am deschis $app]")
+        finishBrainCommandSuccess(resp, originalCommand, "app_launch_done")
+        true
+      }
+      "SEARCH_IN_APP" -> {
+        val query = result.optString("query").takeIf { it.isNotBlank() } ?: return false
+        val phrase = "caută $query pe youtube"
+        if (tryNativeYoutubeOpenSearch(phrase)) { remember("[Caut $query pe YouTube]"); return true }
+        if (tryYoutubeSearchConfirm(phrase)) { remember("[Caut $query pe YouTube]"); return true }
+        val resp = tryNativeYoutube(phrase) ?: return false
+        remember("[Caut $query pe YouTube]")
+        finishBrainCommandSuccess(resp, originalCommand, "app_launch_done")
+        true
+      }
+      "NAVIGATE" -> {
+        val target = result.optString("target").takeIf { it.isNotBlank() } ?: return false
+        val ok = tryGlobalNav("du-mă la $target")
+        if (ok) remember("[Navigare spre $target]")
+        ok
+      }
+      "WHATSAPP_CALL" -> {
+        val contact = result.optString("contact").takeIf { it.isNotBlank() } ?: return false
+        val ok = tryNativeWhatsApp("sună la $contact pe whatsapp")
+        if (ok) remember("[Apel WhatsApp către $contact — confirmare în curs]")
+        ok
+      }
+      "WHATSAPP_VIDEO" -> {
+        val contact = result.optString("contact").takeIf { it.isNotBlank() } ?: return false
+        val ok = tryNativeWhatsApp("video cu $contact")
+        if (ok) remember("[Video WhatsApp către $contact — confirmare în curs]")
+        ok
+      }
+      "WHATSAPP_MESSAGE" -> {
+        val contact = result.optString("contact").takeIf { it.isNotBlank() } ?: return false
+        val message = result.optString("message").takeIf { it.isNotBlank() } ?: return false
+        val ok = tryNativeWhatsApp("scrie-i lui $contact că $message")
+        if (ok) remember("[Mesaj WhatsApp către $contact — confirmare în curs]")
+        ok
+      }
+      "MEDIA_CONTROL" -> {
+        val mediaAction = result.optString("media_action").takeIf { it.isNotBlank() } ?: return false
+        val phrase = when (mediaAction) {
+          "play" -> "pune play"
+          "pause", "stop" -> "oprește muzica"
+          "next" -> "piesa următoare"
+          "previous" -> "piesa anterioară"
+          else -> return false
+        }
+        val resp = tryNativeMediaControl(phrase) ?: return false
+        remember("[Control media: $mediaAction]")
+        finishBrainCommandSuccess(resp, originalCommand, "media_ctl_done")
+        true
+      }
+      else -> false
+    }
   }
 
   // Reuses CaptureEngine (modules/benson-audio-capture, same VAD/pre-roll/WAV as the JS-driven
@@ -3490,90 +3680,11 @@ class BensonForegroundService : Service() {
     else -> old.uppercase()
   }
 
-  // V5 (08.10.2026) — conversația, pe calea V4b (CHAT/CLARIFY din interpretor). Cod + teste azi;
-  // NU e încă apelată de nimeni (V4b, care decide CÂND interpretorul guvernează, nu e construit
-  // azi) — zero risc de regresie, exact ca V4a la momentul lui. Legea vocii unice (L8-EXT):
-  // răspunsul trece prin ACELAȘI speak() nativ, niciodată o voce OpenAI — doar textul e generat
-  // de model, nu sunetul.
-  // INTEGRATION-1 (13.10.2026) — pornit: tryBrainFallback (vezi mai sus) apelează acum
-  // respondToChat real, pe drumul de cădere, după ce toți executorii deterministi au eșuat.
-  // Revert: V5_CONVERSATION = false (respondToChat redevine neapelat, identic cu azi dimineață).
-  private val V5_CONVERSATION = true
-  private val conversationHistory = ConversationHistory()
-  // INTEGRATION-1 (13.10.2026) — aceeași corecție ca interpHttpClient (vezi comentariul de acolo).
-  private val chatHttpClient = OkHttpClient.Builder()
-    .callTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
-
-  private val CHAT_SYSTEM_PROMPT = "Ești BENSON, un majordom vocal prietenos. Răspunzi scurt " +
-    "(1-2 fraze), în română, natural, ca într-o conversație reală — nu execuți comenzi, nu " +
-    "pretinzi că faci acțiuni, doar conversezi."
-
-  // Reutilizează gpt-5-nano (deja prețul verificat la V0, deja contorizat la V4a) — nu un model
-  // nou, nu un preț nou de adăugat în OpenAiUsageMeter.
-  private fun generateChatReply(transcript: String): String? {
-    if (!V5_CONVERSATION) return null
-    if (OpenAiUsageMeter.isBudgetExceeded(this)) { AudioDiag.log(this, "CHAT_SKIPPED", "reason=budget_exceeded"); return null }
-    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
-    val apiKey = prefs.getString("brain_api_key", "") ?: ""
-    if (apiKey.isBlank()) return null
-    val baseUrl = (prefs.getString("brain_base_url", "")?.takeIf { it.isNotBlank() } ?: "https://api.openai.com/v1").trimEnd('/')
-    val messages = org.json.JSONArray().apply {
-      put(JSONObject().apply { put("role", "system"); put("content", CHAT_SYSTEM_PROMPT) })
-      for (turn in conversationHistory.snapshot()) {
-        put(JSONObject().apply { put("role", turn.role); put("content", turn.text) })
-      }
-      put(JSONObject().apply { put("role", "user"); put("content", transcript) })
-    }
-    val body = JSONObject().apply { put("model", "gpt-5-nano"); put("messages", messages) }
-    val request = Request.Builder().url("$baseUrl/chat/completions")
-      .addHeader("Authorization", "Bearer $apiKey")
-      .post(body.toString().toRequestBody("application/json".toMediaType())).build()
-    return try {
-      chatHttpClient.newCall(request).execute().use { resp ->
-        if (!resp.isSuccessful) { AudioDiag.logError("CHAT_ERROR", "http=${resp.code}"); return null }
-        val json = resp.body?.string() ?: return null
-        val root = JSONObject(json)
-        val reply = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")?.optString("content")
-          ?.trim()?.takeIf { it.isNotBlank() } ?: return null
-        val usage = root.optJSONObject("usage")
-        if (usage != null) {
-          val inTok = usage.optInt("prompt_tokens", 0)
-          val outTok = usage.optInt("completion_tokens", 0)
-          val cost = (inTok / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_INPUT_PER_1M_USD +
-            (outTok / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_OUTPUT_PER_1M_USD
-          OpenAiUsageMeter.recordUsage(this, "chat_gpt5nano", cost)
-        }
-        reply
-      }
-    } catch (e: Exception) {
-      AudioDiag.logError("CHAT_ERROR", "type=${e.javaClass.simpleName}")
-      null
-    }
-  }
-
-  // Apelată de tryBrainFallback când interpretorul clasifică CHAT pe drumul de cădere.
-  // INTEGRATION-1 (13.10.2026) — BUG REAL, demonstrat azi (CHAT_ERROR type=NetworkOnMainThreadException):
-  // generateChatReply face un apel HTTP sincron; funcția asta nu fusese NICIODATĂ apelată până azi
-  // (comentariul vechi o confirma: "nu e încă apelată de nimeni"), deci bug-ul exista deja în cod,
-  // latent, dinainte de această rundă — l-am expus rulând-o live prima dată. Fix: apelul de rețea
-  // mutat pe fir propriu, exact tiparul deja folosit de tryBrainFallback/triggerShadowInterpretation
-  // din acest fișier. updateBubbleNative adăugat (funcția nu avea niciodată bulă vizibilă înainte).
-  private fun respondToChat(transcript: String) {
-    conversationHistory.add("user", transcript)
-    Thread({
-      val reply = generateChatReply(transcript)
-      mainHandler.post {
-        if (reply == null) {
-          updateBubbleNative("Nu pot vorbi acum.", transcript, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
-          speak("Nu pot vorbi acum.", "chat")
-        } else {
-          conversationHistory.add("assistant", reply)
-          updateBubbleNative(reply, transcript, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
-          speak(reply, "chat")
-        }
-      }
-    }, "benson-chat-reply").start()
-  }
+  // INTEGRATION-2 (13.10.2026) — V5/CHAT_SYSTEM_PROMPT/generateChatReply/respondToChat
+  // (doua apeluri secventiale: clasificare separata de raspuns) inlocuite de brainTurn/
+  // tryBrainFallback/dispatchBrainTurn de mai sus (un singur apel). conversationHistory
+  // mutat acolo. Nimic de pastrat aici — comportamentul vechi nu era oricum apelat live
+  // pana la INTEGRATION-1 (azi).
 
   // E0.2/E0.3 (08.10.2026, self-echo) — dropped BEFORE handleNativeCommandFlow, so a pending
   // confirmation's own classifyConfirmationNative never even sees this transcript. This is the
