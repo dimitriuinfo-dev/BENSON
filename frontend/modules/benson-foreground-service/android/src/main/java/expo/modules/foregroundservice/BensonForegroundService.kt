@@ -1310,6 +1310,39 @@ class BensonForegroundService : Service() {
   private val WAKE_VERIFY_POST_TRIGGER_MS = 1_000
   private val WAKE_VERIFY_WINDOW_BYTES = (HeedWakeWord.PRE_ROLL_SAMPLES + 16_000 * WAKE_VERIFY_POST_TRIGGER_MS / 1_000) * 2
 
+  // WAKE_VERIFY_EMPTY_DIAG (13.10.2026, arhitect-aprobat) — diagnostic PUR pe cazul text="" online
+  // (9/10 azi, deja cunoscut din 07.10 — vezi FIX de mai jos). Implicit OFF: zero schimbare de
+  // comportament cat flagul e false. NU loga audio, transcripturi nevide, chei sau antete.
+  // Revert: WAKE_VERIFY_EMPTY_DIAG = false.
+  private val WAKE_VERIFY_EMPTY_DIAG = false
+
+  // WAKE_VERIFY_EXPORT_PAYLOAD (13.10.2026, arhitect-aprobat) — o SINGURA captura controlata a
+  // payload-ului EXACT trimis la Deepgram (nu wake_command_*.wav complet — acelasi `bytes` care
+  // merge la .toRequestBody() mai jos, verbatim, byte cu byte). Implicit OFF. Latch propriu
+  // (diagPayloadExported) — o singura exportare cat procesul traieste, cat timp flagul ramane true;
+  // NU captura continua. Scrie DOAR in getExternalFilesDir/wake_diag (spatiu extern al aplicatiei,
+  // accesibil prin adb fara root — verificat 13.10 pe ac2f_diag, acelasi mecanism). Loghează doar
+  // metadate (nume fisier, bytes, hash SHA-256 — MessageDigest din JDK, zero dependinta noua), NU
+  // continutul audio. Revert: WAKE_VERIFY_EXPORT_PAYLOAD = false (export-ul existent, daca a avut
+  // loc, ramane pe disc pana e sters manual — vezi raportul rundei pentru stergere).
+  private val WAKE_VERIFY_EXPORT_PAYLOAD = false
+  @Volatile private var diagPayloadExported = false
+
+  private fun exportWakeVerifyPayloadOnce(bytes: ByteArray) {
+    if (!WAKE_VERIFY_EXPORT_PAYLOAD || diagPayloadExported) return
+    diagPayloadExported = true
+    try {
+      val dir = File(getExternalFilesDir(null), "wake_diag").apply { if (!exists()) mkdirs() }
+      val dest = File(dir, "payload_${System.currentTimeMillis()}.wav")
+      dest.writeBytes(bytes)
+      val sha256 = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+      AudioDiag.log(this, "WAKE_VERIFY_PAYLOAD_EXPORTED", "path=${dest.name} bytes=${bytes.size} sha256=$sha256")
+    } catch (e: Exception) {
+      AudioDiag.logError("WAKE_VERIFY_PAYLOAD_EXPORT_ERROR", "type=${e.javaClass.simpleName}")
+    }
+  }
+
   private fun trimToVerifyWindow(bytes: ByteArray): ByteArray {
     if (bytes.size <= 44) return bytes
     val pcm = bytes.copyOfRange(44, bytes.size)
@@ -1327,6 +1360,7 @@ class BensonForegroundService : Service() {
     if (fullBytes.isEmpty()) return Triple(null, false, 0)
     val bytes = trimToVerifyWindow(fullBytes)
     val clipMs = (bytes.size - 44) * 1000 / (16_000 * 2)
+    exportWakeVerifyPayloadOnce(bytes)
     val dgKey = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
       .getString("wake_stt_deepgram_api_key", "") ?: ""
     if (dgKey.isBlank()) return Triple(null, false, clipMs)
@@ -1358,9 +1392,29 @@ class BensonForegroundService : Service() {
           return Triple(null, connReused, clipMs)
         }
         val json = resp.body?.string() ?: return Triple(null, connReused, clipMs)
-        val alt = JSONObject(json).optJSONObject("results")?.optJSONArray("channels")
-          ?.optJSONObject(0)?.optJSONArray("alternatives")?.optJSONObject(0)
-        Triple((alt?.optString("transcript", "") ?: "").trim(), connReused, clipMs)
+        val root = JSONObject(json)
+        val channels = root.optJSONObject("results")?.optJSONArray("channels")
+        val alternatives = channels?.optJSONObject(0)?.optJSONArray("alternatives")
+        val alt = alternatives?.optJSONObject(0)
+        val transcript = (alt?.optString("transcript", "") ?: "").trim()
+        // WAKE_VERIFY_EMPTY_DIAG (13.10.2026, arhitect-aprobat, diagnostic only) — flag propriu,
+        // implicit OFF; NU schimbă transcript/Triple-ul returnat, doar observă acelasi JSON deja
+        // parsat mai sus. Zero audio, zero transcripturi nevide, zero chei/antete — doar forma
+        // raspunsului (status, model, existenta campurilor, nr. alternative).
+        if (WAKE_VERIFY_EMPTY_DIAG && transcript.isEmpty()) {
+          val hasResults = root.has("results")
+          val channelCount = channels?.length() ?: -1
+          val altCount = alternatives?.length() ?: -1
+          val hasConfidence = alt?.has("confidence") == true
+          val confidence = if (hasConfidence) alt?.optDouble("confidence") else null
+          val modelInfoName = root.optJSONObject("metadata")?.optJSONArray("models")?.optString(0, "")
+          AudioDiag.log(
+            this,
+            "WAKE_VERIFY_EMPTY_DIAG",
+            "http=${resp.code} model=\"${modelInfoName ?: ""}\" hasResults=$hasResults channels=$channelCount alternatives=$altCount hasConfidence=$hasConfidence confidence=${confidence ?: "none"} bodyLen=${json.length}",
+          )
+        }
+        Triple(transcript, connReused, clipMs)
       }
     } catch (e: Exception) {
       // PASUL 3 (07.10.2026) — was catch (_: Exception), swallowing the exception type entirely.
