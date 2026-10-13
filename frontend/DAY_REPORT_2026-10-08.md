@@ -685,3 +685,66 @@ fi garantată programatic fără ascultare directă.
 
 **Wake**: neschimbat, G9 rămâne închis (`WAKE_SCORE_AGGREGATION=false`, praguri neatinse,
 Deepgram neatins). Fiabilitate wake și funcționalitate conversație raportate separat, ca cerut.
+
+---
+
+## 2026-10-13 — RUNDA INTEGRATION-2 (MINA, apel unic + dispatcher executori)
+
+**Schimbare față de INTEGRATION-1**: cele două apeluri LLM secvențiale (clasificare separat de
+răspuns) înlocuite cu UNUL SINGUR (`brainTurn()`) — un singur round-trip, JSON strict
+(`response_format: json_schema`), care decide simultan tip (`command`/`chat`/`clarify`) și
+conținut. Cerut explicit, implementat.
+
+**Dispatcher → executori existenți**: pentru `type="command"`, `executeBrainCommand()` reconstruiește
+o frază canonică din câmpurile structurate și o retrimite prin EXACT aceiași executori
+deterministi (`tryNativeWhatsApp`, `tryNativeOpenApp`, `tryNativeYoutube*`, `tryNativeMediaControl`,
+`tryGlobalNav`) — zero executor nou. `BACK`/`HOME` apelează direct `goBack()`/`goHome()`
+(deja existente în `BensonAccessibilityService`, folosite deja în altă parte a codului — nu
+acces nou la AccessibilityService). ConfirmationGate neatins: confirmările WhatsApp rămân în
+`pendingWaAction`, interceptate la începutul `handleNativeCommandFlow`, înaintea oricărui cod nou.
+
+**Dovezi reale** (model: `gpt-5-nano`, prin `api.openai.com/v1/chat/completions`, costuri reale
+logate `USAGE_ADD`):
+- Chat liber: „ce faci" → `BRAIN_CALL type=chat ok=true` (5,3s) → bulă + TTS cu răspuns natural.
+- Comandă prin frază liberă → executor existent: „te rog oprește orice melodie cântă acum" →
+  `BRAIN_CALL type=command action=MEDIA_CONTROL ok=true` (9,7s) → reconstruit „oprește muzica" →
+  `NATIVE_ROUTE action=media_ctl target="pause"` (EXACT ruta deterministă din G3) → bulă „Pauză."
+- Context: `conversationHistory` (existent, 10 ture/4000 caractere) alimentează fiecare apel cu
+  istoricul (comenzi + chat), inclusiv rezumate scurte ale acțiunilor executate.
+
+**Limitări reale, demonstrate, raportate onest** (fără a declara PASS necondiționat):
+- **Latență variabilă**: 5,3s–10s pe apel; un apel a picat efectiv la limita de 10s
+  (`BRAIN_ERROR InterruptedIOException`, pentru „ieși de aici" — niciodată clasificat).
+- **Model nano, precizie limitată**: „nu, caută AC/DC" (corecție) a fost clasificat greșit ca
+  `OPEN_APP` în loc de `SEARCH_IN_APP` — limitare reală a modelului ieftin/rapid ales, nu bug de
+  cablaj.
+- **Bug SEPARAT, preexistent, neintrodus azi**: indexul de aplicații (`APP_INDEX count=49`) nu
+  găsește „youtube" sau „calculatorul" (`APP_LAUNCH ok=false reason=not_found`) — afectează
+  IDENTIC calea deterministă și reconstrucția MINA (dovadă indirectă că integrarea reutilizează
+  corect același executor, dar indexul însuși pare incomplet/învechit față de istoricul „274"/„664
+  aplicații" din CLAUDE.md). Nu investigat în această rundă — în afara scopului „creier
+  conversațional".
+
+**Evaluare OpenAI Realtime vs traseul actual** (cerut, doar analiză — NU pornit, zero cost nou):
+Realtime (WebSocket, audio streaming bidirecțional, VAD server-side) ar elimina STT batch separat
+și ar oferi transcript parțial real (rezolvând AC6 din runda trecută) cu latență tipică sub 1s.
+Costul audio-token e documentat substanțial mai mare decât completions text (ordin de mărime,
+nu comparabil cu cei ~0,0003-0,0010 USD/apel observați azi pe `gpt-5-nano` text). Recomandare:
+**rămânem pe traseul actual** (STT batch → `brainTurn` → TTS nativ) — Realtime ar însemna un
+cost recurent nou, netrivial, care cere aprobare explicită separată, neacordată încă.
+
+**Build final**: SHA-256 `134bbddfd86dd238ba702f70ec002cbad91845551e6226e337f68d9fd25bfef6`,
+semnat `CN=BENSON, OU=Dev, O=TOKKO` (verificat — prima citire a coincis cu o scriere încă în curs
+pe disc, re-verificat curat, stabil), instalat, rol ASSISTANT intact, pornire fără crash.
+
+**G3**: 10/10 PASS la rulare curată (o rulare anterioară a arătat 3 FAIL — confirmat flaky de
+timing cunoscut prin rerulare identică, nu regresie din cod).
+
+**Commit local**: `b79fb37` — „[INTEGRATION-2] MINA: apel unic LLM (clasificare+raspuns) + dispatcher catre executori".
+
+**Verdict, conform criteriului cerut explicit** („PASS numai când MINA poate conversa natural ȘI
+poate comanda executorii BENSON în aceeași sesiune"): **PASS PARȚIAL, calibrat**. Conversația
+liberă funcționează demonstrat. Comanda executorilor funcționează demonstrat pentru cel puțin un
+caz complet (control media). Fiabilitatea end-to-end nu e încă la nivel de încredere deplină:
+o latență ocazional peste prag, o eroare de clasificare a modelului ieftin pe o corecție, și un
+bug separat de index aplicații care blochează verificarea vizuală a OPEN_APP/SEARCH_IN_APP azi.
