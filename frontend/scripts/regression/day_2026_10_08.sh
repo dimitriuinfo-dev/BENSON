@@ -123,14 +123,27 @@ fi
 # wait scurtat, pentru fereastră minimă de interferență. Dacă FAIL cu leaked=YES, verifică log-ul
 # manual înainte să tratezi ca regresie reală (poate fi doar cursa asta).
 run_test "WA_CALL_ASK" "suna la $INGRID pe whatsapp" 2 'WA_PARSE.*kind=call'
-run_no_action_test "WA_CALL_NO_ACTION" 4 'SESSION.*close reason=wa_confirm_no' 'WA_INTENT|WA_NATIVE_CALL_VERIFY'
+# FIX_G3_CONTACT_FIXTURE_1 (15.10.2026) — acelasi principiu ca garda de telefon absent: un contact
+# care nu mai exista pe telefon NU e o regresie de produs. Dovedit azi: WA_RESOLVE candidates=0 →
+# "Nu gasesc ingrid in WhatsApp" → nicio confirmare de refuzat → 3 FAIL-uri false, desi lanTul
+# merge perfect cu un contact real (candidates=1 → CONFIRM_RESULT verdict=NO → wa_confirm_no).
+# Setezi alt contact cu INGRID_CONTACT=<nume>. BLOCKED, nu FAIL.
+if grep -qE "WA_RESOLVE.*candidates=0" "$CAPTURE"; then
+  echo "BLOCKED: contactul '$INGRID' nu exista pe telefon (WA_RESOLVE candidates=0)."
+  echo "  seteaza INGRID_CONTACT=<un contact real> si reia; testele WhatsApp se sar."
+  RESULTS+=("BLOCKED|WA_CONTACT_MISSING|contact='$INGRID' candidates=0")
+  WA_FIXTURE_OK=0
+else
+  WA_FIXTURE_OK=1
+fi
+[ "$WA_FIXTURE_OK" = "1" ] && run_no_action_test "WA_CALL_NO_ACTION" 4 'SESSION.*close reason=wa_confirm_no' 'WA_INTENT|WA_NATIVE_CALL_VERIFY'
 
 # 2. WhatsApp video -> Ingrid -> confirmare -> "Nu" -> zero acțiune
-run_test "WA_VIDEO_ASK" "video cu $INGRID" 2 'WA_PARSE.*kind=video'
-run_no_action_test "WA_VIDEO_NO_ACTION" 4 'SESSION.*close reason=wa_confirm_no' 'WA_INTENT|WA_NATIVE_CALL_VERIFY'
+[ "$WA_FIXTURE_OK" = "1" ] && run_test "WA_VIDEO_ASK" "video cu $INGRID" 2 'WA_PARSE.*kind=video'
+[ "$WA_FIXTURE_OK" = "1" ] && run_no_action_test "WA_VIDEO_NO_ACTION" 4 'SESSION.*close reason=wa_confirm_no' 'WA_INTENT|WA_NATIVE_CALL_VERIFY'
 
 # 3. WhatsApp mesaj -> Ingrid -> confirmare -> "Nu" -> zero acțiune
-run_test "WA_MESSAGE_ASK" "scrie-i lui $INGRID ca ajung tarziu" 2 'WA_PARSE.*kind=message'
+[ "$WA_FIXTURE_OK" = "1" ] && run_test "WA_MESSAGE_ASK" "scrie-i lui $INGRID ca ajung tarziu" 2 'WA_PARSE.*kind=message'
 # FIX_HARNESS_WA_MESSAGE_WAIT_1 (14.10.2026) — TESTUL era gresit, nu produsul. Spre deosebire de
 # apel/video (care intreaba IMEDIAT), mesajul scrie intai draftul VIZIBIL in WhatsApp si abia apoi
 # intreaba "Trimit?" — comportament DOVEDIT si intentionat (CLAUDE.md, RUNDA WA_VISIBLE_DRAFT,
@@ -151,7 +164,7 @@ wait_for_log() { # $1 = pattern, $2 = secunde maxim (definit devreme: folosit si
   return 1
 }
 wait_for_log 'TTS_NATIVE_REQUEST.*Mesaj c|WA_ASK|Dorești să-l trimit' 12 || sleep 4
-run_no_action_test "WA_MESSAGE_NO_ACTION" 5 'SESSION.*close reason=wa_confirm_no' 'WA_WRITE_SENT_VERIFIED|WA_INTENT'
+[ "$WA_FIXTURE_OK" = "1" ] && run_no_action_test "WA_MESSAGE_NO_ACTION" 5 'SESSION.*close reason=wa_confirm_no' 'WA_WRITE_SENT_VERIFIED|WA_INTENT'
 
 # 4. YouTube caută + pornește (confirmă "da") + oprește. yt search leaves a play CONFIRMATION
 #    pending ("Îl pornesc?") — "opreste" immediately after would be read as declining to play

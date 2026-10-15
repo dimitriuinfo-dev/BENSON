@@ -429,6 +429,17 @@ class BensonForegroundService : Service() {
           mainHandler.postDelayed({ startFollowUpCapture() }, E0_TTS_TAIL_SETTLE_MS)
         }
       }
+      // FIX_TTS_STOP_STATE_1 (15.10.2026) - BUG DOVEDIT DIN CONTRACTUL API: TextToSpeech.stop() NU
+      // cheama onDone, ci onStop (implementare implicita goala). Deci dupa orice intrerupere
+      // (tryInterrupt apela deja nativeTts.stop()) ttsSpeakingSince ramanea != 0 PERMANENT, iar
+      // SelfTtsGuard.isWithinGuard intoarce true necondiTionat in acel caz, deci fiecare "Benson"
+      // de dupa era aruncat cu WAKE_IGNORED reason=self_tts. Fara acest override, "taci" ar fi
+      // omorat wake-ul pana la urmatoarea rostire dusa pana la capat. Revert: sterge override-ul.
+      override fun onStop(utteranceId: String?, interrupted: Boolean) {
+        ttsSpeakingSince = 0L
+        ttsLastDoneAt = System.currentTimeMillis()
+        AudioDiag.log(this@BensonForegroundService, "TTS_STOPPED", "utteranceId=$utteranceId interrupted=$interrupted")
+      }
       @Deprecated("Deprecated in Java")
       override fun onError(utteranceId: String?) {
         ttsSpeakingSince = 0L
@@ -1027,6 +1038,30 @@ class BensonForegroundService : Service() {
       // 11:44:11, same signature as the first incident. Checked before anything else: no
       // WAKE_SCORE log, no verify call, no rearm-refusal noise.
       if (SelfTtsGuard.isWithinGuard(triggeredAtMs, ttsSpeakingSince, ttsLastDoneAt)) {
+        // FIX_SHUTUP_WHILE_SPEAKING_1 (15.10.2026) - CAUZA DOVEDITA a reclamatiei "taci nu merge":
+        // vocabularul de intrerupere EXISTA deja (INTERRUPT_PATTERN contine "taci"), dar cat timp
+        // BENSON vorbeste, ACEASTA linie arunca orice detectie wake (WAKE_IGNORED reason=self_tts),
+        // deci "Benson, taci!" nu ajungea NICIODATA nici la STT, nici la tryInterrupt. Singura cale
+        // de oprire era sa astepti sa termine de vorbit.
+        //
+        // Nu atingem pragul HEED, nici SelfTtsGuard.GUARD_MS, nici ack-ul (parametri protejati):
+        // drumul normal de wake ramane neschimbat - detectia e tot IGNORATA pentru deschiderea unei
+        // sesiuni. Alaturi, un singur drum strict pentru tacere: clipul deja capturat de HEED se
+        // transcrie cu verificatorul EXISTENT (wakeVerifyTranscribe) si, DOAR daca textul real
+        // contine un cuvant de tacere si NU e ecoul vocii proprii (isSelfEchoText, existent),
+        // taiem vocea. Nicio decizie pe scor - altfel BENSON s-ar taia singur in mijlocul
+        // propriului raspuns (exact motivul pentru care garda exista).
+        // Revert: SHUTUP_WHILE_SPEAKING = false.
+        if (SHUTUP_WHILE_SPEAKING && ttsSpeakingSince != 0L && wavPath.isNotEmpty()) {
+          Thread({
+            val (txt, _, clipMs) = wakeVerifyTranscribe(wavPath)
+            val norm = normalizeForMatch(txt ?: "")
+            val isEcho = if (txt.isNullOrBlank()) false else isSelfEchoText(txt).first
+            val hit = !isEcho && SHUTUP_PATTERN.containsMatchIn(norm)
+            AudioDiag.log(this, "SHUTUP_CHECK", "text=\"${txt ?: ""}\" echo=$isEcho hit=$hit clipMs=$clipMs")
+            if (hit) mainHandler.post { silenceNow("barge_in") }
+          }, "benson-shutup").start()
+        }
         AudioDiag.log(this, "WAKE_IGNORED", "reason=self_tts score=${"%.3f".format(score)}")
         rearmWakeNative("self_tts_guard")
         return@post
@@ -1959,12 +1994,43 @@ class BensonForegroundService : Service() {
       "nu mai vorbi|taci din gura|taci din gură)$"
   )
 
+  // FIX_SHUTUP_WHILE_SPEAKING_1 - cuvinte care cer TACERE, nu anularea unei sarcini. Pentru ele
+  // BENSON nu mai raspunde "Am oprit." cu voce (era contradictoriu: i se cerea sa taca si vorbea),
+  // doar taie vocea si arata in bula. Nu e ancorat ^...$: fraza vine lipita de wake word
+  // ("benson taci"), deci se caută si in interiorul transcriptului de verificare.
+  private val SHUTUP_WHILE_SPEAKING = true
+  private val SHUTUP_PATTERN = Regex("""(?:\btaci\b|\bgata\b|\bdestul\b|\bajunge\b|\bmute\b|\bliniste\b|nu mai vorbi|opreste-te|lasa asta|\bstop\b)""")
+
+  /** Taiere imediata a vocii + curatare, fara nicio rostire. Folosit de "taci" si de barge-in. */
+  private fun silenceNow(reason: String) {
+    cancelAgentNow()
+    pendingResultChoice = null
+    pendingAppOpen = null
+    pendingNav = null
+    pendingYoutubePlay = null
+    pendingAppSearch = null
+    pendingWaAction = null
+    pendingWaDisambiguation = null
+    pendingControlAction = null
+    try { nativeTts?.stop() } catch (_: Exception) {}
+    ttsSpeakingSince = 0L
+    ttsLastDoneAt = System.currentTimeMillis()
+    AudioDiag.log(this, "INTERRUPT", "reason=$reason silent=true agent_cancelled=true pendings_cleared=true")
+    updateBubbleNative("Tac.", "taci", terminal = true, dismissDelayMs = 1500L)
+    closeSession(reason)
+    setMicOwner("NONE", reason)
+    hideWakeRingNative()
+    rearmWakeNative(reason)
+  }
+
   @Volatile private var agentRunId = 0
 
   private fun tryInterrupt(command: String): Boolean {
     if (!INTERRUPT_ENABLED) return false
-    if (!INTERRUPT_PATTERN.matches(normalizeForMatch(command))) return false
+    val normCmd = normalizeForMatch(command)
+    if (!INTERRUPT_PATTERN.matches(normCmd)) return false
     logRoute("NATIVE_ROUTE", "action=interrupt")
+    if (SHUTUP_PATTERN.containsMatchIn(normCmd)) { silenceNow("shutup"); return true }
     // 1. Agentul in curs devine invalid: bucla lui vede alt runId si se opreste la pasul urmator.
     // P0 — anulare COMPLETA: invalideaza rularea SI taie apelul HTTP in zbor (Call.cancel()).
     // Fara taierea apelului, rularea ramanea blocata ~22 s in OkHttp si putea vorbi dupa aceea.
@@ -4377,6 +4443,9 @@ class BensonForegroundService : Service() {
           put(JSONObject().apply { put("role", turn.role); put("content", turn.text) })
         }
         put(JSONObject().apply { put("role", "user"); put("content", command) })
+        // FIX_ANSWER_LENGTH_3 — directiva de lungime, ULTIMUL mesaj, cu plafon numeric. Nu taie
+        // nimic (interdictie explicita a Masterului); doar ii spune modelului cat sa scrie.
+        put(JSONObject().apply { put("role", "system"); put("content", BensonAgentTools.lengthDirective(command)) })
       }
       // FIX_INTERRUPT_1 — fiecare rulare isi ia un numar; "stop" incrementeaza agentRunId, deci
       // bucla vede ca nu mai e a ei si se opreste la pasul urmator. Fara Thread.stop (interzis),
