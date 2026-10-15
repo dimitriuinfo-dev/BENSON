@@ -537,12 +537,38 @@ class BensonBubbleService : Service() {
       // orice fundal), etichetă de stare în MAJUSCULE gold, transcriere în alb.
       val shadowRadius = 5f * density
       val shadowDy = 2f * density
+      // FIX_BUBBLE_STATE_SCROLL_1 (15.10.2026) — CAUZA DOVEDITA a plangerii „text galben enorm,
+      // suprapus peste WhatsApp": `transcriptTv` (ce spune Masterul) avea de la inceput
+      // maxLines=2 + ellipsize + maxWidth 85%, dar `stateTv` (ce RASPUNDE BENSON) nu avea NICIO
+      // limita. Pana acum bula arata doar fraze scurte ("Deschid Calculatorul."), deci limita nu
+      // lipsise niciodata; raspunsurile lungi de conversatie, introduse de mine, cresc necontrolat.
+      // Ordinul Masterului: limiteaza, dar PASTREAZA textul integral, accesibil prin derulare —
+      // deci NU folosim ellipsize aici (ar sterge definitiv continutul).
+      // Culoarea aurie, fontul, grosimea, umbra, forma si pozitia rămân EXACT cum erau.
+      // Revert: scoate maxWidth de mai jos si adauga stateTv direct in container (fara ScrollView).
       val stateTv = TextView(this).apply {
         setTextColor(Color.parseColor("#F2C94C")) // gold ceva mai deschis pentru contrast
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
         typeface = Typeface.DEFAULT_BOLD
         includeFontPadding = false
+        maxWidth = (resources.displayMetrics.widthPixels * 0.85f).toInt() - (2 * 16 * density).toInt()
         setShadowLayer(shadowRadius, 0f, shadowDy, Color.parseColor("#CC000000"))
+      }
+      // Inaltime plafonata la 35% din ecran: raspunsul lung devine derulabil, iar aplicatia de
+      // dedesubt rămâne vizibila si utilizabila (cerinta 6 din ordin).
+      val stateScroll = object : android.widget.ScrollView(this) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+          val maxH = (resources.displayMetrics.heightPixels * 0.35f).toInt()
+          super.onMeasure(
+            widthMeasureSpec,
+            MeasureSpec.makeMeasureSpec(maxH, MeasureSpec.AT_MOST),
+          )
+        }
+      }.apply {
+        isVerticalScrollBarEnabled = true
+        isFillViewport = false
+        overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        addView(stateTv)
       }
       val transcriptTv = TextView(this).apply {
         setTextColor(Color.WHITE)
@@ -572,7 +598,7 @@ class BensonBubbleService : Service() {
           cornerRadius = 20 * density
           setColor(Color.parseColor("#8C1E2B38")) // ~55% opac
         }
-        addView(stateTv)
+        addView(stateScroll) // FIX_BUBBLE_STATE_SCROLL_1 — stateTv e acum înăuntru, derulabil
         addView(transcriptTv)
         addView(MicLevelBarView(this@BensonBubbleService).apply {
           visibility = View.GONE

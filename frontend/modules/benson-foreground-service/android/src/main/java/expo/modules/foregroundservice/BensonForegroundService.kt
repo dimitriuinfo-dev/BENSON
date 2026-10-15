@@ -4034,6 +4034,8 @@ class BensonForegroundService : Service() {
   // confirmare (pendingWaAction), raspunsul YES/NO al utilizatorului e interceptat normal la
   // inceputul handleNativeCommandFlow, inainte sa ajunga vreodata aici.
   private val conversationHistory = ConversationHistory()
+  // FIX_HISTORY_SEPARATION_1 — jurnal de actiuni, SEPARAT de dialog; nu pleaca spre model.
+  private val actionHistory = ActionHistory()
   // FIX_BRAIN_TIMEOUT_1 (14.10.2026) — cauza dovedita pe telefon, nu presupusa. Cele trei
   // BRAIN_CALL de azi: ms=8014 ok=true, ms=10002 ok=false, ms=10005 ok=false, ambele esecuri cu
   // BRAIN_ERROR type=InterruptedIOException, adica exact acest callTimeout. gpt-5-nano cu
@@ -4522,10 +4524,32 @@ class BensonForegroundService : Service() {
     }
   }
 
+  // FIX_AGENT_SPEAKS_1 (15.10.2026) — CAUZA DOVEDITA a plangerii „eu vreau un chat bot cu care sa
+  // vorbesc, nu text". In testul de conversatie de 5 replici: agentul chema `say` de fiecare data,
+  // raspunsul aparea in bula, dar in log **nu exista NICIO linie TTS_SPEAK** — BENSON scria, nu
+  // vorbea. Motivul: functia asta actualiza DOAR bula si nu chema niciodata `speak()`.
+  // Comenzile deterministe pareau sa vorbeasca pentru ca ele trec prin alt drum
+  // (`response != null` din handleNativeCommandFlow), care roste separat.
+  // Acelasi defect facea mute si confirmarea de navigatie si alegerea din lista de rezultate.
+  // Reutilizam `speak()` existent — zero modificare in TTS, doar il chemam de unde lipsea.
+  // Revert: scoate linia `speak(...)`.
+  // FIX_NO_OPEN_SESSION_AFTER_ANSWER_1 (15.10.2026) — cerinta Masterului: „o sesiune activă nu
+  // trebuie să rămână deschisă la nesfârșit după ce BENSON ți-a răspuns. Altfel, televizorul poate
+  // fi interpretat ca următoarea ta replică." + „Îl chemi, discuți, execută, apoi TACE. Nu se bagă
+  // niciodată singur în discuție." (doctrina 5: tăcerea e implicită).
+  // Codul deschidea o sesiune de 8 s DUPA fiecare raspuns, deci BENSON rămânea „pe receptie"
+  // nechemat. Acum sesiunea se deschide DOAR cand BENSON a pus o INTREBARE si chiar asteapta
+  // raspuns (`hasAnyPendingNativeState()`); dupa un raspuns final se intoarce direct la wake.
+  // Revert: `openSession("native_cmd_executed", mayDuck = true)` neconditionat.
   private fun finishBrainCommandSuccess(resp: String, originalCommand: String, rearmReason: String) {
-    openSession("native_cmd_executed", mayDuck = true)
+    if (hasAnyPendingNativeState()) {
+      openSession("native_cmd_executed", mayDuck = true)
+    } else {
+      AudioDiag.log(this, "SESSION", "not_opened reason=final_answer_benson_stays_silent")
+    }
     setMicOwner("NONE", "native_cmd_executed")
     updateBubbleNative(resp, originalCommand, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+    if (resp.isNotBlank()) speak(resp, "chat")
     hideWakeRingNative()
     rearmWakeNative(rearmReason)
   }
@@ -4533,7 +4557,11 @@ class BensonForegroundService : Service() {
   // Fiecare ramură reutilizează exact funcția nativă deja existentă (vezi comentariul de mai sus);
   // zero logică de execuție nouă aici, doar reconstrucție de frază + rutare spre ea.
   private fun executeBrainCommand(action: String?, result: JSONObject, originalCommand: String): Boolean {
-    fun remember(note: String) { conversationHistory.add("user", originalCommand); conversationHistory.add("assistant", note) }
+    // FIX_HISTORY_SEPARATION_1 — notele de ACȚIUNE nu mai intră în conversație. Înainte scriau
+    // `[Am deschis X]` ca replică de ASISTENT, iar modelul le citea ca spuse Masterului; combinat
+    // cu istoricul care nu se golea niciodată, de aici venea amestecul Waze/Maps/radio într-un
+    // răspuns despre automobile. Vezi ActionHistory.kt pentru dovada completă.
+    fun remember(note: String) { actionHistory.add(note) }
     return when (action) {
       "BACK" -> {
         val ok = expo.modules.accessibility.BensonAccessibilityService.instance?.goBack() ?: false
