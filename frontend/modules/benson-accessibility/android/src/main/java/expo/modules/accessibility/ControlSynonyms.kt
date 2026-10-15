@@ -32,7 +32,13 @@ object ControlSynonyms {
     // "înainte/înapoi 10 secunde" — seek, nu schimbare de piesă. Distinct de next/prev.
     "seek_forward" to listOf("inainte 10 secunde", "înainte 10 secunde", "sari inainte", "sari înainte"),
     "seek_back" to listOf("inapoi 10 secunde", "înapoi 10 secunde", "sari inapoi", "sari înapoi"),
-    "search" to listOf("cauta", "caută", "cautare", "căutare", "search", "suchen", "lupa", "lupă", "magnifier"),
+    // FIX_SEARCH_VOCAB_1 (14.10.2026) — "suche" (substantiv, forma folosita de Amazon/Play DE) NU
+    // se potrivea: matcher-ul face `contains`, iar "Suche".contains("suchen") e false. Plus formele
+    // de bara explicite cerute de Master.
+    "search" to listOf(
+      "cauta", "caută", "cautare", "căutare", "search", "suchen", "suche", "suchleiste",
+      "lupa", "lupă", "magnifier", "search bar", "searchbar", "bara de cautare", "bara de căutare",
+    ),
     "close" to listOf("inchide", "închide", "schließen"),
     "back" to listOf("inapoi", "înapoi", "navigate up"),
     "menu" to listOf("meniu", "mai multe optiuni", "mai multe opțiuni", "more options"),

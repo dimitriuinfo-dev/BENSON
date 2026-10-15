@@ -17,6 +17,16 @@ object SearchResultNoiseFilter {
     // exact same collision class the proven TS code solved for the Add/Save button
     // ("hinzugefügt") — same fix, new observed German phrasing for this button specifically.
     "mehr optionen", "weitere optionen", "more options for", "opțiuni pentru",
+    // CONFIRMAT LIVE (2026-10-14, 15:12:47) — pe o pagina de rezultate Google, primul element
+    // clickabil cu eticheta lunga era linkul de informatii despre reclama
+    // ("Warum sehe ich diese Werbung?"), iar BENSON l-a apasat in loc de primul rezultat real.
+    // Se adauga exact in spiritul comentariului de mai sus: eticheta observata pe dispozitiv +
+    // formele echivalente de dezvaluire a reclamei si de consimtamant, care sunt aceeasi capcana
+    // „primul element clickabil de pe o pagina web".
+    "warum sehe ich diese werbung", "warum diese werbung", "why this ad", "why am i seeing this ad",
+    "de ce vad aceasta reclama", "de ce văd această reclamă",
+    "gesponsert", "sponsored", "anzeige", "werbung melden",
+    "alle akzeptieren", "accept all", "alle ablehnen", "reject all", "cookies akzeptieren",
   )
 
   private val EXACT_LABEL_NOISE = setOf(

@@ -48,3 +48,22 @@ implementează pe loc. Fără dată de livrare — se reconsideră abia după ce
 - Extragerea „pe/în <aplicație>" (AppMentionStripper) — implementată, dar a introdus o regresie
   reală azi („caută Madonna pe YouTube" interceptat greșit de fluxul nou YouTube cu confirmare,
   în loc de drumul vechi `yt_search`); de reconciliat când se reia capacitatea 3 din lista de 10.
+- **PASUL 1 / DIGITAL STAFF REGISTRY — APP_CAPABILITY_REGISTRY** (cerut 14.10.2026, marcat „P0"
+  de solicitant): `PackageManager` inventariază toate aplicațiile vizibile (cu atenție la
+  restricțiile de package visibility Android 11+), înregistrează persistent per aplicație
+  packageName/nume/versiune/categorie/launcher/activități-intents accesibile/funcții
+  cunoscute-descoperite-verificate/restricții; legătură cu MINA pentru deschidere + inspecție
+  controlată a interfeței + clasificare acțiuni + verificare rezultat + reidentificare după
+  schimbare de ecran (nimic static); instrumente noi expuse creierului conversațional
+  (`list_available_apps`, `find_app_by_purpose`, `get_app_capabilities`, `open_app`,
+  `inspect_current_screen`, `perform_ui_action`, `verify_action_result`); explicit exclude
+  explorarea automată a conturilor/mesajelor/plăților/cumpărăturilor/acțiunilor ireversibile;
+  integrare cu Dispatcher + AccessibilityService existente, fără a modifica executorii validați
+  fără motiv demonstrat. Teste cerute: „Ce aplicații de navigație am?", „Cu ce pot face
+  cumpărături?", „Deschide Amazon Shopping.", „Ce poți face în Amazon?", „Deschide aplicația
+  potrivită pentru a ajunge la aeroport." — răspunsuri din inventarul real, nu din presupuneri.
+  **Neimplementat**: în afara listei închise BENSON 1.0 (niciunul din cele 10 nu cere un registry
+  persistent de capabilități) ȘI atinge poarta roșie G5(b) („dependență nativă nouă sau
+  `modules/**` nouă") — ambele cer decizia explicită a lui Rareș, numită per rundă, nu o pornire
+  din oficiu. Reconsiderat abia după ce lista de 10 e toată verde (azi, 14.10: 9/10 verzi, 1 roșu
+  — „deschide calculatorul", cf. `PLAN_REPORT_2026-10-14.md`).

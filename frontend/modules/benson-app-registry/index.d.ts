@@ -5,7 +5,13 @@ export interface InstalledApp {
   icon: string;
 }
 
-export function getInstalledApps(): Promise<InstalledApp[]>;
+// FIX_APPINDEX_ICON_COST_1 (13.10.2026, demonstrat) — includeIcons=false sare peste randarea +
+// codificarea Base64 a iconitei pentru fiecare pachet (scump pe ~660 aplicatii).
+// CORECTIE 14.10.2026: indexul trunchiat la 49 NU era cauzat de iconita, ci de lipsa blocului
+// <queries> MAIN+LAUNCHER din APK-ul instalat (vizibilitate Android 11+). Doar optimizare.
+// Foloseste includeIcons=false pentru potrivirea vocala (lib/appIndex.ts), unde iconul oricum nu e consumat. AppPermissionsModal (care AFISEAZA
+// iconul) trebuie sa treaca true.
+export function getInstalledApps(includeIcons: boolean): Promise<InstalledApp[]>;
 
 /** Launches an installed app by package name. Returns false if the package isn't found/launchable. */
 export function launchApp(packageName: string): boolean;

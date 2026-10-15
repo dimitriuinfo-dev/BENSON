@@ -91,7 +91,13 @@ export async function loadAppIndex(force = false, reason: 'warm' | 'lazy' = 'laz
   const startedAt = Date.now();
   inFlight = (async () => {
     try {
-      const raw = await getInstalledApps();
+      // FIX_APPINDEX_ICON_COST_1 (13.10.2026) — false: niciun consumator aici păstrează icon
+      // (vezi map-ul de mai jos), deci randarea + Base64 pe ~660 pachete e munca aruncata.
+      // CORECTIE 14.10.2026 (dovedit cu aapt2 pe APK-uri, vezi DAY_REPORT): costul iconitei NU
+      // era cauza lui count=49. Cauza reala: APK-ul INSTALAT nu avea blocul <queries>
+      // MAIN+LAUNCHER (filtrare de vizibilitate Android 11+), desi manifestul sursa il are.
+      // Asta ramane doar o optimizare de viteza, nu fixul regresiei.
+      const raw = await getInstalledApps(false);
       const list: IndexedApp[] = (Array.isArray(raw) ? raw : [])
         .map((a: { packageName?: unknown; appName?: unknown }) => ({
           packageName: String(a?.packageName ?? ''),

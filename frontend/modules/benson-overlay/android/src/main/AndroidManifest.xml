@@ -5,5 +5,20 @@
     <service
       android:name=".BensonBubbleService"
       android:exported="false" />
+    <!-- IDENTITATEA VIZUALA BENSON, punctul 5 — activitate showWhenLocked pentru logoul animat si
+         starea generala pe ecranul blocat. Declarata AICI, in manifestul modulului (se face merge
+         automat), ca sa NU atingem android/app/src/main/AndroidManifest.xml, care e fisier
+         protejat si negenerabil fara `expo prebuild` (interzis).
+         exported=false: o porneste doar BENSON. excludeFromRecents + noHistory: nu rămâne in
+         istoricul de aplicatii si nu reapare dupa deblocare. NU ocoleste keyguard-ul. -->
+    <activity
+      android:name=".BensonLockscreenActivity"
+      android:exported="false"
+      android:showOnLockScreen="true"
+      android:excludeFromRecents="true"
+      android:noHistory="true"
+      android:launchMode="singleTop"
+      android:screenOrientation="portrait"
+      android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
   </application>
 </manifest>

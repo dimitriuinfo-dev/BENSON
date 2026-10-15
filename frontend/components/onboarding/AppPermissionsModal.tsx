@@ -21,7 +21,7 @@ export function AppPermissionsModal({ visible, onClose }: { visible: boolean; on
     let cancelled = false;
     setLoading(true);
     (async () => {
-      const [installed, saved] = await Promise.all([getInstalledApps(), loadAppPermissions()]);
+      const [installed, saved] = await Promise.all([getInstalledApps(true), loadAppPermissions()]);
       if (cancelled) return;
       const savedByPkg = new Map(saved.map(a => [a.packageName, a.allowed]));
       const merged: AppPermission[] = installed.map((app: InstalledApp) => ({

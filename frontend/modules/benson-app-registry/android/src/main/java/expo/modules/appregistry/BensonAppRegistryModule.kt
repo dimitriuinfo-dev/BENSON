@@ -50,7 +50,14 @@ class BensonAppRegistryModule : Module() {
       onPipModeChanged = null
     }
 
-    AsyncFunction("getInstalledApps") {
+    // FIX_APPINDEX_ICON_COST_1 (13.10.2026, demonstrat live: indexul vocal returna count=49 fata
+    // de ~660 pachete reale instalate, confirmat separat prin "pm list packages"/"query-activities"
+    // pe dispozitiv). Randarea+codificarea Base64 a iconitei pentru fiecare din ~660 pachete e
+    // munca reala, costisitoare, ARUNCATA complet pe urmatorul drum (lib/appIndex.ts nu pastreaza
+    // niciodata campul icon — doar packageName/appName) — singurul consumator real al iconului e
+    // AppPermissionsModal.tsx. includeIcons=false sare peste tot acel cost pe drumul de potrivire
+    // vocala. Revert: elimina parametrul, reintroduce iconToBase64 neconditionat.
+    AsyncFunction("getInstalledApps") { includeIcons: Boolean ->
       val context = appContext.reactContext ?: return@AsyncFunction emptyList<Map<String, Any?>>()
       val pm = context.packageManager
       val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -63,7 +70,7 @@ class BensonAppRegistryModule : Module() {
           mapOf(
             "packageName" to ri.activityInfo.packageName,
             "appName" to ri.loadLabel(pm).toString(),
-            "icon" to iconToBase64(ri.loadIcon(pm)),
+            "icon" to if (includeIcons) iconToBase64(ri.loadIcon(pm)) else "",
           )
         }
         .sortedBy { (it["appName"] as String).lowercase() }

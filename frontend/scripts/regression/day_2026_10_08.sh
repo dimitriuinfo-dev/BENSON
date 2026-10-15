@@ -89,9 +89,32 @@ run_no_action_test() {
   fi
 }
 
+# P3 (15.10.2026) — GARDĂ DE VALIDITATE. Dovedit azi de două ori: când telefonul se deconectează
+# de pe USB, `adb logcat` scrie doar "- waiting for device -", nicio injecție nu ajunge, iar suita
+# raporta senin **10 din 10 FAIL** — adică acuza produsul pentru un cablu. Exact genul de „eșec
+# repetat" pe care Masterul a cerut să-l lămuresc înainte de a declara testul stabil.
+# O suită care nu poate rula trebuie să spună BLOCKED, nu FAIL.
+if ! "$ADB" devices 2>/dev/null | grep -q "device$"; then
+  echo "BLOCKED: niciun telefon conectat (adb devices gol). Suita NU a rulat."
+  echo "BLOCKED|DEVICE_ABSENT|suita nu a rulat" > "$LOGFILE"
+  exit 2
+fi
+
 START_TS=$(date +%s)
 start_capture
 debug_inject_enable true
+
+# Verificăm că injecția chiar ajunge la aplicație înainte de a interpreta vreun rezultat.
+# Fără asta, o aplicație care tocmai repornește (după `adb install`) produce FAIL-uri false.
+if ! grep -qE "DEBUG_INJECT.*action=set_enabled value=true" "$CAPTURE"; then
+  sleep 3
+  debug_inject_enable true
+  if ! grep -qE "DEBUG_INJECT.*action=set_enabled value=true" "$CAPTURE"; then
+    echo "BLOCKED: aplicația nu răspunde la DEBUG_INJECT (pornește încă?). Suita NU a rulat."
+    echo "BLOCKED|APP_NOT_READY|suita nu a rulat" > "$LOGFILE"
+    stop_capture; exit 2
+  fi
+fi
 
 # 1. WhatsApp apel -> Ingrid -> confirmare -> "Nu" -> zero acțiune
 # NOTĂ: ferestrele astea sunt vulnerabile la o buclă de self-echo observată azi (BENSON își aude
@@ -108,13 +131,36 @@ run_no_action_test "WA_VIDEO_NO_ACTION" 4 'SESSION.*close reason=wa_confirm_no' 
 
 # 3. WhatsApp mesaj -> Ingrid -> confirmare -> "Nu" -> zero acțiune
 run_test "WA_MESSAGE_ASK" "scrie-i lui $INGRID ca ajung tarziu" 2 'WA_PARSE.*kind=message'
-run_no_action_test "WA_MESSAGE_NO_ACTION" 4 'SESSION.*close reason=wa_confirm_no' 'WA_WRITE_SENT_VERIFIED|WA_INTENT'
+# FIX_HARNESS_WA_MESSAGE_WAIT_1 (14.10.2026) — TESTUL era gresit, nu produsul. Spre deosebire de
+# apel/video (care intreaba IMEDIAT), mesajul scrie intai draftul VIZIBIL in WhatsApp si abia apoi
+# intreaba "Trimit?" — comportament DOVEDIT si intentionat (CLAUDE.md, RUNDA WA_VISIBLE_DRAFT,
+# 03.10: "draftul se scrie ÎNAINTE de «Trimit?», nu după «da»"). Dovada din log, 17:15:
+#   21.246 WA_WRITE_DEEPLINK_START -> 22.226 TARGET_REACQUIRE_OK elapsedMs=918 -> 23.430 inject "nu"
+# „nu" ajungea inainte sa existe intrebarea, deci nu avea ce confirma. Verificat ca NU e cauzat de
+# FIX_TREE_CAP_1: cu TREE_CAP_RAISED=false (plafon 400, ca inainte) testul cade identic.
+# `leaked=no` in toate rulatile — zero mesaje trimise, siguranta a tinut mereu.
+# P3 (15.10.2026) — fereastra FIXA inlocuita cu asteptare pe CONDITIE: asteptam pana cand
+# intrebarea de confirmare chiar exista in log, apoi raspundem. Un `sleep` fix era fie prea scurt
+# (draftul WhatsApp inca se scria -> "nu" ajungea inaintea intrebarii -> FAIL), fie inutil de lung.
+wait_for_log() { # $1 = pattern, $2 = secunde maxim (definit devreme: folosit si de YT, si de WA)
+  local i=0
+  while [ "$i" -lt "$2" ]; do
+    grep -qE "$1" "$CAPTURE" && return 0
+    sleep 1; i=$((i + 1))
+  done
+  return 1
+}
+wait_for_log 'TTS_NATIVE_REQUEST.*Mesaj c|WA_ASK|Dorești să-l trimit' 12 || sleep 4
+run_no_action_test "WA_MESSAGE_NO_ACTION" 5 'SESSION.*close reason=wa_confirm_no' 'WA_WRITE_SENT_VERIFIED|WA_INTENT'
 
 # 4. YouTube caută + pornește (confirmă "da") + oprește. yt search leaves a play CONFIRMATION
 #    pending ("Îl pornesc?") — "opreste" immediately after would be read as declining to play
 #    (opreste IS a NO_WORD), not as a pause command. Resolve it with "da" first.
 run_test "YT_SEARCH" "cauta madonna pe youtube" 3 'NATIVE_ROUTE.*action=youtube_search_confirm target="madonna"'
-run_test "YT_PLAY_CONFIRM" "da" 5 'CONFIRM_RESULT.*verdict=YES'
+# P3 — a treia fereastră fixă eliminată. Dovada (21:40): „da" era injectat la +3,3 s, dar căutarea
+# pe ecran se încheie abia la +6 s; „da" nu avea ce confirma și cădea la agent. Așteptăm întrebarea.
+wait_for_log 'YOUTUBE_SEARCH_CONFIRM.*found=true|Îl pornesc' 12 || true
+run_test "YT_PLAY_CONFIRM" "da" 6 'CONFIRM_RESULT.*verdict=YES'
 run_test "YT_STOP" "opreste muzica" 5 'NATIVE_ROUTE.*action=media_ctl target="pause"'
 
 # 5. "oprește muzica" de sine stătător

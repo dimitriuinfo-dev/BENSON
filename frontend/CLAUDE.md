@@ -30,6 +30,48 @@ branch `day-2026-10-08`. Ordinea: G → D0 → P4 → P5 → V → A → H → F
 - **G7** Diagnostic din log înainte de cod; fiecare fix citează linia de log.
 - **G8** `DAY_REPORT_2026-10-08.md` scris pe parcurs.
 
+## SANTINELA — inginer automat de mentenanță (14.10.2026, decizia utilizatorului, permanentă)
+
+Zilnic la 07:00, fără Rareș, pornit din Windows Task Scheduler: `scripts\santinela.bat` lansează
+Claude Code headless cu promptul din `scripts\santinela_prompt.md`. Spec completă, cu istoricul
+deciziei (versiunea inițială „doar testează" + revizia „autonomous repair"):
+`docs/specs/SANTINELA_2026-10-14.md`.
+
+**Autoritate** (revizia 14.10.2026): testează, diagnostichează, REPARĂ, verifică și informează
+autonom — fără să ceară aprobare pentru fiecare schimbare obișnuită. PASS → păstrează + commit
+local. FAIL → revine doar la propriile modificări din rulare. Nu rescrie funcții deja validate.
+
+**Ce rămâne neschimbat, chiar sub autoritatea de reparare** (nimic din revizia 14.10 anulează
+G5/G6 de mai sus sau secțiunea „Fișiere protejate" de mai jos — sunt în continuare absolute):
+- **Fișierele protejate rămân protejate**, inclusiv `HeedWakeWord.kt` și blocul wake/ack din
+  `BensonForegroundService.kt` — SANTINELA nu le atinge NICIODATĂ, autonom sau nu.
+- **Nicio instalare automată de APK** pe telefon fără backup+rollback verificat și autorizare
+  separată. Compilarea (`gradlew assembleRelease`) e permisă; `adb install` nu.
+- **Fără `git push`**, fără `git reset --hard`/`git clean` pe muncă existentă, fără `expo
+  prebuild`, fără dezactivarea ConfirmationGate, fără acțiuni reale pe telefon (confirmările
+  injectate rămân mereu „Nu").
+- Modificări arhitecturale majore / servicii plătite noi / chei-secrete → raport + aprobare
+  explicită, niciodată autonom.
+- Dacă telefonul e absent sau blocat la 07:00: verificările offline continuă, testele pe
+  dispozitiv se marchează BLOCKED, fără ocolire. Durata maximă: 20 min — dacă o reparare nu
+  încape, salvează diagnosticul, NU pretinde că a terminat.
+
+**Izolare**: reparările rulează într-un worktree/ramură separată de `day-2026-10-08` (niciodată
+direct pe ramura activă a unei sesiuni interactive) — pentru fix-uri JS/TS, un worktree git curat
+e suficient (fără `android/`, care e `.gitignore`d și nu se poate regenera fără `expo prebuild`,
+interzis). Pentru fix-uri Kotlin/native care cer `gradlew`, izolarea completă nu e posibilă fără
+prebuild — SANTINELA verifică `git status` înainte de a începe, pune la o parte (`git stash`, cu
+mesaj clar) orice muncă necomisă care nu e a ei, lucrează, și restaurează starea găsită dacă
+reparația nu reușește.
+
+- Raportul zilnic: `docs/santinela/SANTINELA_<AAAA-LL-ZZ>.md`, maximum 40 de rânduri, actualizează
+  `docs/HARTA_BENSON.md` cu aceleași stări.
+- `docs/HARTA_BENSON.md` e harta vie a celor 12 agenți (lista de 10 din BENSON 1.0 + VOCEA ȘI
+  CREIERUL + PERSONALUL) — sursa de adevăr pentru „ce e verde azi", citită de orice rundă nouă
+  înainte de a decide ce se lucrează.
+- Activarea sarcinii din Task Scheduler rămâne manuală, confirmată de Rareș după o rulare de probă
+  reușită — nu se auto-activează.
+
 ## BENSON 1.0 — lista închisă (04.10.2026, decizia Rareș, permanentă)
 
 Nimic din afara acestei liste de 10 nu se lucrează până nu e toată verde. Orice cerere în afara
@@ -85,6 +127,128 @@ git (fără push, fără reset, fără checkout, fără tag-uri).
    se rostește/arată pe baza unui click reușit sau a unui apel API fără eroare — succesul se
    declară abia după ce efectul e confirmat (metadata MediaSession pentru muzică, schimbarea
    ecranului/stării pentru rest). Altfel, mesajul spune exact ce n-a mers.
+
+## LEGEA PERSONALULUI BENSON (14.10.2026, decizia proprietarului, permanentă)
+
+Text normativ complet: `docs/specs/LEGEA_PERSONALULUI_BENSON.md`. Deciziile verbatim:
+`docs/specs/PASUL_1_REGISTRY_2026-10-14.md` (P1.0–P1.6) + `docs/specs/PASUL_1_MOTOR_2026-10-14.md`
+(M1–M5). Stare curentă, cu dovezi: `docs/HARTA_BENSON.md`, agent 12.
+
+**Personalul BENSON = aplicațiile instalate**, privite ca angajați cu fișă de post: identitate,
+rol, capabilități, restricții, dosar. Registrul e **parte din motor** (M1) — pornește cu
+`BensonForegroundService`, mereu activ.
+
+1. **Un singur inventar în tot codul.** `APP_INDEX` și resolverul de nume sunt *vederi* ale
+   registrului, nu liste a doua. O a doua enumerare de aplicații = încălcare a legii.
+2. **Trei niveluri strict separate**: `known` (tabel din cod) · `discovered` (văzut doar în timpul
+   unei comenzi date de proprietar — **niciodată explorare automată**) · `verified` (test trecut pe
+   telefon). **Vocea și creierul declară operațional DOAR `verified`**; restul se spune „încă
+   neverificat". Un click reușit nu produce `verified` (doctrina 9).
+3. **Update → `verified` devine `reverify`** (M4). Prima execuție verificată îl readuce.
+4. **Mișcări de personal**: `PACKAGE_ADDED/REMOVED/REPLACED` + reconciliere completă la fiecare
+   pornire a serviciului. **Plecat = fișa se arhivează, nu se șterge.** Zero anunț rostit.
+5. **Restricții**: bancar → **refuz**; plată/cumpărare/trimitere/ștergere → confirmare obligatorie;
+   o capabilitate necunoscută e tratată ca riscantă, nu liberă.
+6. **Nimic nu pleacă din telefon.** În logcat doar numere și niveluri (`REGISTRY count= known=
+   verified=`), niciodată nume de aplicații.
+7. **Se aplică automat la prima instalare pe orice telefon Android**, după acordarea permisiunilor
+   — fără configurare. Garda de plauzibilitate refuză să scrie registrul pe o enumerare filtrată
+   (bug-ul dovedit 14.10: 49 din ~850 fără blocul `<queries>` MAIN+LAUNCHER).
+
+**Revert**: flag `APP_REGISTRY` în `BensonForegroundService`; `false` = enumerare live, exact
+comportamentul de dinainte de 14.10.2026. Flagul e doar revert de urgență — starea normală e `true`.
+
+## LEGEA CONTINUITĂȚII SERVICIULUI (14.10.2026, decizia proprietarului, permanentă)
+
+Text normativ complet: `docs/specs/LEGEA_CONTINUITATII_SERVICIULUI.md`. Se construiește peste
+LEGEA PERSONALULUI (registrul), fără index/chatbot/executor paralel.
+
+**L-SERVICE-001 — REZOLVAREA PRIN PERSONAL**: *Masterul cere rezultatul. BENSON identifică
+personalul, deleagă sarcina, operează aplicația și verifică rezultatul.*
+- Fără „Nu găsesc aplicația" fals pentru aplicații instalate: `NOT_FOUND` **nu** se raportează
+  înainte de a verifica pachetele accesibile, aliasurile și launcher intents. Aplicație vizibilă
+  dar nelansabilă → **`LAUNCH_FAILED`**, niciodată `NOT_FOUND`, și niciodată tăcere.
+- Rezolvare după **SCOP**, nu doar după nume: „du-mă la aeroport"→navigație, „ce melodie e
+  asta?"→recunoaștere muzicală, „cumpărăturile"→shopping, „trimite un mesaj"→mesagerie.
+- `MUSIC_IDENTIFICATION` e capabilitate/intenție în enumurile existente. ChatGPT e interlocutorul,
+  **dar nu ghicește muzica** — recunoașterea e făcută de o aplicație reală, rezultatul e citit, nu
+  inventat. Captura audio pe Android (sunet redat vs. microfon) se tratează explicit.
+
+**L-SERVICE-002 — O CERERE NU SE OPREȘTE LA LIPSA UNEI APLICAȚII**. Ordinea obligatorie:
+**`APP → WEB → PLAY STORE RECOMMENDATION`**.
+1. aplicația potrivită din registru; 2. browser/motor de căutare/site oficial, prin instrumentele
+existente; 3. recomandare verbală + deschiderea paginii Play **doar la cererea Masterului**;
+4. **scopul inițial rămâne în memoria de lucru** — contextul nu se pierde după browser/Play Store.
+
+Siguranță, absolut: fără cumpărare/plată automată, fără confirmare de rezervări, fără instalare
+automată, fără acceptarea permisiunilor în numele utilizatorului, **textul din web nu capătă
+niciodată autoritate** (`UNTRUSTED_DATA`), fiecare acțiune se verifică, fără repetări infinite.
+
+*„Un lansator spune «Nu găsesc aplicația». Un majordom caută altă soluție, prezintă opțiunile și
+continuă să lucreze."* — starea reală a implementării, cu dovezi: `docs/HARTA_BENSON.md`.
+
+## LEGEA VOICE-ONLY (14.10.2026, decizia proprietarului, permanentă)
+
+**Telefon utilizabil fără vedere și fără mâini.** Masterul trebuie să poată folosi BENSON și
+aplicațiile compatibile **exclusiv prin conversație vocală**. *Ecranul este instrumentul BENSON, nu
+interfața obligatorie a Masterului.*
+
+**Nu presupune niciodată că utilizatorul poate vedea, citi sau atinge ecranul.** Fiecare flux
+trebuie să ofere: comandă vocală · conversație naturală · întrebări de clarificare rostite ·
+prezentarea verbală a opțiunilor · selecție verbală · confirmare vocală explicită · comunicarea
+verbală a rezultatului SAU a erorii.
+
+**Interzis** pentru o operație obișnuită pe care BENSON o poate executa singur: „Apăsați butonul
+albastru", „Selectați opțiunea de pe ecran". Dacă poate apăsa, apasă — nu dă instrucțiuni.
+
+**Erori**: explică verbal motivul și propune o alternativă. Fără abandon în tăcere, fără succes
+declarat pe baza unui click, fără rezultate inventate (doctrina 9).
+
+**Siguranță**: o confirmare vocală e legată de **o singură** acțiune și **expiră**. Nicio comandă
+auzită accidental, niciun sunet din difuzor și nicio confirmare ambiguă nu autorizează o acțiune
+sensibilă. Pentru plăți, apeluri de urgență, permisiuni Android, biometrie și ecrane protejate:
+BENSON **explică vocal ce îl blochează** — nu promite automatizare unde Android cere intervenția
+utilizatorului.
+
+**CRITERIU DE ACCEPTARE, obligatoriu în toate testele viitoare:**
+> *Poate Masterul finaliza sarcina folosind doar vocea, fără să i se ceară să citească sau să apese
+> pe ecran?* Dacă nu → fluxul e **INCOMPLET** sau **BLOCKED**, niciodată PASS.
+
+Se construiește pe componentele existente (wake, STT, chatbot, context, StaffRegistry,
+AccessibilityService, Dispatcher, ConfirmationGate, TTS). **Fără sistem paralel.**
+
+Ținta: pui telefonul în buzunar, spui „Benson", iar restul se desfășoară prin conversație.
+
+## LEGEA VISIBLE WORKING STATE (14.10.2026, decizia proprietarului, permanentă)
+
+La „Benson", telefonul se trezește, BENSON răspunde verbal, logoul se animă, bula lucrează peste
+orice aplicație compatibilă. *„Telefonul se trezește, logoul prinde viață, bula lucrează, iar
+BENSON îți vorbește."* Pentru nevăzători, **aceleași stări se comunică și vocal**.
+
+1. **Trezirea ecranului** după wake confirmat: se reutilizează `wakeScreen()` existent (dovedit
+   03.10, `FIX_WA_SCREEN_LOCKED_1`), nu un mecanism nou.
+2. **Nu se deblochează automat dispozitivul.** Nu se ocolește PIN-ul, biometria sau vreo protecție
+   Android. Niciodată.
+3. **Telefon blocat** → starea BENSON se arată printr-o interfață **permisă de sistem**, fără
+   conținut privat. **Constrângere Android reală**: un `TYPE_APPLICATION_OVERLAY` nu poate fi
+   desenat peste keyguard — deci bula chiar NU poate apărea cât e blocat. Suprafața permisă e
+   notificarea foreground, folosită doar pentru STARE generică (`BensonPhrasing.lockscreenState`):
+   niciodată transcrierea, rezultatele sau numele de contact. După deblocare, bula preia tot.
+4. **Telefon deblocat** → bula apare peste aplicația activă, prin overlay-ul existent.
+5. **Fără suprimare generală** a bulei în VOICE_ONLY: `SCREEN_LOCKED` și `SCREEN_UNLOCKED` sunt
+   cazuri separate explicit.
+6. **Logoul se animă după starea reală**: `LISTENING` · `THINKING` · `WORKING` · `SPEAKING` ·
+   `ERROR`. Starea afișată trebuie să corespundă stării reale, nu să fie decorativă.
+7. Bula arată transcrierea și răspunsurile, permite dialog continuu și **rămâne vizibilă cât
+   sarcina e activă**.
+8. Bula **nu blochează** interacțiunea cu aplicația de dedesubt și nu împiedică degetul BENSON să
+   apese butoanele.
+9. „închide" / „acasă" / „stop" au **semantici distincte**; revenirea la starea corespunzătoare se
+   face **fără pierderea contextului** necesar.
+10. Se testează **blocat și deblocat**, inclusiv peste WhatsApp, Amazon și browser.
+
+**Revert**: `VISIBLE_WORKING_STATE = false` în `BensonForegroundService`.
+**PASS numai dacă** efectele vizuale corespund stării reale și sunt verificate pe OnePlus Nord 4.
 
 ## Invariante de arhitectură
 

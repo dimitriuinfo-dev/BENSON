@@ -282,6 +282,20 @@ class BensonForegroundService : Service() {
   // native fallback).
   private val JS_VOICE_HANDOFF = false
 
+  // LEGEA PERSONALULUI BENSON (14.10.2026, decizie permanenta a proprietarului; spec normativ
+  // docs/specs/LEGEA_PERSONALULUI_BENSON.md, derivat din PASUL_1_REGISTRY + PASUL_1_MOTOR).
+  // M1: registrul e PARTE DIN MOTOR, porneste la fiecare start de serviciu, mereu activ, si
+  // devine singurul inventar de aplicatii (findLaunchablePackage citeste din el).
+  // APP_REGISTRY = false e DOAR revertul de urgenta: enumerare live la fiecare apel, adica exact
+  // comportamentul de dinainte de 14.10.2026. Nimic altceva nu depinde de flag.
+  private val APP_REGISTRY = true
+
+  // FIX_BRAIN_OPEN_APP_GATE_1 (14.10.2026) — vezi PendingAppOpen pentru cauza dovedita din log.
+  // true = o deschidere de aplicatie PROPUSA DE CREIER trece prin confirmare ("Deschid X?").
+  // false = revertul exact la comportamentul de dinainte (creierul lanseaza direct).
+  // Calea determinista a parserului nu e afectata in niciun caz.
+  private val BRAIN_OPEN_APP_CONFIRM = true
+
   // V1 (08.10.2026, Motor M1) — flag + revert (G2). Pure logging addition: the actual "zero Gata
   // fără dovadă" decisions (result.success / verified) already existed and were already correct in
   // both call sites this touches (WA actions, YouTube play) — this only adds the standardized
@@ -295,7 +309,8 @@ class BensonForegroundService : Service() {
   // întrebare încă nerezolvată.
   private fun hasAnyPendingNativeState(): Boolean =
     pendingWaDisambiguation != null || pendingWaAction != null || pendingAppSearch != null ||
-      pendingControlAction != null || pendingYoutubePlay != null
+      pendingControlAction != null || pendingYoutubePlay != null || pendingAppOpen != null ||
+      pendingNav != null || pendingResultChoice != null
 
   private fun closeSession(reason: String) {
     if (sessionOpenUntil == 0L) return
@@ -1551,15 +1566,21 @@ class BensonForegroundService : Service() {
           // FIX_STT_OPENAI_EMPTY_FALLTHROUGH_1 (12.10.2026) — t=="" (succes HTTP, transcript gol)
           // scurtcircuita rezerva Deepgram/Groq identic cu t=null (eroare/timeout); `isNullOrBlank`
           // le separă: doar un transcript real oprește căutarea rezervei.
-          if (!t.isNullOrBlank()) return t
-          AudioDiag.log(this, "STT_FALLBACK", "reason=${if (t == null) "openai_error_or_timeout" else "openai_empty_transcript"}")
+          // FIX_STT_NON_LATIN_1 (14.10.2026) — `isNullOrBlank` NU era de ajuns: un transcript
+          // halucinat non-latin ("当", dovedit 16:13:54 in testul vocal) trecea drept valid si
+          // rezerva nu mai era incercata. Vezi SttTranscriptValidator pentru cauza completa.
+          if (SttTranscriptValidator.isUsable(t)) return t
+          AudioDiag.log(this, "STT_FALLBACK", "reason=openai_${SttTranscriptValidator.rejectReason(t)}")
         }
       }
     }
     val dgKey = prefs.getString("wake_stt_deepgram_api_key", "") ?: ""
     if (dgKey.isNotBlank()) {
       val t = postToDeepgramCmd(bytes, dgKey)
-      if (t != null) return t
+      // FIX_STT_NON_LATIN_1 — aceeasi poarta pe rezerva: gunoiul trece mai departe la Groq, nu
+      // devine comanda. Inainte: `if (t != null) return t`.
+      if (SttTranscriptValidator.isUsable(t)) return t
+      AudioDiag.log(this, "STT_FALLBACK", "reason=deepgram_${SttTranscriptValidator.rejectReason(t)}")
     }
     val groqKey = prefs.getString("wake_stt_api_key", "") ?: ""
     if (groqKey.isBlank()) return null
@@ -1707,8 +1728,7 @@ class BensonForegroundService : Service() {
     val svc = expo.modules.accessibility.BensonAccessibilityService.instance
     if (svc == null) { speak("Serviciul de accesibilitate nu e disponibil."); return true }
     svc.runOnServiceScope {
-      kotlinx.coroutines.delay(1800)
-      val title = svc.locateFirstResultOnScreen(query)
+      val title = awaitFirstResult(svc, query)
       mainHandler.post {
         if (title == null) {
           AudioDiag.log(this, "YOUTUBE_SEARCH_CONFIRM", "query=\"$query\" found=false")
@@ -1747,7 +1767,15 @@ class BensonForegroundService : Service() {
     }
     val ok = launchPackageNative(pkg)
     AudioDiag.log(this, "APP_LAUNCH", "pkg=$pkg ok=$ok")
-    if (!ok) return null
+    // LEGEA REZOLVARII PRIN PERSONAL, punctul 1 (14.10.2026) — "Daca aplicatia este vizibila dar
+    // lansarea eseueaza, raporteaza LAUNCH_FAILED, nu NOT_FOUND". Inainte: `if (!ok) return null`,
+    // adica aplicatie GASITA dar nelansata cadea pe acelasi drum ca una inexistenta si, la finalul
+    // lanțului, tacea. Acum spune exact ce n-a mers (doctrina 9). Revert: `if (!ok) return null`.
+    if (!ok) {
+      AudioDiag.log(this, "APP_LAUNCH", "pkg=$pkg ok=false reason=launch_failed")
+      val failLabel = AppNameSynonyms.canonicalName(target, cmdLanguage()) ?: target
+      return "Am găsit $failLabel, dar n-am putut să o deschid."
+    }
     // F2 punctul 4 — numele rostit e in limba turei (ex. "Calculatorul"), nu eticheta de sistem
     // ("Rechner", germana) decat daca targetul rostit nu apartine niciunui grup cunoscut.
     val label = AppNameSynonyms.canonicalName(target, cmdLanguage()) ?: try {
@@ -1875,6 +1903,22 @@ class BensonForegroundService : Service() {
   private data class PendingYoutubePlay(val query: String, var noCount: Int = 0)
   @Volatile private var pendingYoutubePlay: PendingYoutubePlay? = null
 
+  // FIX_BRAIN_OPEN_APP_GATE_1 (14.10.2026) — poarta de confirmare pentru o deschidere de
+  // aplicatie PROPUSA DE CREIER, nu rostita de utilizator. Cauza dovedita, din log-ul live de azi:
+  //   10:58:37.669 DEBUG_INJECT text="cat este 9 ori 6"
+  //   10:58:45.735 BRAIN_CALL ms=8014 type=command action=OPEN_APP ok=true
+  //   10:58:45.744 NATIVE_ROUTE action=open_app target="ebay"
+  // O intrebare de aritmetica a devenit "deschide eBay". Nu s-a deschis nimic DOAR pentru ca eBay
+  // nu era instalat; cu registrul personalului (vizibilitate reparata, ~850 de aplicatii in loc de
+  // 49) o asemenea halucinatie ar nimeri o aplicatie reala. Doctrina 6 cere ConfirmationGate
+  // inaintea oricarei actiuni, doctrina 7 spune ca creierul propune, nu executa.
+  // Se aplica EXCLUSIV pe ramura OPEN_APP din executeBrainCommand. Calea determinista
+  // (tryNativeOpenApp apelat de parser, cand utilizatorul chiar a spus "deschide X") ramane
+  // NEATINSA — comportamentul dovedit 20.09 "deschide Calculatorul" se executa in continuare
+  // direct, fara intrebare in plus.
+  private data class PendingAppOpen(val label: String, val pkg: String, var noCount: Int = 0)
+  @Volatile private var pendingAppOpen: PendingAppOpen? = null
+
   private fun finishControlResult(result: expo.modules.accessibility.BensonAccessibilityService.ControlResult, commandForBubble: String) {
     val resp = result.message.ifBlank { if (result.ok) "Am făcut." else "Nu am putut." }
     openSession("native_cmd_executed", mayDuck = true)
@@ -1890,6 +1934,155 @@ class BensonForegroundService : Service() {
   // tryNativeMediaControl verbatim instead of re-implementing media control for this phrasing too.
   // RUNDA C-1 (2026-10-04, user-directed) — "închide"/"ieși"/"acasă"/"înapoi", oricând, clasa LIBER.
   private val GLOBAL_NAV_PATTERN = Regex("^(inchide|iesi|acasa|inapoi)$")
+
+  // FIX_INTERRUPT_1 (15.10.2026) — RAPORT DIRECT AL MASTERULUI: «spun benson stop, benson inchide.
+  // Nimic!». Verificat in cod si confirmat: "stop" NU exista ca intrerupere. Aparea doar ca vorba
+  // de control media ("stop" -> "pause", linia 2658), ca anulare a unei liste de rezultate si ca
+  // sinonim de "nu" intr-o confirmare — deci, fara nimic in asteptare si fara muzica, nu facea
+  // NIMIC. Iar "inchide" ducea la ecranul principal, nu oprea BENSON.
+  // Mai grav: `grep -c agentCancel|cancelAgent|interrupt` = 0 — agentul LLM ruleaza pana la 60 s
+  // si NU putea fi oprit de nimic. Era deja cerut explicit (ordinul CONTINUOUS BUTLER, §5
+  // INTRERUPERI: "Stop / Stai / Lasa asta / Reia") si nu fusese implementat.
+  //
+  // Se verifica PRIMUL in lant, inaintea starilor in asteptare, ca sa functioneze si in mijlocul
+  // unei confirmari sau al unei sarcini a agentului.
+  // Deliberat NU contine "opreste"/"oprește" simplu: acelea inseamna pauza la muzica (G3
+  // YT_STOP/STOP_MUZICA) si nu au voie sa fie furate. Tiparul cere rostirea SINGURA, deci
+  // "oprește muzica" nu se potriveste aici.
+  // Revert: INTERRUPT_ENABLED = false.
+  private val INTERRUPT_ENABLED = true
+  private val INTERRUPT_PATTERN = Regex(
+    // "mute" adaugat pe raportul direct al Masterului («nici Benson mute nu merge») — aceeasi
+    // cauza: nu exista vocabular de intrerupere deloc.
+    "^(?:stop|stai|stai asa|stai așa|opreste-te|oprește-te|lasa asta|lasă asta|lasa|lasă|" +
+      "anuleaza|anulează|renunta|renunță|gata|destul|taci|mute|liniste|liniște|" +
+      "nu mai vorbi|taci din gura|taci din gură)$"
+  )
+
+  @Volatile private var agentRunId = 0
+
+  private fun tryInterrupt(command: String): Boolean {
+    if (!INTERRUPT_ENABLED) return false
+    if (!INTERRUPT_PATTERN.matches(normalizeForMatch(command))) return false
+    logRoute("NATIVE_ROUTE", "action=interrupt")
+    // 1. Agentul in curs devine invalid: bucla lui vede alt runId si se opreste la pasul urmator.
+    // P0 — anulare COMPLETA: invalideaza rularea SI taie apelul HTTP in zbor (Call.cancel()).
+    // Fara taierea apelului, rularea ramanea blocata ~22 s in OkHttp si putea vorbi dupa aceea.
+    cancelAgentNow()
+    // 2. Orice intrebare in asteptare dispare — un "da" de mai tarziu nu mai autorizeaza nimic.
+    pendingResultChoice = null
+    pendingAppOpen = null
+    pendingNav = null
+    pendingYoutubePlay = null
+    pendingAppSearch = null
+    pendingWaAction = null
+    pendingWaDisambiguation = null
+    pendingControlAction = null
+    // 3. Taiem vocea proprie, ca sa nu continue sa vorbeasca peste Master.
+    try { nativeTts?.stop() } catch (_: Exception) {}
+    AudioDiag.log(this, "INTERRUPT", "agent_cancelled=true pendings_cleared=true")
+    // 4. Confirmare scurta, apoi inapoi la wake. Nu facem nimic altceva: "stop" inseamna stop.
+    updateBubbleNative("Am oprit.", command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+    speak("Am oprit.", "report")
+    closeSession("interrupt")
+    setMicOwner("NONE", "interrupt")
+    rearmWakeNative("interrupt")
+    return true
+  }
+
+  // FIX_NATIVE_NAVIGATE_1 (14.10.2026) — REGRESIE DOVEDITA pe telefon, pe un comportament din
+  // lista inchisa BENSON 1.0 (#6 "Navigatie — du-ma la X", dovedit 29.08).
+  // Cauza, din cod + log: nu exista NICIUN executor nativ de navigatie. Drumul dovedit pe 29.08
+  // era in JS (src/core/mission/tools/wazeTool.ts), iar RUNDA J (12.10) a inchis predarea catre JS
+  // (JS_VOICE_HANDOFF=false). Peste asta, INTEGRATION-2 a cablat ramura NAVIGATE a creierului la
+  // `tryGlobalNav("du-mă la $target")` — dar GLOBAL_NAV_PATTERN de mai sus e ^(inchide|iesi|acasa|
+  // inapoi)$, deci apelul returna FALSE intotdeauna. Dovada pe telefon, 14.10 12:02:17:
+  // "du-mă la aeroport" -> zero NATIVE_ROUTE de navigatie -> brain -> fallback "Nu am înțeles".
+  // Reparatie: executor nativ, cu alegerea aplicatiei DUPA SCOP din registrul personalului
+  // (CAP_NAVIGATE), confirmare obligatorie inainte de pornire (doctrina 6, "Waze cu governance"),
+  // si URI-urile deja dovedite pe dispozitiv, copiate din wazeTool.ts/appLauncherAgent.ts —
+  // neinventate. Revert: NATIVE_NAVIGATE = false (ramura NAVIGATE redevine no-op, ca azi).
+  private val NATIVE_NAVIGATE = true
+  private val NAV_DEST_PATTERN = Regex(
+    "^(?:du\\s*-?\\s*ma|duma|condu\\s*-?\\s*ma|ia\\s*-?\\s*ma|navigheaza|mergi)\\s+" +
+      "(?:la|spre|catre|pana la)\\s+(.{2,})$"
+  )
+
+  private data class PendingNav(val dest: String, val pkg: String, val label: String, var noCount: Int = 0)
+  @Volatile private var pendingNav: PendingNav? = null
+
+  private fun tryNativeNavigate(command: String): Boolean {
+    if (!NATIVE_NAVIGATE) return false
+    val n = normalizeForMatch(command)
+    val m = NAV_DEST_PATTERN.find(n) ?: return false
+    val dest = m.groupValues[1].trim()
+    if (dest.isBlank()) return false
+    // Alegerea executantului vine din registru, dupa capabilitate, nu dintr-o lista hardcodata.
+    val candidates = try { StaffRegistry.staffForCapability(this, StaffRegistryCore.CAP_NAVIGATE) } catch (_: Exception) { emptyList() }
+    val chosen = candidates.firstOrNull()
+    if (chosen == null) {
+      // L-SERVICE-002: aici intra pasul WEB, apoi recomandarea Play Store. NEIMPLEMENTAT inca —
+      // spune onest ce lipseste, nu tace si nu pretinde.
+      logRoute("NATIVE_ROUTE", "action=navigate_no_staff target=\"$dest\"")
+      val msg = "Nu am o aplicație de navigație pe telefon."
+      updateBubbleNative(msg, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+      speakNativeFallbackThenCapture(msg)
+      return true
+    }
+    val (member, level) = chosen
+    logRoute("NATIVE_ROUTE", "action=navigate_confirm target=\"$dest\" staff=${member.packageName} level=${level.name}")
+    pendingNav = PendingNav(dest, member.packageName, member.displayName)
+    val question = "Te duc la $dest cu ${member.displayName}. Pornesc?"
+    updateBubbleNative(question, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+    speak(question, "confirm")
+    return true
+  }
+
+  private fun handlePendingNavAnswer(rawAnswer: String) {
+    val pending = pendingNav ?: return
+    val verdict = classifyConfirmationNative(rawAnswer)
+    AudioDiag.log(this, "CONFIRM_RESULT", "verdict=$verdict")
+    when (verdict) {
+      "YES" -> {
+        pendingNav = null
+        val enc = try { java.net.URLEncoder.encode(pending.dest, "UTF-8") } catch (_: Exception) { pending.dest }
+        // Aceleasi URI-uri dovedite pe dispozitiv (wazeTool.ts): Waze intai, google.navigation ca
+        // rezerva. Verificarea reala a pornirii navigatiei (doctrina 9) ramane de facut cu
+        // AccessibilityService — deocamdata se raporteaza doar lansarea reusita a aplicatiei.
+        val uris = if (pending.pkg == "com.waze") {
+          listOf("waze://?q=$enc&navigate=yes", "google.navigation:q=$enc")
+        } else listOf("google.navigation:q=$enc", "waze://?q=$enc&navigate=yes")
+        var ok = false
+        for (u in uris) {
+          ok = try {
+            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(u)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+          } catch (_: Exception) { false }
+          if (ok) { AudioDiag.log(this, "NAV_LAUNCH", "pkg=${pending.pkg} ok=true"); break }
+        }
+        if (!ok) AudioDiag.log(this, "NAV_LAUNCH", "pkg=${pending.pkg} ok=false reason=launch_failed")
+        val resp = if (ok) "Te duc la ${pending.dest}." else "N-am putut porni navigația spre ${pending.dest}."
+        finishBrainCommandSuccess(resp, "du-mă la ${pending.dest}", "nav_done")
+      }
+      "NO" -> {
+        pendingNav = null
+        AudioDiag.log(this, "SESSION", "close reason=nav_confirm_no")
+        closeSession("nav_confirm_no")
+        setMicOwner("NONE", "nav_confirm_no")
+        rearmWakeNative("nav_confirm_no")
+      }
+      else -> {
+        pending.noCount += 1
+        if (pending.noCount >= 2) {
+          pendingNav = null
+          AudioDiag.log(this, "SESSION", "close reason=nav_confirm_unresolved")
+          closeSession("nav_confirm_unresolved")
+          setMicOwner("NONE", "nav_confirm_unresolved")
+          rearmWakeNative("nav_confirm_unresolved")
+        } else speak("Da sau nu?")
+      }
+    }
+  }
 
   private fun tryGlobalNav(command: String): Boolean {
     val n = normalizeForMatch(command)
@@ -1940,6 +2133,24 @@ class BensonForegroundService : Service() {
       expo.modules.accessibility.MusicPlayVerb.CAUTA -> fg == "com.spotify.music"
     }
     if (!eligible) return false
+    // FIX_MUSIC_FOREGROUND_CAPABILITY_1 (15.10.2026) — CAUZA DOVEDITA pe telefon, 09:57:46:
+    //   "pune Radio România Actualități" -> action=music_play pkg=com.opera.browser
+    //   -> step=type ok=true -> step=extract ok=false -> verified=false, si BENSON a TACUT.
+    // Regula "orice aplicatie reala din prim-plan" (MUSIC-2) e prea larga: a tastat numele unui
+    // post de radio in BROWSER, doar pentru ca browserul era deschis. O cerere de redare are sens
+    // doar intr-o aplicatie care chiar poate reda. Verificam capabilitatea in REGISTRUL
+    // PERSONALULUI (CAP_MEDIA_SEARCH), nu printr-o lista de pachete hardcodata (doctrina 8).
+    // Cand aplicatia din fata nu stie sa redea, declinam -> cererea ajunge la agentul LLM, care
+    // alege instrumentul potrivit. Revert: MUSIC_REQUIRE_MEDIA_CAPABILITY = false.
+    if (MUSIC_REQUIRE_MEDIA_CAPABILITY) {
+      val canPlayHere = try {
+        StaffRegistry.capsOf(this, fg).containsKey(StaffRegistryCore.CAP_MEDIA_SEARCH)
+      } catch (_: Exception) { false }
+      if (!canPlayHere) {
+        logRoute("NATIVE_ROUTE", "action=music_play_declined reason=fg_not_media pkg=$fg")
+        return false
+      }
+    }
 
     val query = parsed.query
     logRoute("NATIVE_ROUTE", "action=music_play target=\"$query\" pkg=$fg")
@@ -2035,6 +2246,9 @@ class BensonForegroundService : Service() {
       // currentForegroundPackage()/lastForegroundPackage, which lagged right after an app just opened.
       val fg = svc?.currentForegroundPackageLive()
       if (fg == null || fg == packageName || fg == launcherPackage()) return false
+      // Op. 2 — contextul se pastreaza si dupa o căutare IN-APLICATIE (Amazon), nu doar web, ca
+      // "apasă pe primul rezultat" sa mearga in continuarea oricareia dintre cele doua comenzi.
+      lastSearchQuery = cmd.query
     }
     if (svc == null) {
       speakNativeFallbackThenCapture("Serviciul de accesibilitate nu e disponibil.")
@@ -2099,6 +2313,36 @@ class BensonForegroundService : Service() {
   // X" — verificat în cod, nu presupus.
   private val MENTIONS_YOUTUBE_PATTERN = Regex("\\byou\\s*tube\\b", RegexOption.IGNORE_CASE)
 
+  // P3 / FIX_YT_FIXED_WINDOW_1 (15.10.2026) — CAUZA REALA a esecului repetat `YT_PLAY_CONFIRM`,
+  // identificata, nu presupusa: dupa lansarea YouTube prin Intent, codul astepta o fereastra FIXA
+  // de 1800 ms si apoi cauta o SINGURA data primul rezultat. Daca YouTube nu randase inca (pornire
+  // la rece, retea lenta), `locateFirstResultOnScreen` intorcea null -> "N-am gasit madonna pe
+  // YouTube" -> nu se mai crea nicio intrebare in asteptare -> "da"-ul din suita nu avea ce
+  // confirma -> FAIL. De aceea testul cadea "intermitent": depindea de cat de repede randa YouTube.
+  // Reparatie: asteptare pe CONDITIE, nu pe ceas — interogam pana apare rezultatul, cu buget
+  // maxim. Cand randarea e rapida iese imediat (mai rapid decat inainte), cand e lenta mai asteapta.
+  // Revert: `kotlinx.coroutines.delay(1800); svc.locateFirstResultOnScreen(query)`.
+  private suspend fun awaitFirstResult(
+    svc: expo.modules.accessibility.BensonAccessibilityService,
+    query: String,
+    budgetMs: Long = 6000,
+    stepMs: Long = 250,
+  ): String? {
+    val started = System.currentTimeMillis()
+    var attempts = 0
+    while (System.currentTimeMillis() - started < budgetMs) {
+      attempts++
+      val t = try { svc.locateFirstResultOnScreen(query) } catch (_: Exception) { null }
+      if (t != null) {
+        AudioDiag.log(this, "YT_RESULT_WAIT", "found=true attempts=$attempts ms=${System.currentTimeMillis() - started}")
+        return t
+      }
+      kotlinx.coroutines.delay(stepMs)
+    }
+    AudioDiag.log(this, "YT_RESULT_WAIT", "found=false attempts=$attempts ms=${System.currentTimeMillis() - started}")
+    return null
+  }
+
   private fun tryYoutubeSearchConfirm(command: String): Boolean {
     val svc = expo.modules.accessibility.BensonAccessibilityService.instance ?: return false
     val normalized = normalizeForMatch(command)
@@ -2125,10 +2369,8 @@ class BensonForegroundService : Service() {
     svc.runOnServiceScope {
       // Already-foreground: real search box, activate+type (genericSearchLocateFirst). Just
       // launched via Intent: results already populated, no box to activate (locateFirstResultOnScreen).
-      val title = if (youtubeForeground) svc.genericSearchLocateFirst(query) else {
-        kotlinx.coroutines.delay(1800)
-        svc.locateFirstResultOnScreen(query)
-      }
+      val title = if (youtubeForeground) svc.genericSearchLocateFirst(query)
+      else awaitFirstResult(svc, query)
       mainHandler.post {
         if (title == null) {
           AudioDiag.log(this, "YOUTUBE_SEARCH_CONFIRM", "query=\"$query\" found=false")
@@ -2204,23 +2446,73 @@ class BensonForegroundService : Service() {
     }
   }
 
+  // FIX_BRAIN_OPEN_APP_GATE_1 — raspunsul la "Deschid X?" propus de creier. Aceeasi forma ca
+  // handlePendingYoutubePlayAnswer (YES / NO / 2 incercari), zero mecanism nou.
+  private fun handlePendingAppOpenAnswer(rawAnswer: String) {
+    val pending = pendingAppOpen ?: return
+    val verdict = classifyConfirmationNative(rawAnswer)
+    AudioDiag.log(this, "CONFIRM_RESULT", "verdict=$verdict")
+    when (verdict) {
+      "YES" -> {
+        pendingAppOpen = null
+        finishAppLaunch(pending.label, pending.pkg, "deschide ${pending.label}")
+      }
+      "NO" -> {
+        pendingAppOpen = null
+        AudioDiag.log(this, "SESSION", "close reason=brain_open_app_no")
+        closeSession("brain_open_app_no")
+        setMicOwner("NONE", "brain_open_app_no")
+        rearmWakeNative("brain_open_app_no")
+      }
+      else -> {
+        pending.noCount += 1
+        if (pending.noCount >= 2) {
+          pendingAppOpen = null
+          AudioDiag.log(this, "SESSION", "close reason=brain_open_app_unresolved")
+          closeSession("brain_open_app_unresolved")
+          setMicOwner("NONE", "brain_open_app_unresolved")
+          rearmWakeNative("brain_open_app_unresolved")
+        } else {
+          speak("Da sau nu?")
+        }
+      }
+    }
+  }
+
   // FIX_APP_NAME_ACRONYM_1 (2026-10-04, device-proven) — scoring delegated to AppNameMatcher (pure,
   // JUnit-tested), which adds acronym-collapsing + a Levenshtein fallback on top of the original
   // exact/startsWith/contains tiers. Acceptance widened from ">= 50" to ">= 0" since a fuzzy-only
   // match now legitimately scores below the old structural floor but above -1 ("no match at all").
-  private fun findLaunchablePackage(target: String): String? {
+  // LEGEA PERSONALULUI (M1) — sursa de nume vine din registru (un singur inventar). Scorarea de
+  // mai jos e NESCHIMBATA fata de F2/FIX_APP_NAME_ACRONYM_1: aceleasi variante de target, acelasi
+  // AppNameMatcher, acelasi prag. Daca registrul e gol (flag OFF, prima pornire, sau enumerare
+  // amanata de garda de vizibilitate), cadem pe enumerarea live de dinainte — niciodata pe nimic.
+  private fun launchableNameSource(): List<Pair<String, String>> {
+    if (APP_REGISTRY) {
+      val snapshot = try { StaffRegistry.launchableSnapshot(this) } catch (_: Exception) { emptyList() }
+      if (snapshot.isNotEmpty()) return snapshot
+    }
     val pm = packageManager
     val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-    val apps = try { pm.queryIntentActivities(intent, 0) } catch (_: Exception) { return null }
+    val apps = try { pm.queryIntentActivities(intent, 0) } catch (_: Exception) { return emptyList() }
+    return apps.mapNotNull { ri ->
+      val pkg = ri.activityInfo?.packageName ?: return@mapNotNull null
+      val label = try { ri.loadLabel(pm).toString() } catch (_: Exception) { return@mapNotNull null }
+      label to pkg
+    }
+  }
+
+  private fun findLaunchablePackage(target: String): String? {
+    val apps = launchableNameSource()
+    if (apps.isEmpty()) return null
     // F2 (12.10.2026) — targetul rostit (RO) vs. eticheta instalata (DE, sistem german) nu se
     // suprapun textual; AppNameSynonyms genereaza variante (articol taiat + sinonime RO/DE/EN),
     // scorul final ramane maxOf peste toate — o varianta proasta nu poate strica un match bun.
     val targetVariants = AppNameSynonyms.expandTarget(target)
     var best: String? = null
     var bestScore = -1
-    for (ri in apps) {
-      val label = try { normalizeForMatch(ri.loadLabel(pm).toString()) } catch (_: Exception) { continue }
-      val pkg = ri.activityInfo.packageName
+    for ((rawLabel, pkg) in apps) {
+      val label = try { normalizeForMatch(rawLabel) } catch (_: Exception) { continue }
       val score = targetVariants.maxOf { AppNameMatcher.score(it, label, ::levenshtein) }
       if (score > bestScore) { bestScore = score; best = pkg }
     }
@@ -2260,6 +2552,35 @@ class BensonForegroundService : Service() {
   // without PACKAGE_USAGE_STATS", per that file's own comment). Launcher identified by resolving
   // ACTION_MAIN/CATEGORY_HOME, not a hardcoded package name. If the accessibility service isn't
   // running (instance == null), falls back to today's behavior — bubble only, never an Activity.
+  // VISIBLE WORKING STATE (14.10.2026, ordin permanent) — un singur flag de revert pentru toata
+  // regula: trezirea ecranului la wake + starea pe lockscreen prin notificare in loc de tăcere.
+  // false = exact comportamentul de dinainte (ecran neatins, bula suprimata cand e blocat).
+  private val VISIBLE_WORKING_STATE = true
+
+  // IDENTITATEA VIZUALA BENSON (14.10.2026) — logoul original animat pe ecranul blocat.
+  // Revert independent de VISIBLE_WORKING_STATE: false => rămâne doar notificarea, fara activitate.
+  // RESPINS DE MASTER (15.10.2026): „Masterul respinge ecranul negru cu logoul intermediar.
+  // BENSON are deja o interfață proprie... ACEASTA trebuie utilizată."
+  // Activitatea `BensonLockscreenActivity` (fundal #0D0F0E + logo rotitor) a fost ideea MEA de
+  // ieri, nu designul original BENSON — deci iese din fluxul normal. Cu `false`, pe ecran blocat
+  // rămâne doar notificarea foreground (suprafață permisă, fără conținut privat), iar pe ecran
+  // deblocat rămâne BULA peste aplicația activă, exact cum cere ordinul.
+  // Activitatea rămâne în cod, dezactivată, ca să nu pierdem munca dacă Masterul o vrea altundeva.
+  private val BENSON_LOCKSCREEN_UI = false
+
+  // Punctul 6 din VISIBLE WORKING STATE — starea logoului trebuie sa reflecte activitatea REALA,
+  // nu sa fie decorativa. O deducem din starea deja calculata a turei, fara o masina de stare noua.
+  private fun logoStateFor(state: String, terminal: Boolean): String {
+    val s = state.lowercase()
+    return when {
+      s.startsWith("ascult") -> "LISTENING"
+      terminal -> "SPEAKING"
+      s.endsWith("?") -> "WAITING"
+      s.contains("caut") || s.contains("deschid") -> "WORKING"
+      else -> "THINKING"
+    }
+  }
+
   private enum class WakeFgDecision { ACTIVITY, BUBBLE, VOICE_ONLY }
   @Volatile private var currentWakeFgDecision = WakeFgDecision.BUBBLE
 
@@ -2291,7 +2612,11 @@ class BensonForegroundService : Service() {
     when (decision) {
       WakeFgDecision.ACTIVITY -> { try { bringActivityToFront() } catch (_: Exception) {}; showBubbleNative(); showWakeRingNative() }
       WakeFgDecision.BUBBLE -> { showBubbleNative(); showWakeRingNative() }
-      WakeFgDecision.VOICE_ONLY -> {}
+      // VISIBLE WORKING STATE, punctul 1 — „Reutilizează wakeScreen() existent pentru trezirea
+      // ecranului după wake confirmat." Aceeasi functie dovedita pe 03.10 (FIX_WA_SCREEN_LOCKED_1,
+      // folosita de apelul WhatsApp cu telefonul blocat), nu una noua. NU deblocheaza nimic:
+      // FULL_WAKE_LOCK aprinde ecranul, keyguard-ul rămâne exact cum e (punctul 2).
+      WakeFgDecision.VOICE_ONLY -> { if (VISIBLE_WORKING_STATE) try { wakeScreen() } catch (_: Exception) {} }
     }
   }
 
@@ -2303,8 +2628,68 @@ class BensonForegroundService : Service() {
   // WhatsApp."), not a generic "gata"; transcript carries the user's last utterance. Suppressed
   // entirely under VOICE_ONLY (screen locked — "bula nu se poate afișa peste ecranul de blocare").
   private fun updateBubbleNative(state: String, transcript: String, terminal: Boolean, dismissDelayMs: Long) {
-    if (currentWakeFgDecision == WakeFgDecision.VOICE_ONLY) {
-      AudioDiag.log(this, "BUBBLE", "suppressed reason=voice_only state=\"$state\"")
+    // VISIBLE WORKING STATE, punctele 3 si 5 (14.10.2026, ordin permanent al Masterului):
+    // „Elimină suprimarea generală a bulei în VOICE_ONLY. Separă explicit SCREEN_LOCKED și
+    // SCREEN_UNLOCKED." Cauza plangerii „nu există bulă", dovedita in logul testului vocal
+    // (16:13:51 `BUBBLE suppressed reason=voice_only state="ASCULT"`): cu keyguard-ul activ,
+    // decizia era VOICE_ONLY si bula era suprimata COMPLET, deci nimic nu se vedea.
+    //
+    // CONSTRANGERE ANDROID, nu alegere BENSON: un TYPE_APPLICATION_OVERLAY nu poate fi desenat
+    // peste keyguard. Nu ocolim PIN-ul/biometria (punctul 2). Suprafata permisa pe lockscreen e
+    // NOTIFICAREA foreground, pe care o avem deja — o folosim pentru STARE, fara conținut privat
+    // (vezi BensonPhrasing.lockscreenState). Dupa deblocare, bula completa preia tot.
+    // Revert: VISIBLE_WORKING_STATE = false => return imediat, exact ca inainte.
+    // FIX_LOCKSCREEN_STALE_DECISION_1 — ecranul blocat se verifica LIVE (vezi mai jos de ce).
+    // Daca decizia veche spune VOICE_ONLY dar telefonul e ACUM deblocat, nu mai suprimam nimic:
+    // cadem pe drumul normal al bulei, exact ca inainte.
+    val lockedNow = try {
+      (getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)?.isKeyguardLocked == true
+    } catch (_: Exception) { false }
+    if (currentWakeFgDecision == WakeFgDecision.VOICE_ONLY && lockedNow) {
+      if (!VISIBLE_WORKING_STATE) {
+        AudioDiag.log(this, "BUBBLE", "suppressed reason=voice_only state=\"$state\"")
+        return
+      }
+      val safe = BensonPhrasing.lockscreenState(state, terminal)
+      try {
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+          .notify(NOTIFICATION_ID, buildNotification("BENSON", safe))
+      } catch (_: Exception) {}
+      // IDENTITATEA VIZUALA, punctul 5 — logoul animat pe lockscreen, prin activitatea
+      // showWhenLocked. Primeste DOAR eticheta generica `safe`, niciodata conținutul.
+      // La final de sarcina (terminal) o inchidem, ca sa nu rămână peste lockscreen (punctul 8).
+      // Acelasi protocol ca pentru bula: ComponentName cu numele clasei ca STRING. Modulul
+      // foreground-service NU depinde de modulul overlay la compilare (deliberat, asa e deja
+      // cablat showBubbleNative) — altfel ar fi o dependenta noua intre module.
+      // FIX_LOCKSCREEN_STALE_DECISION_1 (14.10.2026) — REGRESIE introdusa de mine, prinsa de G3
+      // (2 rulari din 2, `FAIL|WA_MESSAGE_NO_ACTION`). `currentWakeFgDecision` se calculeaza DOAR
+      // la wake si rămâne agatata: dupa ce ecranul fusese stins intr-un test anterior, decizia a
+      // rămas VOICE_ONLY, iar in operare NORMALA (telefon deblocat) pornirea activitatii de
+      // lockscreen FURA prim-planul. Dovada din log, 17:11:31.231:
+      //   ENV_OBSERVE fg=com.benson.butler ...  -> TARGET_REACQUIRE_OK expected=com.whatsapp elapsedMs=925
+      // adica WhatsApp a ajuns in fata cu ~1 s intarziere, iar intrebarea "Trimit?" n-a mai apucat
+      // sa fie pusa inainte de raspunsul injectat.
+      // Regula: ecranul blocat se verifica LIVE, in momentul afisarii, nu dintr-o decizie veche.
+      val lockedNow = try {
+        (getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)?.isKeyguardLocked == true
+      } catch (_: Exception) { false }
+      if (BENSON_LOCKSCREEN_UI && lockedNow) {
+        try {
+          if (terminal) {
+            sendBroadcast(Intent("expo.modules.overlay.LOCKSCREEN_CLOSE"))
+          } else {
+            startActivity(
+              Intent().apply {
+                component = ComponentName(packageName, "expo.modules.overlay.BensonLockscreenActivity")
+                putExtra("state", safe)
+                putExtra("logoState", logoStateFor(state, terminal))
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+              },
+            )
+          }
+        } catch (_: Exception) {}
+      }
+      AudioDiag.log(this, "BUBBLE", "locked_notification state=\"$safe\"")
       return
     }
     val intent = Intent().apply {
@@ -2348,9 +2733,21 @@ class BensonForegroundService : Service() {
   // nu opreau nimic) — ancora "$" cerea cuvântul-cheie SINGUR; "muzica"/"muzică"/"music" rămas
   // după el rupea match-ul complet, deci comanda cădea silențios înainte să ajungă la
   // MediaTransport.control. Obiectul e acum opțional, nu obligatoriu.
+  // FIX_MEDIA_VERB_SYNONYMS_1 (15.10.2026) — sinonime LIPSA, demonstrate prin test pe telefon
+  // (11:01–11:02), conform regulii Masterului "completează-l numai cu sinonime lipsă demonstrate
+  // prin teste". Dovada: "play" si "următorul" mergeau instant pe calea determinista
+  // (`media_ctl target=play` / `target=next`, ~8 ms), dar formele ROSTITE firesc cadeau la agentul
+  // LLM — lent si nesigur:
+  //   "dă-i drumul"  -> NATIVE_ROUTE action=agent_handoff
+  //   "mai departe"  -> NATIVE_ROUTE action=agent_handoff  (agentul a apasat apoi un articol de
+  //                     stiri, "USA gegen China", in loc de play)
+  // Adaugate: da-i drumul / da drumul / reia / mergi mai departe / mai departe / sari peste.
+  // "mai departe" si "sari peste" inseamna URMATORUL, nu play — mapate corespunzator mai jos.
   private val MEDIA_CTL_PATTERN = Regex(
-    "^\\s*(pauza|pauză|opreste|oprește|stop|continua|continuă|porneste|pornește|play|" +
-      "urmatorul|următorul|urmatoarea|următoarea|next|inapoi|înapoi|precedentul|precedenta|precedentă|previous)" +
+    "^\\s*(pauza|pauză|opreste|oprește|stop|continua|continuă|porneste|pornește|play|reia|" +
+      "da-i drumul|dă-i drumul|da drumul|dă drumul|da-i drumu|dă-i drumu|" +
+      "urmatorul|următorul|urmatoarea|următoarea|next|mai departe|mergi mai departe|sari peste|" +
+      "inapoi|înapoi|precedentul|precedenta|precedentă|previous)" +
       "\\s*(muzica|muzică|music)?\\s*[.!?]*\\s*$",
     RegexOption.IGNORE_CASE,
   )
@@ -2360,8 +2757,12 @@ class BensonForegroundService : Service() {
     val word = m.groupValues[1]
     val action = when (word) {
       "pauza", "pauză", "opreste", "oprește", "stop" -> "pause"
-      "continua", "continuă", "porneste", "pornește", "play" -> "play"
-      "urmatorul", "următorul", "urmatoarea", "următoarea", "next" -> "next"
+      // FIX_MEDIA_VERB_SYNONYMS_1 — formele rostite firesc pentru "reia redarea".
+      "continua", "continuă", "porneste", "pornește", "play", "reia",
+      "da-i drumul", "dă-i drumul", "da drumul", "dă drumul", "da-i drumu", "dă-i drumu" -> "play"
+      // "mai departe"/"sari peste" = piesa urmatoare, nu play.
+      "urmatorul", "următorul", "urmatoarea", "următoarea", "next",
+      "mai departe", "mergi mai departe", "sari peste" -> "next"
       else -> "previous"
     }
     logRoute("NATIVE_ROUTE", "action=media_ctl target=\"$action\"")
@@ -2419,6 +2820,232 @@ class BensonForegroundService : Service() {
   // search, so an explicit mention of those still wins). GeneralSearchMatcher already refuses nav
   // ("pe hartă"/"unde e"/"du-mă la") and YouTube/Spotify phrasing — that existing path stays
   // untouched.
+  // Op. 2 (14.10.2026) — contextul cerut explicit de Master: ultima interogare căutată, ca
+  // "apasă pe primul rezultat" sa stie DUPA CE sa caute randul, fara sa repeti cererea.
+  @Volatile private var lastSearchQuery: String = ""
+
+  // Op. 2 — "caută pe internet X": web INAINTEA căutării in-aplicatie (vezi
+  // ExplicitWebSearchMatcher pentru cauza dovedita). Lanseaza, apoi VERIFICA rezultatele pe ecran
+  // prin motorul generic existent; fara dovada, spune ce n-a mers (doctrina 9).
+  // Revert: EXPLICIT_WEB_SEARCH = false.
+  private val EXPLICIT_WEB_SEARCH = true
+
+  // RUNDA VOICE-ONLY (14.10.2026, punctele 1-2-4-6) — BENSON CITESTE rezultatele si accepta o
+  // alegere ROSTITA. Aceeasi forma ca PendingWaDisambiguation/PendingAppSearch (lista numerotata,
+  // raspuns prin ordinal, 2 incercari si renunta) — zero mecanism nou de conversatie sau de voce.
+  // Etichetele sunt inghetate la momentul citirii; clickResultByLabel le re-cauta pe ecranul de
+  // atunci, deci o lista devenita invalida eseueaza onest in loc sa apese altceva (punctul 4).
+  private data class PendingResultChoice(
+    val query: String,
+    val labels: List<String>,
+    val epoch: Long,
+    val createdAt: Long = System.currentTimeMillis(), // FIX_RESULT_CHOICE_NO_SWALLOW_1 — expiră
+    var noCount: Int = 0,
+  )
+  @Volatile private var pendingResultChoice: PendingResultChoice? = null
+
+  private val VOICE_RESULT_LIST = true // revert: false => doar primul rezultat, ca inainte
+
+  private fun ordinalWordRo(n: Int): String = when (n) {
+    1 -> "Prima"; 2 -> "A doua"; 3 -> "A treia"; 4 -> "A patra"; else -> "A $n-a"
+  }
+
+  private fun countWordRo(n: Int): String = when (n) {
+    2 -> "două variante"; 3 -> "trei variante"; 4 -> "patru variante"; else -> "$n variante"
+  }
+
+  // Construieste exact fraza ceruta de Master: "Master, am găsit trei variante. Prima este … A
+  // doua este … A treia este … Pe care o preferați?"
+  private fun speakResultList(query: String, labels: List<String>) {
+    // Corectie ceruta de Master: se prezinta PRODUSUL (nume + pret), nu eticheta bruta a reclamei.
+    // FIX_RESULT_LIST_LENGTH_1 — formulare TERSA. Cu "Prima este … A doua este …" lista ajungea la
+    // 261 de caractere / 20 s de vorbire, iar Masterul nu avea cand sa raspunda (vezi
+    // ResultLabelPresenter.MAX_SPOKEN_NAME pentru dovada din log).
+    val sb = StringBuilder("Master, am găsit ${countWordRo(labels.size)}. ")
+    labels.forEachIndexed { i, l ->
+      sb.append(ordinalWordRo(i + 1)).append(": ").append(ResultLabelPresenter.present(l)).append(". ")
+    }
+    sb.append("Pe care o preferați?")
+    val text = sb.toString()
+    AudioDiag.log(this, "RESULT_LIST", "query=\"$query\" n=${labels.size} chars=${text.length}")
+    // dismissDelayMs = 0 => bula RAMANE pe ecran pana la raspuns, exact ca starea "ASCULT".
+    // Cu 8000 ms, bula dispărea după 8 s în timp ce BENSON mai citea încă 12 s (raportat de Master:
+    // „nu exista bula"). Revert: BUBBLE_LINGER_MS.
+    updateBubbleNative(text, query, terminal = false, dismissDelayMs = 0L)
+    speak(text, "confirm")
+  }
+
+  // FIX_RESULT_CHOICE_NO_SWALLOW_1 (14.10.2026) — REGRESIE DOVEDITA, a mea, prinsa de G3 la
+  // 15:51:02: o lista de rezultate rămasă neconfirmată a INGHITIT comenzile urmatoare, complet
+  // nelegate ("suna la Hannah pe whatsapp" a fost tratat ca raspuns de tip ordinal) →
+  // `FAIL|WA_CALL_ASK`, `FAIL|YT_SEARCH`, `FAIL|WA_MESSAGE_NO_ACTION`.
+  // Doua reguli, exact cele cerute de Master: confirmarea e legata de O SINGURA actiune si EXPIRA;
+  // iar o comanda noua nu se pierde niciodata intr-o intrebare veche ("Lasă asta", "Stop").
+  // Returneaza true DOAR daca a consumat efectiv rostirea; false => comanda isi continua drumul
+  // normal prin lantul nativ. Revert: `handlePendingResultChoice` fara valoare de retur + apelul
+  // necondiționat din dispatcher.
+  private val RESULT_CHOICE_TTL_MS = 60_000L
+  private val RESULT_CHOICE_CANCEL = Regex(
+    "^(?:lasa|lasă|lasa asta|lasă asta|stop|stai|anuleaza|anulează|renunta|renunță|nimic|niciuna|niciunul)\\b"
+  )
+
+  private fun handlePendingResultChoice(rawAnswer: String): Boolean {
+    val pending = pendingResultChoice ?: return false
+    if (System.currentTimeMillis() - pending.createdAt > RESULT_CHOICE_TTL_MS) {
+      AudioDiag.log(this, "RESULT_PICK", "expired age_ms=${System.currentTimeMillis() - pending.createdAt}")
+      pendingResultChoice = null
+      return false
+    }
+    val n = parseWaOrdinal(rawAnswer)
+    val chosen = n?.let { pending.labels.getOrNull(it - 1) }
+    if (chosen == null) {
+      if (RESULT_CHOICE_CANCEL.containsMatchIn(normalizeForMatch(rawAnswer))) {
+        pendingResultChoice = null
+        AudioDiag.log(this, "RESULT_PICK", "cancelled_by_user")
+        finishBrainCommandSuccess("Am lăsat lista. Spuneți-mi când doriți altceva.", rawAnswer, "result_pick_cancel")
+        return true
+      }
+      // Nu e un numar si nu e o anulare: daca sunt mai mult de doua cuvinte, e aproape sigur o
+      // COMANDA NOUA, nu un raspuns ratat. O lasam sa treaca, in loc sa o pierdem.
+      if (normalizeForMatch(rawAnswer).split(Regex("\\s+")).count { it.isNotBlank() } > 2) {
+        AudioDiag.log(this, "RESULT_PICK", "released_to_command_chain")
+        pendingResultChoice = null
+        return false
+      }
+      AudioDiag.log(this, "RESULT_PICK", "unresolved raw_ordinal=${n ?: -1}")
+      pending.noCount += 1
+      if (pending.noCount >= 2) {
+        pendingResultChoice = null
+        val msg = "Am renunțat la listă. Spune-mi din nou ce să caut."
+        updateBubbleNative(msg, rawAnswer, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+        speakNativeFallbackThenCapture(msg)
+      } else {
+        speak("Nu am înțeles numărul. Prima, a doua sau a treia?", "confirm")
+      }
+      return true
+    }
+    pendingResultChoice = null
+    val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+    if (svc == null) { speakNativeFallbackThenCapture("Serviciul de accesibilitate nu e disponibil."); return true }
+    svc.runOnServiceScope {
+      val result = svc.clickResultByLabel(chosen)
+      mainHandler.post {
+        if (result.ok) finishBrainCommandSuccess(result.message, rawAnswer, "result_pick_done")
+        else {
+          updateBubbleNative(result.message, rawAnswer, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+          speakNativeFallbackThenCapture(result.message)
+        }
+      }
+    }
+    return true
+  }
+
+  private fun tryExplicitWebSearch(command: String): Boolean {
+    if (!EXPLICIT_WEB_SEARCH) return false
+    val query = ExplicitWebSearchMatcher.extractQuery(command) ?: return false
+    logRoute("NATIVE_ROUTE", "action=web_search_explicit target=\"$query\"")
+    val encoded = try { java.net.URLEncoder.encode(query, "UTF-8") } catch (_: Exception) { return false }
+    val launched = try {
+      startActivity(
+        Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.google.com/search?q=$encoded"))
+          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+      )
+      true
+    } catch (e: Exception) {
+      AudioDiag.logError("NATIVE_ROUTE_ERROR", "action=web_search_explicit type=${e.javaClass.simpleName}")
+      false
+    }
+    AudioDiag.log(this, "APP_LAUNCH", "pkg=browser ok=$launched")
+    if (!launched) {
+      val msg = "N-am putut deschide browserul."
+      updateBubbleNative(msg, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+      speakNativeFallbackThenCapture(msg)
+      return true
+    }
+    lastSearchQuery = query
+    val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+    if (svc == null) {
+      finishBrainCommandSuccess("Am căutat $query pe internet.", command, "web_search_done")
+      return true
+    }
+    svc.runOnServiceScope {
+      kotlinx.coroutines.delay(2600)
+      // VOICE-ONLY — citim pana la 3 variante, nu doar prima.
+      // FIX_RESULT_LIST_DEDUP_2 — dovedit pe telefon (15:36:10): doua rezultate cu etichete BRUTE
+      // diferite ("10% RABATT lubluelu CHYW201…" vs "lubluelu CHYW201…") devin acelasi produs DUPA
+      // curatare, deci Masterul auzea "a doua" si "a treia" identice. Deduplicarea trebuie sa se
+      // faca pe forma PREZENTATA, nu pe eticheta bruta. Cerem mai multe candidate si pastram 3
+      // distincte. Revert: svc.topResultLabels(query, 3) direct.
+      val labels = if (VOICE_RESULT_LIST) {
+        val seen = linkedSetOf<String>()
+        val kept = mutableListOf<String>()
+        for (raw in svc.topResultLabels(query, 8)) {
+          // FIX_RESULT_LIST_DEDUP_3 — dovedit 15:47:09: deduplicarea pe forma COMPLETA (nume +
+          // pret) lasa doua variante identice sa treaca, pentru ca una avea pretul atasat si
+          // cealalta nu ("Fensterreiniger Fensterputzer, 82 virgulă 39 euro" vs
+          // "Fensterreiniger Fensterputzer"). Acelasi produs = acelasi NUME; pretul nu il face alt
+          // produs. Revert: cheia revine la ResultLabelPresenter.present(raw).
+          val spoken = ResultLabelPresenter.productName(raw)
+          if (spoken.isBlank() || !seen.add(spoken.lowercase())) continue
+          kept.add(raw)
+          if (kept.size >= 3) break
+        }
+        kept
+      } else emptyList()
+      val first = labels.firstOrNull() ?: svc.firstResultLabel(query)
+      AudioDiag.log(this, "SEARCH_VERIFY", "query=\"$query\" pkg=browser found=${first != null} n=${labels.size} first=\"${first ?: ""}\"")
+      mainHandler.post {
+        when {
+          labels.size >= 2 -> {
+            pendingResultChoice = PendingResultChoice(query, labels, svc.currentScreenEpoch())
+            speakResultList(query, labels)
+          }
+          first != null -> finishBrainCommandSuccess(
+            "Am căutat $query. Am găsit o singură variantă: $first. O deschid?", command, "web_search_done",
+          ).also { pendingResultChoice = PendingResultChoice(query, listOf(first), svc.currentScreenEpoch()) }
+          // Punctul 6 — si cand NU gaseste, raspunde verbal si propune o alternativa.
+          else -> finishBrainCommandSuccess(
+            "Am deschis căutarea pentru $query, dar nu pot citi rezultatele de pe pagină. " +
+              "Pot încerca altă formulare, dacă îmi spuneți una.",
+            command, "web_search_done",
+          )
+        }
+      }
+    }
+    return true
+  }
+
+  // Op. 2 partea a doua — "apasă pe primul rezultat", cu interogarea pastrata din comanda
+  // precedenta. Clicul il face ControlLocator.findFirstResult EXISTENT, nu un mecanism nou.
+  private fun tryFirstResult(command: String): Boolean {
+    if (!FirstResultMatcher.matches(command)) return false
+    val query = lastSearchQuery
+    if (query.isBlank()) {
+      logRoute("NATIVE_ROUTE", "action=first_result_declined reason=no_context")
+      val msg = "Nu știu la ce rezultat te referi. Ce să caut mai întâi?"
+      updateBubbleNative(msg, command, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+      speakNativeFallbackThenCapture(msg)
+      return true
+    }
+    logRoute("NATIVE_ROUTE", "action=first_result target=\"$query\"")
+    val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+    if (svc == null) {
+      speakNativeFallbackThenCapture("Serviciul de accesibilitate nu e disponibil.")
+      return true
+    }
+    svc.runOnServiceScope {
+      val result = svc.clickFirstResult(query)
+      mainHandler.post {
+        if (result.ok) finishBrainCommandSuccess(result.message, command, "first_result_done")
+        else {
+          updateBubbleNative(result.message, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+          speakNativeFallbackThenCapture(result.message)
+        }
+      }
+    }
+    return true
+  }
+
   private fun tryNativeGeneralSearch(command: String): String? {
     val query = GeneralSearchMatcher.extractQuery(command) ?: return null
     logRoute("NATIVE_ROUTE", "action=web_search target=\"$query\"")
@@ -2445,7 +3072,26 @@ class BensonForegroundService : Service() {
         putExtra("query", query)
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       }
-      val ok = if (packageManager.resolveActivity(searchIntent, 0) != null) {
+      // FIX_YT_SEARCH_INTENT_1 (15.10.2026) — CAUZA REALĂ a eșecului DETERMINIST `YT_PLAY_CONFIRM`,
+      // găsită uitându-mă la ce e efectiv pe ecran după lansare:
+      //   [1] button "guns n roses you could be mine instrumental"   <- căutarea VECHE, în casetă
+      //   [8] button "Guns N' Roses: You Could Be Mine Instrumental"  <- rezultatele VECHI
+      // `ACTION_SEARCH` cu extra "query" e ACCEPTAT de YouTube (resolveActivity != null), dar
+      // aplicația îl IGNORĂ și restaurează sesiunea anterioară. Deci "madonna" nu era căutat
+      // niciodată, iar `locateFirstResultOnScreen` nu avea ce găsi.
+      // Mai grav: testul TRECEA mai devreme azi din motiv greșit — ultima căutare din YouTube
+      // chiar era "madonna" (din rulările precedente), deci rezultatele vechi se potriveau
+      // întâmplător. Un fals pozitiv, nu o funcție care merge.
+      // Reparație: adresa de rezultate, care CHIAR execută căutarea, e acum calea principală;
+      // `ACTION_SEARCH` rămâne rezervă. Revert: YT_SEARCH_VIA_URL = false.
+      val ok = if (YT_SEARCH_VIA_URL) {
+        startActivity(
+          Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.youtube.com/results?search_query=$encoded"))
+            .setPackage("com.google.android.youtube")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        true
+      } else if (packageManager.resolveActivity(searchIntent, 0) != null) {
         startActivity(searchIntent); true
       } else {
         startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.youtube.com/results?search_query=$encoded")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -2566,12 +3212,15 @@ class BensonForegroundService : Service() {
   private val WA_NUMBER_WORDS = mapOf("unu" to 1, "una" to 1, "doi" to 2, "doua" to 2, "trei" to 3, "patru" to 4, "cinci" to 5)
   private val WA_ORDINAL_WORDS = arrayOf("", "unu", "doi", "trei", "patru", "cinci")
 
-  private fun parseWaOrdinal(text: String): Int? {
-    val norm = normalizeForMatch(text)
-    Regex("\\d+").find(norm)?.let { return it.value.toIntOrNull() }
-    for ((word, n) in WA_NUMBER_WORDS) if (norm.split(Regex("\\s+")).contains(word)) return n
-    return null
-  }
+  // RUNDA VOICE-ONLY (14.10.2026) — deleaga spre OrdinalMatcher (pur, JUnit-testat). Cifrele si
+  // cardinalele se comporta exact ca inainte; se ADAUGA formele ordinale ("primul", "al doilea",
+  // "a treia"), de care are nevoie alegerea dintr-o lista citita cu voce. Un singur parser in tot
+  // codul, folosit si de WhatsApp si de lista de aplicatii. Revert: corpul vechi de mai jos.
+  //   val norm = normalizeForMatch(text)
+  //   Regex("\\d+").find(norm)?.let { return it.value.toIntOrNull() }
+  //   for ((word, n) in WA_NUMBER_WORDS) if (norm.split(Regex("\\s+")).contains(word)) return n
+  //   return null
+  private fun parseWaOrdinal(text: String): Int? = OrdinalMatcher.parse(text)
 
   private val WA_MIMETYPES = arrayOf(
     "vnd.android.cursor.item/vnd.com.whatsapp.voip.call",
@@ -3232,6 +3881,22 @@ class BensonForegroundService : Service() {
 
   private fun handleNativeCommandFlow(rawTranscript: String, isFollowUp: Boolean, originalPhrase: String, originalWavPath: String?) {
     val command = if (isFollowUp) rawTranscript.trim() else stripWakeWordNative(rawTranscript)
+    // FIX_INTERRUPT_1 — PRIMUL in lant: "stop" trebuie sa functioneze si in mijlocul unei
+    // confirmari sau al unei sarcini a agentului, nu doar cand BENSON sta degeaba.
+    // FIX_AGENT_YIELDS_TO_COMMAND_1 (15.10.2026) — CAUZA REALĂ a eșecului DETERMINIST
+    // `YT_PLAY_CONFIRM` (3 rulări din 3), găsită în log:
+    //   21:34:44.737 youtube_search_confirm target="madonna"
+    //   21:34:46.596 TTS "Nu am reușit să duc asta la capăt, Master."  ← AGENTUL, din comanda
+    //                 anterioară, încă rula: vorbea peste test și umbla pe ecran
+    //   21:34:50.761 YT_RESULT_WAIT found=false attempts=21 ms=6002    ← rezultatul chiar lipsea
+    // `cancelAgentNow()` se chema DOAR când pornea un agent nou. O comandă DETERMINISTĂ
+    // („caută madonna pe youtube") nu anula nimic, deci agentul vechi continua în paralel cu
+    // executorii nativi — exact „doi agenți pe același ecran", doar că unul era motorul vechi.
+    // Regula cerută de Master: „La STOP sau COMANDĂ NOUĂ, anulează rularea veche."
+    // Orice rostire nouă a Masterului invalidează agentul în curs, înainte de orice rutare.
+    // Revert: mută `cancelAgentNow()` înapoi doar în `tryAgent`.
+    if (agentCall != null || agentRunId > 0) cancelAgentNow()
+    if (tryInterrupt(command)) return
     if (pendingWaDisambiguation != null) {
       handlePendingWaDisambiguation(command)
       return
@@ -3252,6 +3917,17 @@ class BensonForegroundService : Service() {
       handlePendingYoutubePlayAnswer(command)
       return
     }
+    if (pendingAppOpen != null) { // FIX_BRAIN_OPEN_APP_GATE_1
+      handlePendingAppOpenAnswer(command)
+      return
+    }
+    if (pendingNav != null) { // FIX_NATIVE_NAVIGATE_1
+      handlePendingNavAnswer(command)
+      return
+    }
+    // RUNDA VOICE-ONLY — alegere rostită din lista citită. FIX_RESULT_CHOICE_NO_SWALLOW_1:
+    // consumă rostirea DOAR dacă e un ordinal sau o anulare; altfel comanda nouă trece mai departe.
+    if (pendingResultChoice != null && handlePendingResultChoice(command)) return
     // FIX_WAKE_NAME_ALONE_1 (2026-10-03, user-directed, device-proven) — attempt #3 of today's 10x
     // test: follow-up capture caught "benson" (chars=6, the user re-addressing BENSON mid-session,
     // or an echo of it), which isn't blank, so it fell through to the parser chain and none of
@@ -3280,6 +3956,15 @@ class BensonForegroundService : Service() {
       return
     }
     if (tryGlobalNav(command)) return
+    // FIX_NATIVE_NAVIGATE_1 — "du-mă la X": alege aplicatia de navigatie din registru dupa
+    // capabilitate, cere confirmare, apoi porneste. Inaintea WhatsApp-ului nu conteaza (tiparele
+    // nu se suprapun), dar sta aici ca sa fie langa celelalte rute care pun o intrebare.
+    if (tryNativeNavigate(command)) return
+    // Op. 2 — cand Masterul NUMESTE internetul, nimic altceva n-are drept la comanda. Sta INAINTEA
+    // căutării in-aplicatie (cauza dovedita: Amazon o captura). "primul rezultat" tot aici, ca sa
+    // nu fie inghitit de "apasă pe X" generic (dovada: CONTROL_FIND intent=primul rezultat none).
+    if (tryExplicitWebSearch(command)) return
+    if (tryFirstResult(command)) return
     if (tryNativeWhatsApp(command)) return // asked a confirmation; continues via the follow-up capture above
     if (tryNativeAppCategorySearch(command)) return // same shape — may ask a confirmation (ambiguous) or finish directly
     // RUNDA MUSIC-1 — checked BEFORE tryContextSearch so Spotify's "caută X" is superseded by
@@ -3318,6 +4003,10 @@ class BensonForegroundService : Service() {
       // same as the isFollowUp branch already did. Revert: restore the if/else on isFollowUp.
       onHotwordDetected(command, null)
       rearmWakeNative("js_handoff")
+    // FAZA 1 — agentul preia inaintea creierului vechi. Daca e OFF sau indisponibil (buget, cheie),
+    // cade exact pe tryBrainFallback de pana acum, deci comportamentul vechi rămâne intact.
+    } else if (tryAgent(command)) {
+      AudioDiag.log(this, "NATIVE_ROUTE", "action=agent_handoff")
     } else if (tryBrainFallback(command)) {
       // INTEGRATION-1 (13.10.2026, B1 live) — interpretorul a preluat async; bula/vocea sunt
       // actualizate din callback-ul lui. Nu mai rula fallback-ul static mai jos.
@@ -3345,8 +4034,24 @@ class BensonForegroundService : Service() {
   // confirmare (pendingWaAction), raspunsul YES/NO al utilizatorului e interceptat normal la
   // inceputul handleNativeCommandFlow, inainte sa ajunga vreodata aici.
   private val conversationHistory = ConversationHistory()
+  // FIX_BRAIN_TIMEOUT_1 (14.10.2026) — cauza dovedita pe telefon, nu presupusa. Cele trei
+  // BRAIN_CALL de azi: ms=8014 ok=true, ms=10002 ok=false, ms=10005 ok=false, ambele esecuri cu
+  // BRAIN_ERROR type=InterruptedIOException, adica exact acest callTimeout. gpt-5-nano cu
+  // json_schema strict livreaza in 8-10+ s, deci un plafon de 10 s garanteaza eroarea: "cat este
+  // 9 ori 6" nu primea niciun raspuns. 25 s = capabilitatea functioneaza.
+  // ATENTIE, onest: asta repara FAIL-ul, NU latenta. 8-25 s pentru un raspuns vocal e inacceptabil
+  // fata de tinta <700 ms; cauza latentei (model + reasoning + schema stricta + al doilea apel LLM
+  // "interp shadow" pe acelasi drum de retea) e raportata separat, nu ascunsa aici.
+  // Revert: callTimeout(10, SECONDS).
+  // FIX_BRAIN_TIMEOUT_1b (14.10.2026) — prima versiune a fixului a fost INCOMPLETA, dovedit pe
+  // telefon imediat: cu doar callTimeout(25s) a aparut `BRAIN_ERROR type=SocketTimeoutException`
+  // la `ms=10006`, adica readTimeout-ul IMPLICIT al OkHttp (10 s) ramasese plafonul real. Se seteaza
+  // explicit toate trei. Revert: doar .callTimeout(10, SECONDS).
   private val brainHttpClient = OkHttpClient.Builder()
-    .callTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
+    .callTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+    .readTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+    .writeTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
 
   private val BRAIN_TURN_SCHEMA = """
     {"type":"object","properties":{
@@ -3434,6 +4139,337 @@ class BensonForegroundService : Service() {
     return if (pkg.isNullOrBlank() || pkg == packageName || pkg == launcherPackage()) "ecran principal" else pkg
   }
 
+  // ───────────────────────── FAZA 1 — BENSON LLM AGENT ─────────────────────────
+  // Mandat §2: agentul e motorul conversatiei SI al orchestrarii, integrat in BENSON, nu un al
+  // doilea asistent. Decizie de arhitectura (15.10.2026), luata pe baza regulii Masterului insusi
+  // din TEST H ("Nicio modificare a agentului nu justifica deteriorarea unei functii deja
+  // validate") si §1 ("Nu reconstrui BENSON"): agentul preia INTELEGEREA si ORCHESTRAREA, iar
+  // comenzile deterministe DOVEDITE (G3) isi pastreaza calea rapida de ~115 ms. Agentul sta exact
+  // unde statea creierul vechi — la capatul lantului — dar, spre deosebire de el, poate EXECUTA
+  // prin instrumente, in mai multi pasi, cu verificare.
+  // Revert complet: LLM_AGENT = false => tryBrainFallback vechi, neatins, exact ca azi.
+  private val LLM_AGENT = true
+  private val MUSIC_REQUIRE_MEDIA_CAPABILITY = true
+  private val YT_SEARCH_VIA_URL = true // FIX_YT_SEARCH_INTENT_1
+
+  // FIX_AGENT_STAFF_BLINDNESS_1 (15.10.2026) — CAUZA DOVEDITA pe telefon, 10:12:30: la "pune Radio
+  // România Actualități" agentul a deschis CHROME, desi telefonul are patru aplicatii de radio
+  // (Simple Radio, Radio Garden, AccuRadio, Magic FM). Motivul: ii dadeam doar aplicatiile cu
+  // capabilitati in tabelul din cod (9 pachete) — deci agentul NU STIA ca aplicatiile de radio
+  // exista. Exact esecul pe care LEGEA PERSONALULUI il interzice: "BENSON trebuie sa stie pe cine
+  // trimite".
+  // Acum: pe langa cele cu capabilitati cunoscute, ii dam si aplicatiile instalate al caror nume
+  // se potriveste cu CE A CERUT Masterul. Registrul are ~281 de aplicatii — nu incap intr-un
+  // prompt si nici nu ajuta; selectia pe cuvintele cererii e relevanta si ieftina.
+  // Revert: revino la filtrul `it.caps.isNotEmpty()` singur.
+  private fun agentInstalledAppsSummary(command: String): String = try {
+    val all = StaffRegistry.load(this).filter { !it.archived }
+    val tokens = normalizeForMatch(command).split(Regex("\\s+"))
+      .filter { it.length >= 4 }
+    val byPurpose = all.filter { m ->
+      val n = normalizeForMatch(m.displayName)
+      tokens.any { t -> n.contains(t) || t.contains(n) }
+    }
+    val known = all.filter { it.caps.isNotEmpty() }
+    (byPurpose + known).distinctBy { it.packageName }
+      .joinToString(", ") { it.displayName }.take(400)
+  } catch (_: Exception) { "" }
+
+  // Executa UN instrument. Aici e singura granita prin care agentul atinge Androidul; fiecare
+  // ramura cheama cod EXISTENT, dovedit. Returneaza (jsonResult, terminat).
+  // FIX_AGENT_SINGLE_RUN_1 (15.10.2026) — SUPRAPUNERE DOVEDITA din loguri, nu banuita:
+  //   10:41:14.786 AGENT_RUN steps=1 ms=25054   si   10:41:19.147 AGENT_RUN steps=1 ms=25047
+  // doua rulari de ~25 s terminate la 4,3 s distanta => s-au suprapus ~21 s, doi agenti apasand
+  // pe acelasi ecran. Si mai rau, la 11:01:57.412 apar in ACEEASI milisecunda:
+  //   AGENT_TOOL step=1 name=observe_screen   SI   AGENT_CANCELLED run=5
+  // adica agentul anulat APUCASE sa execute un instrument — exact "actiunea intarziata dupa
+  // anulare" pe care Masterul o interzice.
+  //
+  // Doua garantii, nu una:
+  //  1. `agentFingerLock` — acces EXCLUSIV la degetul BENSON: doua instrumente nu pot rula simultan.
+  //  2. verificarea de prospetime CHIAR INAINTE de actiune, in interiorul lacatului — o rulare
+  //     anulata cat astepta lacatul nu mai apasa nimic.
+  // Revert: scoate parametrul runId si blocul synchronized.
+  private val agentFingerLock = Any()
+
+  // P0 (15.10.2026) — "anularea efectiva a cererii HTTP prin Call.cancel()". Fara ea, o rulare
+  // anulata ramanea blocata ~22 s in apelul OkHttp si abia apoi vedea ca nu mai e a ei — timp in
+  // care putea ajunge la pasul final si VORBI. Pastram apelul in curs ca sa-l putem taia imediat.
+  @Volatile private var agentCall: okhttp3.Call? = null
+
+  private fun cancelAgentNow() {
+    agentRunId++
+    try { agentCall?.cancel() } catch (_: Exception) {}
+    agentCall = null
+  }
+
+  // Verifica la SERVER ca adresa chiar serveste audio. Intoarce (urlFinal, mimeType) sau null.
+  // Daca adresa e o lista de redare (.m3u/.pls), extragem primul flux din ea si verificam din nou,
+  // o singura data (fara recursie infinita). Asa, un URL inventat de model pica aici: da 404, sau
+  // text/html, si nu ajunge la player. Foloseste clientul OkHttp existent.
+  private fun verifyAudioStream(url: String, depth: Int = 0): Pair<String, String>? {
+    if (depth > 1) return null
+    return try {
+      val req = Request.Builder().url(url).header("User-Agent", "BENSON/1.0").get().build()
+      brainHttpClient.newCall(req).execute().use { resp ->
+        if (!resp.isSuccessful) return null
+        val ct = (resp.header("Content-Type") ?: "").lowercase().substringBefore(';').trim()
+        when {
+          ct.startsWith("audio/") && !ct.contains("mpegurl") && !ct.contains("scpls") ->
+            url to ct
+          // Lista de redare: luam prima linie care e un http(s) si o verificam la randul ei.
+          ct.contains("mpegurl") || ct.contains("scpls") || ct == "application/pls+xml" -> {
+            val body = resp.body?.source()?.let { s -> s.request(8192); s.buffer.snapshot().utf8() } ?: return null
+            val first = body.lineSequence()
+              .map { it.substringAfter("File1=", it).trim() }
+              .firstOrNull { it.startsWith("http://") || it.startsWith("https://") } ?: return null
+            verifyAudioStream(first, depth + 1)
+          }
+          else -> null
+        }
+      }
+    } catch (_: Exception) { null }
+  }
+
+  private fun runAgentTool(name: String, args: JSONObject, originalCommand: String, runId: Int): Pair<String, Boolean> =
+    synchronized(agentFingerLock) {
+      if (runId != agentRunId) {
+        AudioDiag.log(this, "AGENT_TOOL_SKIPPED", "run=$runId name=$name reason=cancelled")
+        return@synchronized BensonAgentTools.toolResult(false, "anulat") to true
+      }
+      runAgentToolLocked(name, args, originalCommand)
+    }
+
+  private fun runAgentToolLocked(name: String, args: JSONObject, originalCommand: String): Pair<String, Boolean> {
+    val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+    return when (name) {
+      BensonAgentTools.OPEN_APP -> {
+        val app = args.optString("name").trim()
+        if (app.isBlank()) return BensonAgentTools.toolResult(false, "lipsește numele aplicației") to false
+        val resp = tryNativeOpenApp("deschide $app")
+        BensonAgentTools.toolResult(resp != null, resp ?: "nu am găsit aplicația $app") to false
+      }
+      BensonAgentTools.SEARCH_IN_APP -> {
+        val q = args.optString("query").trim()
+        if (q.isBlank()) return BensonAgentTools.toolResult(false, "lipsește textul căutat") to false
+        if (svc == null) return BensonAgentTools.toolResult(false, "accesibilitatea nu e disponibilă") to false
+        val r = kotlinx.coroutines.runBlocking {
+          svc.runUniversalHandCommand(
+            expo.modules.accessibility.UniversalHandCommand.Search(q), skipConfirmGate = true,
+          )
+        }
+        BensonAgentTools.toolResult(r.ok, r.message) to false
+      }
+      BensonAgentTools.OBSERVE_SCREEN -> {
+        val d = svc?.observeScreen()
+        if (d == null) BensonAgentTools.toolResult(false, "nu pot citi ecranul") to false
+        else BensonAgentTools.toolResult(true, d.render()) to false
+      }
+      BensonAgentTools.TAP_ELEMENT -> {
+        val label = args.optString("label").trim()
+        if (label.isBlank()) return BensonAgentTools.toolResult(false, "lipsește eticheta") to false
+        if (svc == null) return BensonAgentTools.toolResult(false, "accesibilitatea nu e disponibilă") to false
+        // FIX_AGENT_TAP_CONTRACT_1 — INDEXUL e autoritatea (lista e numerotata); eticheta e doar
+        // control impotriva unui ecran schimbat intre observare si apasare.
+        val idx = args.optInt("index", -1)
+        if (idx < 0) return BensonAgentTools.toolResult(false, "lipsește indexul elementului") to false
+        val r = kotlinx.coroutines.runBlocking { svc.tapDigestElement(idx, label) }
+        BensonAgentTools.toolResult(r.ok, r.message) to false
+      }
+      BensonAgentTools.OPEN_URL -> {
+        val url = args.optString("url").trim()
+        // Validare in cod (§4 din mandat): doar http/https, nimic altceva. Un `intent://` sau un
+        // `file://` venit de la model nu ajunge niciodata la startActivity.
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+          AudioDiag.log(this, "AGENT_REJECT", "tool=open_url reason=bad_scheme")
+          return BensonAgentTools.toolResult(false, "adresă nepermisă; doar http sau https") to false
+        }
+        val ok = try {
+          startActivity(
+            Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+          )
+          true
+        } catch (_: Exception) { false }
+        AudioDiag.log(this, "AGENT_OPEN_URL", "ok=$ok host=${runCatching { android.net.Uri.parse(url).host }.getOrNull()}")
+        if (ok) Thread.sleep(3500) // lasam pagina/fluxul sa porneasca inainte de verificare
+        BensonAgentTools.toolResult(ok, if (ok) "am deschis adresa" else "nu am putut deschide adresa") to false
+      }
+      BensonAgentTools.PLAY_STREAM -> {
+        val url = args.optString("url").trim()
+        val station = args.optString("station").trim().ifBlank { "postul" }
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+          return BensonAgentTools.toolResult(false, "adresă nepermisă; doar http sau https") to false
+        }
+        // Ordinul Masterului: "numai dintr-o sursa REALA, VERIFICATA. Nu accepta URL-uri inventate".
+        // Verificam la server CE serveste adresa, inainte sa pornim ceva. Un URL inventat da 404
+        // sau text/html si e refuzat aici, nu ajunge niciodata la player.
+        val verified = verifyAudioStream(url)
+        if (verified == null) {
+          AudioDiag.log(this, "STREAM_VERIFY", "ok=false host=${runCatching { android.net.Uri.parse(url).host }.getOrNull()}")
+          return BensonAgentTools.toolResult(false, "adresa nu servește audio; nu o pornesc") to false
+        }
+        AudioDiag.log(this, "STREAM_VERIFY", "ok=true type=${verified.second} host=${runCatching { android.net.Uri.parse(verified.first).host }.getOrNull()}")
+        val ok = try {
+          startActivity(
+            Intent(Intent.ACTION_VIEW).apply {
+              setDataAndType(android.net.Uri.parse(verified.first), verified.second)
+              addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            },
+          )
+          true
+        } catch (_: Exception) { false }
+        AudioDiag.log(this, "STREAM_PLAY", "ok=$ok station=\"$station\"")
+        if (ok) Thread.sleep(4000)
+        BensonAgentTools.toolResult(ok, if (ok) "am pornit fluxul pentru $station" else "nu am găsit un player pentru flux") to false
+      }
+      BensonAgentTools.VERIFY_PLAYING -> {
+        // Semnal verificabil, nu o presupunere: isMusicActive spune daca iese efectiv sunet.
+        // FIX_VERIFY_PLAYING_STRICT_1 (15.10.2026) — FALS POZITIV DOVEDIT pe telefon (11:44:48):
+        // `verify_playing` a raportat `playing=true` cu titlul "VWs neue Strategie…" — un articol
+        // GERMAN dintr-o sesiune Chrome rămasă de la o navigare anterioară, nu radioul cerut. La
+        // verificarea imediat urmatoare, toate playerele erau `state:idle`. O singura citire a lui
+        // isMusicActive poate prinde un sunet de o clipa sau o sesiune veche.
+        // Un flux radio sună CONTINUU: cerem doua citiri la ~1,8 s distanta, ambele adevarate.
+        // Asa, o reclama scurta sau un rest de sesiune nu mai trece drept "radioul merge".
+        val am = try { getSystemService(Context.AUDIO_SERVICE) as AudioManager } catch (_: Exception) { null }
+        val first = am?.isMusicActive == true
+        if (first) Thread.sleep(1800)
+        val playing = first && am?.isMusicActive == true
+        val fg = expo.modules.accessibility.BensonAccessibilityService.instance?.currentForegroundPackageLive().orEmpty()
+        val meta = try {
+          expo.modules.notificationlistener.MediaTransport.metadata(applicationContext, fg)
+        } catch (_: Exception) { null }
+        val detail = if (playing) {
+          "se aude audio" + (meta?.title?.takeIf { it.isNotBlank() }?.let { ": \"$it\"" } ?: "")
+        } else "NU se aude niciun audio"
+        AudioDiag.log(this, "AGENT_VERIFY_PLAYING", "playing=$playing pkg=$fg title=\"${meta?.title.orEmpty().take(40)}\"")
+        BensonAgentTools.toolResult(playing, detail) to false
+      }
+      BensonAgentTools.SAY -> {
+        val text = args.optString("text").trim().ifBlank { "Gata." }
+        conversationHistory.add("user", originalCommand); conversationHistory.add("assistant", text)
+        finishBrainCommandSuccess(text, originalCommand, "agent_done")
+        BensonAgentTools.toolResult(true, "spus") to true
+      }
+      else -> BensonAgentTools.toolResult(false, "instrument necunoscut") to true
+    }
+  }
+
+  private fun tryAgent(command: String): Boolean {
+    if (!LLM_AGENT) return false
+    if (JS_VOICE_HANDOFF) return false
+    if (OpenAiUsageMeter.isBudgetExceeded(this)) { AudioDiag.log(this, "AGENT_SKIPPED", "reason=budget"); return false }
+    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    val apiKey = prefs.getString("brain_api_key", "") ?: ""
+    if (apiKey.isBlank()) return false
+    val baseUrl = (prefs.getString("brain_base_url", "")?.takeIf { it.isNotBlank() } ?: "https://api.openai.com/v1").trimEnd('/')
+
+    Thread({
+      val startMs = System.currentTimeMillis()
+      val messages = org.json.JSONArray().apply {
+        put(JSONObject().apply {
+          put("role", "system")
+          put("content", BensonAgentTools.systemPrompt(foregroundAppLabel(), agentInstalledAppsSummary(command)))
+        })
+        for (turn in conversationHistory.snapshot()) {
+          put(JSONObject().apply { put("role", turn.role); put("content", turn.text) })
+        }
+        put(JSONObject().apply { put("role", "user"); put("content", command) })
+      }
+      // FIX_INTERRUPT_1 — fiecare rulare isi ia un numar; "stop" incrementeaza agentRunId, deci
+      // bucla vede ca nu mai e a ei si se opreste la pasul urmator. Fara Thread.stop (interzis),
+      // fara a lasa o apasare la jumatate.
+      // O comanda noua invalideaza complet rularea veche, inclusiv apelul ei HTTP.
+      cancelAgentNow()
+      val myRun = agentRunId
+      var done = false
+      var steps = 0
+      try {
+        while (!done && steps < BensonAgentTools.MAX_STEPS) {
+          if (myRun != agentRunId) { AudioDiag.log(this, "AGENT_CANCELLED", "run=$myRun"); return@Thread }
+          steps++
+          val body = JSONObject().apply {
+            put("model", "gpt-5-nano")
+            put("messages", messages)
+            put("tools", org.json.JSONArray(BensonAgentTools.toolsJson()))
+          }
+          val req = Request.Builder().url("$baseUrl/chat/completions")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+          val call = brainHttpClient.newCall(req)
+          agentCall = call
+          val msg = call.execute().use { resp ->
+            if (!resp.isSuccessful) { AudioDiag.logError("AGENT_ERROR", "http=${resp.code}"); return@use null }
+            val root = JSONObject(resp.body?.string() ?: return@use null)
+            root.optJSONObject("usage")?.let { u ->
+              val cost = (u.optInt("prompt_tokens") / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_INPUT_PER_1M_USD +
+                (u.optInt("completion_tokens") / 1_000_000.0) * OpenAiUsageMeter.GPT5_NANO_OUTPUT_PER_1M_USD
+              OpenAiUsageMeter.recordUsage(this, "agent_gpt5nano", cost)
+            }
+            root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
+          } ?: break
+          messages.put(msg)
+          if (myRun != agentRunId) { AudioDiag.log(this, "AGENT_CANCELLED", "run=$myRun stage=after_http"); return@Thread }
+          val calls = msg.optJSONArray("tool_calls")
+          if (calls == null || calls.length() == 0) {
+            // Fara instrument: raspuns pur conversational. Il rostim si incheiem.
+            val text = msg.optString("content").trim()
+            // P0 punctul 4: identificatorul rulării se verifică ÎNAINTE de orice TTS, nu doar
+            // înainte de instrumente. Un răspuns sosit după anulare e rezultat INVALID (punctul 3).
+            if (text.isNotBlank() && myRun == agentRunId) {
+              conversationHistory.add("user", command); conversationHistory.add("assistant", text)
+              mainHandler.post { if (myRun == agentRunId) finishBrainCommandSuccess(text, command, "agent_chat") }
+              done = true
+            }
+            break
+          }
+          for (i in 0 until calls.length()) {
+            val call = calls.optJSONObject(i) ?: continue
+            val fn = call.optJSONObject("function")
+            val fname = fn?.optString("name")
+            val fargs = runCatching { JSONObject(fn?.optString("arguments") ?: "{}") }.getOrDefault(JSONObject())
+            if (!BensonAgentTools.isKnownTool(fname)) {
+              AudioDiag.log(this, "AGENT_REJECT", "tool=${fname ?: "none"}")
+              messages.put(JSONObject().apply {
+                put("role", "tool"); put("tool_call_id", call.optString("id"))
+                put("content", BensonAgentTools.toolResult(false, "instrument neautorizat"))
+              })
+              continue
+            }
+            val t0 = System.currentTimeMillis()
+            val (result, finished) = runAgentTool(fname!!, fargs, command, myRun)
+            AudioDiag.log(this, "AGENT_TOOL", "step=$steps name=$fname ms=${System.currentTimeMillis() - t0}")
+            messages.put(JSONObject().apply {
+              put("role", "tool"); put("tool_call_id", call.optString("id")); put("content", result)
+            })
+            if (finished) done = true
+          }
+        }
+      } catch (e: Exception) {
+        AudioDiag.logError("AGENT_ERROR", "type=${e.javaClass.simpleName}")
+      }
+      AudioDiag.log(this, "AGENT_RUN", "steps=$steps done=$done ms=${System.currentTimeMillis() - startMs}")
+      // P0 punctele 2+3+6: o rulare ANULATĂ nu mai are voie nici să apese, nici să VORBEASCĂ.
+      // Asta era gura prin care un agent abandonat încă rostea un mesaj (dovedit 11:20:39).
+      // Dubla verificare: o dată aici, o dată pe firul principal, chiar înainte de TTS.
+      if (!done && myRun == agentRunId) {
+        // Mandat §4 + doctrina 9: niciodata tacere, niciodata succes nedovedit.
+        mainHandler.post {
+          if (myRun != agentRunId) {
+            AudioDiag.log(this, "AGENT_SPEECH_SUPPRESSED", "run=$myRun reason=cancelled")
+            return@post
+          }
+          val msg = "Nu am reușit să duc asta la capăt, Master. Spuneți-mi altfel, vă rog."
+          updateBubbleNative(msg, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+          speakNativeFallbackThenCapture(msg)
+        }
+      } else if (!done) {
+        AudioDiag.log(this, "AGENT_SPEECH_SUPPRESSED", "run=$myRun reason=cancelled")
+      }
+    }, "benson-agent").start()
+    return true
+  }
+
   private fun tryBrainFallback(command: String): Boolean {
     if (JS_VOICE_HANDOFF) return false
     if (OpenAiUsageMeter.isBudgetExceeded(this)) return false
@@ -3511,9 +4547,27 @@ class BensonForegroundService : Service() {
       }
       "OPEN_APP" -> {
         val app = result.optString("app").takeIf { it.isNotBlank() } ?: return false
-        val resp = tryNativeOpenApp("deschide $app") ?: return false
-        remember("[Am deschis $app]")
-        finishBrainCommandSuccess(resp, originalCommand, "app_launch_done")
+        if (!BRAIN_OPEN_APP_CONFIRM) {
+          val resp = tryNativeOpenApp("deschide $app") ?: return false
+          remember("[Am deschis $app]")
+          finishBrainCommandSuccess(resp, originalCommand, "app_launch_done")
+          return true
+        }
+        // FIX_BRAIN_OPEN_APP_GATE_1 — creierul PROPUNE. Rezolvam pachetul, dar nu lansam nimic
+        // pana la "da". Nerezolvat => false, adica exact fallback-ul de pana acum.
+        val pkg = findLaunchablePackage(normalizeForMatch(app)) ?: run {
+          AudioDiag.log(this, "APP_LAUNCH", "pkg=none ok=false reason=not_found origin=brain")
+          return false
+        }
+        val label = AppNameSynonyms.canonicalName(normalizeForMatch(app), cmdLanguage()) ?: try {
+          packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        } catch (_: Exception) { app }
+        logRoute("NATIVE_ROUTE", "action=brain_open_app_confirm target=\"$label\"")
+        pendingAppOpen = PendingAppOpen(label, pkg)
+        val question = "Deschid $label?"
+        remember("[Am propus deschiderea $label — aștept confirmare]")
+        updateBubbleNative(question, originalCommand, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+        speak(question)
         true
       }
       "SEARCH_IN_APP" -> {
@@ -3528,9 +4582,11 @@ class BensonForegroundService : Service() {
       }
       "NAVIGATE" -> {
         val target = result.optString("target").takeIf { it.isNotBlank() } ?: return false
-        val ok = tryGlobalNav("du-mă la $target")
-        if (ok) remember("[Navigare spre $target]")
-        ok
+        // FIX_NATIVE_NAVIGATE_1 — era `tryGlobalNav(...)`, care nu putea sa potriveasca niciodata
+        // "du-mă la X" (tiparul ei e ^(inchide|iesi|acasa|inapoi)$), deci ramura asta era cod mort.
+        if (!tryNativeNavigate("du-ma la $target")) return false
+        remember("[Navigare spre $target — aștept confirmare]")
+        true
       }
       "WHATSAPP_CALL" -> {
         val contact = result.optString("contact").takeIf { it.isNotBlank() } ?: return false
@@ -3586,7 +4642,16 @@ class BensonForegroundService : Service() {
 
   // V4a (08.10.2026) — flag + revert (G2). Shadow-only: runs on EVERY transcript, logs, executes
   // nothing. Revert: V4_SHADOW = false.
-  private val V4_SHADOW = true
+  // OPRIT 15.10.2026, pe cifre, la întrebarea Masterului „plătesc resurse aiurea?".
+  // Interpretorul-umbră face un apel LLM SUPLIMENTAR la FIECARE comandă — inclusiv la fiecare
+  // comandă injectată de suita de regresie — doar ca să compare vechiul parser cu o clasificare
+  // nouă. Măsurat azi, într-o singură rulare G3: **9 apeluri, 0,0023 USD**, iar acordul cu
+  // parserul vechi era **3 din 10**. Peste ~20 de rulări înseamnă ~0,046 USD, adică ~27% din
+  // cheltuiala zilei, pe un experiment care nu produce nimic în producție.
+  // În plus adăuga latență și concura pe aceeași rețea cu creierul (văzut: `INTERP_ERROR
+  // type=InterruptedIOException` în timp ce agentul aștepta răspuns).
+  // Revert: V4_SHADOW = true.
+  private val V4_SHADOW = false
   // INTEGRATION-1 (13.10.2026) — 6s → 10s: demonstrat azi (test live, 3 apeluri reale) — 2 din 3
   // au picat exact la 6003ms (InterruptedIOException), al treilea a reusit la 5263ms, aproape de
   // limita. Marja mica, justificata de date reale, nu o presupunere. Revert: 6 secunde la loc.
@@ -3981,6 +5046,21 @@ class BensonForegroundService : Service() {
   // RUNDA TEST-1 (2026-10-03) — see onCreate/onDestroy comments. `adb shell am broadcast` reaches
   // this because it's registered with RECEIVER_EXPORTED (API 33+); it still does nothing without
   // the enable flag, which only this receiver and the harness ever touch.
+  // LEGEA PERSONALULUI, M3 — miscari de personal. Zero anunt rostit: doar registrul se actualizeaza.
+  private val staffChangeReceiver = object : android.content.BroadcastReceiver() {
+    override fun onReceive(context: Context?, intent: Intent?) {
+      if (!APP_REGISTRY) return
+      val ctx = context ?: return
+      val action = intent?.action ?: return
+      StaffRegistry.invalidate()
+      AudioDiag.log(ctx, "REGISTRY_EVENT", "kind=pkg_broadcast action=${action.substringAfterLast('.')}")
+      // Enumerarea a ~850 de pachete nu se face pe thread-ul de broadcast.
+      Thread({
+        try { StaffRegistry.bootstrapAndReconcile(ctx, "pkg_event") } catch (_: Exception) {}
+      }, "benson-staff-registry").start()
+    }
+  }
+
   private val debugInjectReceiver = object : android.content.BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
       val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
@@ -4008,6 +5088,31 @@ class BensonForegroundService : Service() {
         // (OpenAI first, Deepgram/Groq reserve) hits the real network, unlike DEBUG_INJECT_TRANSCRIPT
         // which skips STT entirely. Then dispatches through the same echo-check/command path a real
         // capture would use, so a recognizable command (e.g. "deschide calculator") can actually execute.
+        // FAZA 3 / SCREEN OBSERVATION (debug-only, ca tot restul acestui receiver: nu face nimic
+        // fara DEBUG_INJECT_ENABLE). Observa ecranul activ si scrie digest-ul indexat in logcat —
+        // ZERO acțiune pe ecran, zero apel LLM, zero cost. Doar proba ca "ochii" vad corect.
+        // Revert: sterge aceasta ramura + addAction-ul DEBUG_SCREEN_DIGEST.
+        "com.benson.butler.DEBUG_SCREEN_DIGEST" -> {
+          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          Thread({
+            val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+            val digest = svc?.observeScreen()
+            if (digest == null) {
+              AudioDiag.log(context, "SCREEN_DIGEST", "ok=false reason=no_accessibility_or_root")
+            } else {
+              AudioDiag.log(
+                context, "SCREEN_DIGEST",
+                "ok=true app=${digest.packageName} epoch=${digest.epoch} elements=${digest.elements.size} truncated=${digest.truncated}"
+              )
+              for (line in digest.render().split('\n')) {
+                if (line.isNotBlank()) AudioDiag.log(context, "SCREEN_EL", line)
+              }
+            }
+          }, "benson-screen-digest").start()
+        }
         "com.benson.butler.DEBUG_INJECT_WAV" -> {
           if (!prefs.getBoolean("debug_inject_enabled", false)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
@@ -4134,6 +5239,24 @@ class BensonForegroundService : Service() {
         addAction(Intent.ACTION_USER_PRESENT)
       })
     } catch (_: Exception) {}
+    // LEGEA PERSONALULUI BENSON, M1/M3 — registrul porneste cu motorul, la fiecare start de
+    // serviciu (deci si automat la prima instalare pe orice telefon, imediat ce serviciul
+    // porneste dupa acordarea permisiunilor din onboarding). Reconcilierea completa de la start
+    // prinde si ce s-a schimbat cat BENSON a fost oprit. Pe thread separat: enumerarea a ~850 de
+    // pachete nu are ce sa caute pe main la onCreate.
+    if (APP_REGISTRY) {
+      try {
+        registerReceiver(staffChangeReceiver, android.content.IntentFilter().apply {
+          addAction(Intent.ACTION_PACKAGE_ADDED)
+          addAction(Intent.ACTION_PACKAGE_REMOVED)
+          addAction(Intent.ACTION_PACKAGE_REPLACED)
+          addDataScheme("package")
+        })
+      } catch (_: Exception) {}
+      Thread({
+        try { StaffRegistry.bootstrapAndReconcile(applicationContext, "service_start") } catch (_: Exception) {}
+      }, "benson-staff-registry-boot").start()
+    }
     // RUNDA TEST-1 (2026-10-03) — debug-only injection into the NATIVE command pipeline
     // (handleNativeCommandFlow), for scripts/regression/run.sh to exercise tryNativeYoutubeOpenSearch/
     // tryNativeOpenApp/tryNativeYoutube without needing real audio. Implicit OFF: DEBUG_INJECT does
@@ -4148,6 +5271,7 @@ class BensonForegroundService : Service() {
         addAction("com.benson.butler.DEBUG_INJECT_CALL_MODE") // ZIUA 2026-10-08, P4.5
         addAction("com.benson.butler.DEBUG_INJECT_TRANSCRIPT") // ZIUA 2026-10-08, E0
         addAction("com.benson.butler.DEBUG_INJECT_WAV") // ZIUA 2026-10-08, V3-VERIFICARE
+        addAction("com.benson.butler.DEBUG_SCREEN_DIGEST") // FAZA 3 / SCREEN OBSERVATION
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         registerReceiver(debugInjectReceiver, filter, Context.RECEIVER_EXPORTED)
@@ -4351,6 +5475,7 @@ class BensonForegroundService : Service() {
     stopHotwordLoop()
     releaseWakeLock()
     try { unregisterReceiver(screenStateReceiver) } catch (_: Exception) {}
+    try { unregisterReceiver(staffChangeReceiver) } catch (_: Exception) {} // LEGEA PERSONALULUI, M3
     super.onDestroy()
   }
 

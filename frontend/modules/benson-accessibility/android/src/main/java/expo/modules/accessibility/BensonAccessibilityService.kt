@@ -160,7 +160,16 @@ class BensonAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "BensonA11y"
-        private const val MAX_NODES = 400
+        // FIX_TREE_CAP_1 (14.10.2026) — CAUZA RADACINA dovedita pe telefon, nu presupusa.
+        // Cu plafonul vechi de 400 de noduri, pe ecranul principal Amazon bara de căutare nu intra
+        // DELOC in arbore, deci: `CONTROL_FIND intent=search pkg=com.amazon… result=none` (G-1 nu o
+        // gaseste) si ScreenDigest cu 0 elemente `input` (12:43:53, epoch=1). Nu e o lipsa de
+        // sinonime — ControlSynonyms are deja "search"/"suchen"/"lupa"; nodul lipsea din date.
+        // Amazon/YouTube au ecrane cu mult peste 400 de noduri. 3000 e plafon de siguranta contra
+        // unui arbore patologic, nu o limita de produs.
+        // Revert: TREE_CAP_RAISED = false => exact 400, comportamentul de dinainte.
+        private const val TREE_CAP_RAISED = true
+        private val MAX_NODES = if (TREE_CAP_RAISED) 3000 else 400
         private const val MAX_DEPTH = 40
         private const val WHATSAPP_PACKAGE = "com.whatsapp"
 
@@ -1882,7 +1891,7 @@ class BensonAccessibilityService : AccessibilityService() {
         val refs = mutableListOf<AccessibilityNodeInfo>()
         try {
             val tree = snapshotTree(root, refs, intArrayOf(0))
-            val searchNode = ControlLocator.findControl(ControlSynonyms.wordsFor("search"), tree)
+            val searchNode = ControlLocator.findSearchField(tree, ControlSynonyms.wordsFor("search")) /* FIX_SEARCH_STRUCTURAL_1 */
             if (searchNode == null) {
                 Log.i("BENSON_AUDIO", "MUSIC_PLAY_STEP step=find_search ok=false pkg=$pkg")
                 return@withContext false
@@ -2039,7 +2048,7 @@ class BensonAccessibilityService : AccessibilityService() {
         val refs = mutableListOf<AccessibilityNodeInfo>()
         try {
             val tree = snapshotTree(root, refs, intArrayOf(0))
-            val searchNode = ControlLocator.findControl(ControlSynonyms.wordsFor("search"), tree)
+            val searchNode = ControlLocator.findSearchField(tree, ControlSynonyms.wordsFor("search")) /* FIX_SEARCH_STRUCTURAL_1 */
             if (searchNode == null) {
                 Log.i("BENSON_AUDIO", "SEARCH_LOCATE_STEP step=find_search ok=false pkg=$pkg")
                 return@withContext null
@@ -3545,6 +3554,24 @@ class BensonAccessibilityService : AccessibilityService() {
         val confirmLabel: String = "",
     )
 
+    // FAZA 3 / SCREEN OBSERVATION — singurul punct public prin care ecranul activ devine un
+    // ScreenDigest indexat. Citeste rootInActiveWindow PROASPAT la fiecare apel (niciodata din
+    // cache — regula P1.4) si incrementeaza epoch-ul, deci indicii unui digest vechi se invalideaza
+    // automat. Nu executa nimic: doar observa. Revert: sterge aceasta functie + screenEpoch.
+    private val screenEpoch = java.util.concurrent.atomic.AtomicLong(0)
+
+    fun currentScreenEpoch(): Long = screenEpoch.get()
+
+    fun observeScreen(): ScreenDigest? {
+        val root = try { rootInActiveWindow } catch (_: Exception) { null } ?: return null
+        val pkg = try { root.packageName?.toString().orEmpty() } catch (_: Exception) { "" }
+        val tree = try {
+            snapshotTree(root, mutableListOf(), intArrayOf(0))
+        } catch (_: Exception) { return null }
+        val epoch = screenEpoch.incrementAndGet()
+        return ScreenDigestBuilder.build(tree, pkg, epoch).also { lastServedDigest = it }
+    }
+
     private fun snapshotTree(node: AccessibilityNodeInfo, refs: MutableList<AccessibilityNodeInfo>, counter: IntArray, depth: Int = 0): UiNode {
         refs.add(node)
         counter[0]++
@@ -3556,6 +3583,11 @@ class BensonAccessibilityService : AccessibilityService() {
                 children.add(snapshotTree(child, refs, counter, depth + 1))
             }
         }
+        // FAZA 3 / SCREEN OBSERVATION — cele cinci campuri de la final sunt ADAUGATE pentru
+        // ScreenDigest (poziție/stare/parolă). Campurile vechi si `ref` sunt neschimbate, deci
+        // G-1/ControlLocator vede exact ce vedea inainte. Revert: sterge cele 5 linii FAZA 3.
+        val r = android.graphics.Rect()
+        try { node.getBoundsInScreen(r) } catch (_: Exception) {}
         return UiNode(
             text = node.text?.toString().orEmpty(),
             desc = node.contentDescription?.toString().orEmpty(),
@@ -3566,6 +3598,11 @@ class BensonAccessibilityService : AccessibilityService() {
             editable = node.isEditable,
             children = children,
             ref = node,
+            bounds = if (r.width() > 0 || r.height() > 0) "${r.left},${r.top},${r.right},${r.bottom}" else "", // FAZA 3
+            scrollable = node.isScrollable,   // FAZA 3
+            enabled = node.isEnabled,         // FAZA 3
+            focused = node.isFocused,         // FAZA 3
+            password = node.isPassword,       // FAZA 3
         )
     }
 
@@ -3613,6 +3650,333 @@ class BensonAccessibilityService : AccessibilityService() {
     // CONFIRM-class button — re-finds the node fresh rather than reusing anything held across that
     // wait (an AccessibilityNodeInfo held across a multi-second voice round-trip is not trustworthy;
     // same discipline runWhatsAppCallNative already uses via waitForNode).
+    // Op. 2 (14.10.2026) — eticheta primului rand de rezultat de pe ecranul curent, fara sa apese
+    // nimic. Folosita pentru VERIFICAREA unei căutări web (doctrina 9: nu spunem "am căutat" fara
+    // sa vedem rezultatul). Reutilizeaza ControlLocator.findFirstResult + SearchResultNoiseFilter.
+    // FIX_WEB_FIRST_RESULT_1 (14.10.2026) — cauza dovedita pe telefon (15:08:04): pe o pagina de
+    // rezultate Google, `findFirstResult` cere ca eticheta sa CONTINA toata interogarea
+    // ("robot de curatat ferestrele pana la 80 euro") — niciun titlu real nu o contine, deci
+    // `FIRST_RESULT found=false` si "apasă pe primul rezultat" nu avea pe ce sa apese.
+    // Rezerva generica: PRIMUL element clickabil cu eticheta lunga situat SUB câmpul de căutare.
+    // Pragul de lungime exclude natural rândul de taburi ("Alle", "Bilder", "KI-Modus"), fara
+    // nicio lista de cuvinte per-aplicatie. Revert: sterge functia si apelul din clickFirstResult.
+    private val FIRST_LINK_MIN_LABEL = 25
+    private val RESULT_DEDUP_PREFIX = 28 // FIX_RESULT_LIST_DEDUP_1
+
+    private fun flattenTree(n: UiNode): List<UiNode> = listOf(n) + n.children.flatMap { flattenTree(it) }
+
+    private fun firstLongClickableBelow(tree: UiNode, minTop: Int, query: String): UiNode? =
+        flattenTree(tree).firstOrNull { n ->
+            if (!n.clickable || n.editable) return@firstOrNull false
+            val label = n.text.ifBlank { n.desc }.trim()
+            if (label.length < FIRST_LINK_MIN_LABEL) return@firstOrNull false
+            // FIX_WEB_FIRST_RESULT_2 — rezerva TRECE si ea prin filtrul de zgomot existent.
+            // Fara asta, pe Google primul element clickabil lung era "Warum sehe ich diese
+            // Werbung?" si BENSON il apasa (dovedit 15:12:47).
+            if (SearchResultNoiseFilter.isNoise(label, query)) return@firstOrNull false
+            val top = n.bounds.split(',').getOrNull(1)?.toIntOrNull() ?: return@firstOrNull false
+            top > minTop
+        }
+
+    private fun searchInputBottom(tree: UiNode): Int =
+        flattenTree(tree).filter { it.editable }
+            .mapNotNull { it.bounds.split(',').getOrNull(3)?.toIntOrNull() }
+            .minOrNull() ?: 0
+
+    // RUNDA VOICE-ONLY (14.10.2026, punctele 1-2-4) — primele N rezultate reale, ca ETICHETE, ca
+    // BENSON sa le poata CITI Masterului. Nu returnam referinte de nod: un AccessibilityNodeInfo
+    // tinut peste un dus-intors vocal de cateva secunde nu e de incredere (aceeasi disciplina ca
+    // waitForNode/runWhatsAppCallNative). Alegerea se executa prin clickResultByLabel, care
+    // RE-CAUTA eticheta pe ecranul de ATUNCI — deci daca rezultatele s-au schimbat intre timp,
+    // selectia veche nu mai gaseste nimic si eseueaza onest (punctul 4), fara sa apese altceva.
+    fun topResultLabels(query: String, max: Int): List<String> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        return try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val minTop = searchInputBottom(tree)
+            val out = linkedSetOf<String>()
+            for (n in flattenTree(tree)) {
+                if (out.size >= max) break
+                if (!n.clickable || n.editable) continue
+                val label = n.text.ifBlank { n.desc }.trim()
+                if (label.length < FIRST_LINK_MIN_LABEL) continue
+                if (SearchResultNoiseFilter.isNoise(label, query)) continue
+                val top = n.bounds.split(',').getOrNull(1)?.toIntOrNull() ?: continue
+                if (top <= minTop) continue
+                val clean = SearchResultNoiseFilter.collapseDuplicatedHalf(label).take(90)
+                // FIX_RESULT_LIST_DEDUP_1 (14.10.2026) — dovedit pe telefon (15:29:49): acelasi
+                // produs a fost citit de doua ori ("PANCERKA … 80,00 € Von Amazon.de Kostenlos
+                // Vorher: 105 €" si "PANCERKA intelligent Window Cleaning Robot"), pentru ca
+                // ierarhia web are doua noduri clickabile cu etichete de lungimi diferite pentru
+                // acelasi rezultat. Masterul ar auzi aceeasi varianta de doua ori.
+                // Deduplicare pe PREFIX: daca una e inceputul celeilalte, e acelasi rezultat.
+                val head = clean.take(RESULT_DEDUP_PREFIX)
+                if (out.any { it.take(RESULT_DEDUP_PREFIX) == head }) continue
+                out.add(clean)
+            }
+            out.toList()
+        } catch (_: Exception) { emptyList() } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    // Apasa rezultatul identificat prin eticheta rostita Masterului. Verifica efectul real
+    // (schimbarea ecranului), nu doar reusita performAction (doctrina 9).
+    suspend fun clickResultByLabel(label: String): ControlResult = withContext(Dispatchers.Default) {
+        val root = rootInActiveWindow ?: return@withContext ControlResult(false, "Nu găsesc ecranul curent.")
+        val pkg = root.packageName?.toString().orEmpty()
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        val before: String?
+        val clicked: Boolean
+        try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            before = ScreenDigestBuilder.build(tree, pkg, 0L).elements.joinToString("|") { it.label }
+            val needle = label.take(40)
+            val node = flattenTree(tree).firstOrNull { n ->
+                val l = n.text.ifBlank { n.desc }.trim()
+                l.isNotBlank() && (l.startsWith(needle) || l.contains(needle))
+            }
+            if (node == null) {
+                Log.i("BENSON_AUDIO", "RESULT_PICK found=false pkg=$pkg label=\"${label.take(40)}\"")
+                return@withContext ControlResult(false, "Varianta aceea nu mai e pe ecran. Să caut din nou?")
+            }
+            val target = ControlLocator.clickableTarget(node, tree)?.ref as? AccessibilityNodeInfo
+            clicked = target?.let { clickNodeOrAncestor(it) } ?: false
+            Log.i("BENSON_AUDIO", "RESULT_PICK found=true clicked=$clicked pkg=$pkg label=\"${label.take(40)}\"")
+        } catch (_: Exception) {
+            return@withContext ControlResult(false, "N-am putut deschide varianta aleasă.")
+        } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+        if (!clicked) return@withContext ControlResult(false, "Am găsit varianta, dar n-am putut să o deschid.")
+        delay(2200)
+        val after = screenSignature()?.first
+        val changed = after != null && after != before
+        Log.i("BENSON_AUDIO", "RESULT_PICK_VERIFY screen_changed=$changed")
+        if (changed) ControlResult(true, "Am deschis ${label.take(60)}.")
+        else ControlResult(false, "Am apăsat varianta, dar ecranul nu s-a schimbat.")
+    }
+
+    // FAZA 1 / FIX_AGENT_TAP_CONTRACT_1 (15.10.2026) — dovedit pe telefon de doua ori (10:12:51 si
+    // 10:15:39): agentul trimitea ROLUL elementului ca eticheta ("button", "input"), pentru ca
+    // randarea e `[3] button "Căutare"` si modelul lua primul cuvant. Vina e a contractului meu,
+    // nu a modelului: INDEXUL e cheia naturala a unei liste numerotate, eticheta e doar control.
+    // Aici observam ecranul PROASPAT (deci referinte valide), luam elementul de la index si
+    // verificam eticheta doar ca sa prindem un ecran schimbat intre timp.
+    // Ultima observare servita agentului. Punctul 3 din ordin: "indexul sa fie valid NUMAI pentru
+    // observatia curenta". Comparam eticheta de la acelasi index intre ce A VAZUT agentul si ce e
+    // pe ecran ACUM; daca difera, ecranul s-a schimbat si refuzam, in loc sa apasam altceva.
+    @Volatile private var lastServedDigest: ScreenDigest? = null
+
+    suspend fun tapDigestElement(index: Int, expectedLabel: String): ControlResult = withContext(Dispatchers.Default) {
+        val seen = lastServedDigest
+            ?: return@withContext ControlResult(false, "Nu am o observare a ecranului. Observă întâi.")
+        val seenEl = seen.element(index)
+            ?: return@withContext ControlResult(false, "Nu exista elementul $index in ultima observare.")
+        val digest = observeScreen()
+            ?: return@withContext ControlResult(false, "Nu pot citi ecranul.")
+        val el = digest.element(index)
+            ?: return@withContext ControlResult(false, "Nu există elementul $index pe ecran.")
+        // Punctul 2 din ordin: fara apasare oarba. Un element fara eticheta nu e identificabil.
+        if (el.label.isBlank()) {
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=blank_label")
+            return@withContext ControlResult(false, "Elementul $index nu are nicio etichetă; nu apăs în necunoscut. Observă din nou sau alege altul.")
+        }
+        // Punctul 3: indexul e valid doar pentru observatia curenta.
+        if (!seenEl.label.equals(el.label, ignoreCase = true)) {
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=stale_index seen=\"${seenEl.label.take(30)}\" now=\"${el.label.take(30)}\"")
+            return@withContext ControlResult(false, "Ecranul s-a schimbat de la ultima observare. Observă din nou.")
+        }
+        val want = expectedLabel.trim().lowercase()
+        val have = el.label.lowercase()
+        val labelOk = want.isBlank() || want == el.role.name.lowercase() ||
+            have.contains(want.take(20)) || want.contains(have.take(20))
+        if (!labelOk) {
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=label_mismatch have=\"${el.label.take(40)}\"")
+            return@withContext ControlResult(false, "Elementul $index arată altfel acum (\"${el.label.take(40)}\").")
+        }
+        if (el.safety == ButtonSafetyClassifier.Verdict.REFUSE) {
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=refused")
+            return@withContext ControlResult(false, "Nu apăs acel buton: ține de plată sau cumpărare.")
+        }
+        val node = el.ref as? AccessibilityNodeInfo
+            ?: return@withContext ControlResult(false, "Elementul $index nu mai e accesibil.")
+        val before = screenSignature()?.first
+        val clicked = clickNodeOrAncestor(node)
+        Log.i("BENSON_AUDIO", "AGENT_TAP index=$index clicked=$clicked label=\"${el.label.take(40)}\"")
+        if (!clicked) return@withContext ControlResult(false, "N-am putut apăsa \"${el.label.take(40)}\".")
+        delay(1800)
+        val after = screenSignature()?.first
+        val changed = after != null && after != before
+        Log.i("BENSON_AUDIO", "AGENT_TAP_VERIFY index=$index screen_changed=$changed")
+        ControlResult(true, if (changed) "Am apăsat \"${el.label.take(40)}\"; ecranul s-a schimbat."
+        else "Am apăsat \"${el.label.take(40)}\", dar ecranul pare neschimbat.")
+    }
+
+    fun firstResultLabel(query: String): String? {
+        val root = rootInActiveWindow ?: return null
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        return try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val row = ControlLocator.findFirstResult(query, tree, SearchResultNoiseFilter::isNoise)
+                ?: firstLongClickableBelow(tree, searchInputBottom(tree), query)
+            row?.text?.ifBlank { row.desc }?.trim()?.take(80)?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) { null } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    // Op. 2 — "apasă pe primul rezultat". Clicul trece prin acelasi clickableTarget +
+    // clickNodeOrAncestor folosit de MUSIC-2/YouTube. Succesul se declara DOAR daca ecranul s-a
+    // schimbat efectiv dupa click (doctrina 9), nu pentru ca performAction a intors true.
+    suspend fun clickFirstResult(query: String): ControlResult = withContext(Dispatchers.Default) {
+        val root = rootInActiveWindow ?: return@withContext ControlResult(false, "Nu găsesc ecranul curent.")
+        val pkg = root.packageName?.toString().orEmpty()
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        val before: String
+        val clicked: Boolean
+        val label: String
+        try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            before = ScreenDigestBuilder.build(tree, pkg, 0L).elements.joinToString("|") { it.label }
+            // FIX_WEB_FIRST_RESULT_1 — potrivirea pe interogare intai (precisa, buna in aplicatii),
+            // apoi rezerva generica "primul link lung de sub câmpul de căutare" (paginile web).
+            val row = ControlLocator.findFirstResult(query, tree, SearchResultNoiseFilter::isNoise)
+                ?: firstLongClickableBelow(tree, searchInputBottom(tree), query)
+            if (row == null) {
+                Log.i("BENSON_AUDIO", "FIRST_RESULT query=\"$query\" pkg=$pkg found=false")
+                return@withContext ControlResult(false, "Nu găsesc un rezultat pentru $query pe ecran.")
+            }
+            label = row.text.ifBlank { row.desc }.trim().take(60)
+            val target = ControlLocator.clickableTarget(row, tree)?.ref as? AccessibilityNodeInfo
+            clicked = target?.let { clickNodeOrAncestor(it) } ?: false
+            Log.i("BENSON_AUDIO", "FIRST_RESULT query=\"$query\" pkg=$pkg found=true clicked=$clicked label=\"$label\"")
+        } catch (e: Exception) {
+            return@withContext ControlResult(false, "N-am putut apăsa primul rezultat.")
+        } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+        if (!clicked) return@withContext ControlResult(false, "Am găsit $label, dar n-am putut să-l apăs.")
+        delay(2200)
+        val after = rootInActiveWindow?.let { r2 ->
+            val refs2 = mutableListOf<AccessibilityNodeInfo>()
+            try {
+                ScreenDigestBuilder.build(snapshotTree(r2, refs2, intArrayOf(0)), r2.packageName?.toString().orEmpty(), 0L)
+                    .elements.joinToString("|") { it.label }
+            } catch (_: Exception) { null } finally {
+                for (r in refs2) if (r !== r2) try { r.recycle() } catch (_: Exception) {}
+            }
+        }
+        val changed = after != null && after != before
+        Log.i("BENSON_AUDIO", "FIRST_RESULT_VERIFY query=\"$query\" screen_changed=$changed")
+        if (changed) ControlResult(true, "Am deschis $label.")
+        else ControlResult(false, "Am apăsat $label, dar ecranul nu s-a schimbat.")
+    }
+
+    // FIX_SEARCH_SUBMIT_VERIFY_1 — trimite căutarea si confirma EFECTUL pe ecran. Reutilizeaza
+    // exact mecanismele dovedite: ACTION_IME_ENTER (ca in calea MUSIC-2) + ControlLocator
+    // .findFirstResult cu SearchResultNoiseFilter (ca la YouTube/Spotify). Zero mecanism nou.
+    // Cand Enter nu produce nimic (multe aplicatii arata doar sugestii), apasa sugestia care
+    // corespunde interogarii — tot prin motorul generic, fara ancore per-aplicatie.
+    // Returneaza succes DOAR cu un rand de rezultat real pe ecran; altfel spune ce n-a mers.
+    // FIX_SEARCH_SUBMIT_VERIFY_2 (14.10.2026) — a doua iteratie, pe dovada de la 15:02 pe telefon.
+    // Prima versiune a picat din DOUA cauze, ambele ale mele:
+    //  (a) interogarea e in romana ("baterii aa"), sugestiile Amazon sunt in germana ("batterie
+    //      aa"), iar findFirstResult cere potrivire pe SUBSIR — deci nici tap-ul pe sugestie nici
+    //      verificarea nu puteau recunoaste nimic (`suggestion_tap ok=false`, `found=false`);
+    //  (b) ACTION_IME_ENTER a plecat 22 ms dupa ACTION_SET_TEXT, pe un camp nesedimentat.
+    // Reparatie, fara ancore per-aplicatie: asteptam sedimentarea, trimitem Enter, iar daca ecranul
+    // nu s-a schimbat apasam PRIMA SUGESTIE — definita generic ca primul element clickabil cu
+    // eticheta, situat SUB câmpul de căutare. Verificarea nu mai cere limba interogarii: compara
+    // semnatura ecranului inainte/dupa si cere o pagina cu continut. Raportam ce scrie pe ecran,
+    // in limba ecranului, nu ce ne-am dori sa scrie. Revert: FIX_SEARCH_SUBMIT_VERIFY_1 (versiunea
+    // cu findFirstResult pe ambele cai).
+    private fun screenSignature(): Pair<String, Int>? {
+        val root = rootInActiveWindow ?: return null
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        return try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val d = ScreenDigestBuilder.build(tree, root.packageName?.toString().orEmpty(), 0L)
+            d.elements.joinToString("|") { it.label } to d.elements.count { it.label.isNotBlank() }
+        } catch (_: Exception) { null } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    private fun topSuggestionBelow(inputBottom: Int): Pair<AccessibilityNodeInfo, String>? {
+        val root = rootInActiveWindow ?: return null
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        return try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            fun flat(n: UiNode): List<UiNode> = listOf(n) + n.children.flatMap { flat(it) }
+            val cand = flat(tree).firstOrNull { n ->
+                if (!n.clickable || n.editable) return@firstOrNull false
+                val label = n.text.ifBlank { n.desc }.trim()
+                if (label.isBlank()) return@firstOrNull false
+                val top = n.bounds.split(',').getOrNull(1)?.toIntOrNull() ?: return@firstOrNull false
+                top >= inputBottom
+            } ?: return null
+            val ref = cand.ref as? AccessibilityNodeInfo ?: return null
+            ref to cand.text.ifBlank { cand.desc }.trim().take(60)
+        } catch (_: Exception) { null } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    private suspend fun submitAndVerifySearch(query: String, pkg: String, inputBottom: Int): ControlResult {
+        val before = screenSignature()
+        delay(700) // (b) — campul abia a primit textul; Enter pe un camp nesedimentat nu comite
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                    ?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            }
+        } catch (_: Exception) {}
+        Log.i("BENSON_AUDIO", "CONTROL_ACT action=search_submit method=ime_enter pkg=$pkg")
+        delay(1900)
+
+        var after = screenSignature()
+        var changed = after != null && before != null && after.first != before.first
+        var tappedLabel = ""
+        if (!changed) {
+            val sug = topSuggestionBelow(inputBottom)
+            val tapped = sug?.let { clickNodeOrAncestor(it.first) } ?: false
+            tappedLabel = sug?.second.orEmpty()
+            Log.i("BENSON_AUDIO", "CONTROL_ACT action=search_submit method=top_suggestion_tap ok=$tapped label=\"$tappedLabel\" pkg=$pkg")
+            if (tapped) {
+                delay(2200)
+                after = screenSignature()
+                changed = after != null && before != null && after.first != before.first
+            }
+        }
+
+        val contentCount = after?.second ?: 0
+        val ok = changed && contentCount >= 3
+        Log.i("BENSON_AUDIO", "SEARCH_VERIFY query=\"$query\" pkg=$pkg changed=$changed content=$contentCount ok=$ok")
+        if (!ok) {
+            return ControlResult(false, "Am scris $query în căutare, dar rezultatele nu s-au deschis.")
+        }
+        // Raportam primul rand real de pe ecranul de rezultate, in limba ecranului.
+        val firstLabel = firstContentLabel() ?: tappedLabel
+        return ControlResult(true, if (firstLabel.isNotBlank()) "Am căutat $query. Primul rezultat: $firstLabel." else "Am căutat $query. Rezultatele sunt pe ecran.")
+    }
+
+    // Prima eticheta „de continut" de pe ecran: nu bara de căutare, nu butoanele de navigatie.
+    private fun firstContentLabel(): String? {
+        val root = rootInActiveWindow ?: return null
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        return try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val d = ScreenDigestBuilder.build(tree, root.packageName?.toString().orEmpty(), 0L)
+            d.elements.firstOrNull {
+                it.label.length >= 12 && !it.editable && it.role != ElementRole.INPUT
+            }?.label
+        } catch (_: Exception) { null } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
     suspend fun runUniversalHandCommand(cmd: UniversalHandCommand, skipConfirmGate: Boolean = false): ControlResult = withContext(Dispatchers.Default) {
         val root = rootInActiveWindow ?: return@withContext ControlResult(false, "Nu găsesc ecranul curent.")
         val pkg = root.packageName?.toString().orEmpty()
@@ -3623,7 +3987,7 @@ class BensonAccessibilityService : AccessibilityService() {
                 val refs = mutableListOf<AccessibilityNodeInfo>()
                 try {
                     val tree = snapshotTree(root, refs, intArrayOf(0))
-                    val field = ControlLocator.findControl(ControlSynonyms.wordsFor("search"), tree)
+                    val field = ControlLocator.findSearchField(tree, ControlSynonyms.wordsFor("search")) /* FIX_SEARCH_STRUCTURAL_1 */
                     Log.i("BENSON_AUDIO", "CONTROL_FIND intent=search pkg=$pkg layer=semantic match=${field?.let { controlMatchLayer(it) } ?: "none"} result=${if (field != null) "found" else "none"}")
                     if (field == null) return@withContext ControlResult(false, "Nu găsesc câmpul de căutare pe ecran.")
                     val fieldRef = field.ref as? AccessibilityNodeInfo
@@ -3639,7 +4003,16 @@ class BensonAccessibilityService : AccessibilityService() {
                     if (input == null) return@withContext ControlResult(false, "Nu găsesc câmpul de căutare pe ecran.")
                     val ok = setTextOn(input, cmd.query)
                     Log.i("BENSON_AUDIO", "CONTROL_ACT action=search_set_text ok=$ok text=\"${cmd.query}\"")
-                    ControlResult(ok, if (ok) "Caut ${cmd.query}." else "Nu am putut introduce textul.")
+                    if (!ok) return@withContext ControlResult(false, "Nu am putut introduce textul.")
+                    // FIX_SEARCH_SUBMIT_VERIFY_1 (14.10.2026, op. 1 aprobata de Master) — inainte,
+                    // ramura se oprea aici si raporta "Caut X." doar pentru ca ACTION_SET_TEXT a
+                    // reusit: succes declarat fara nicio dovada pe ecran, exact ce interzice
+                    // doctrina 9. Dovada pe telefon (12:50:56): text introdus, zero rezultate
+                    // deschise, iar BENSON spunea ca a căutat. Acum: trimite, apoi VERIFICA.
+                    val inputBottom = try {
+                        val rr = android.graphics.Rect(); input.getBoundsInScreen(rr); rr.bottom
+                    } catch (_: Exception) { 0 }
+                    submitAndVerifySearch(cmd.query, pkg, inputBottom)
                 } finally {
                     for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
                 }

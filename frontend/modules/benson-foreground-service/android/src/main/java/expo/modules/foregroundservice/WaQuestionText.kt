@@ -15,10 +15,20 @@ package expo.modules.foregroundservice
 // corect gramatical, dar „Dorești să sun la X" evită explicit orice formă de acord pe verb legată
 // de numele/genul contactului (nu mai există deloc -l/-o/-i de ales). WA_VIDEO aliniat la același
 // loc pentru „pe WhatsApp" (la final, ca la CALL), neschimbat altfel.
+// FIX_NAME_PRONUNCE_1 (14.10.2026, cerut explicit de Master: „mesaj catre has-a-ne-ne-a-has……
+// rectifica, nu mai pot sa aud asta"). Textul de aici ajunge la TTS-ul romanesc local
+// (`ro-ro-x-vfv-local`), care pe un nume ce nu arata romanesc renunta la citire si SILABISESTE
+// literele. Numele intra acum prin NamePronunciation.speakableName ("Hannah" -> "Hana").
+// IMPORTANT: asta schimba DOAR textul rostit/afisat al intrebarii. Numele folosit la potrivirea
+// contactului, la căutare si in intent rămâne cel din agenda — WaNameMatcher si drumul de apel
+// dovedit nu sunt atinse deloc. Revert: scoate apelul speakableName de mai jos.
 object WaQuestionText {
-  fun forKind(kind: String, name: String, message: String?): String = when (kind) {
-    "call" -> "Dorești să sun la $name pe WhatsApp?"
-    "video" -> "Dorești apel video cu $name pe WhatsApp?"
-    else -> "Mesaj către $name: «$message». Dorești să-l trimit?"
+  fun forKind(kind: String, name: String, message: String?): String {
+    val spoken = NamePronunciation.speakableName(name)
+    return when (kind) {
+      "call" -> "Dorești să sun la $spoken pe WhatsApp?"
+      "video" -> "Dorești apel video cu $spoken pe WhatsApp?"
+      else -> "Mesaj către $spoken: «$message». Dorești să-l trimit?"
+    }
   }
 }

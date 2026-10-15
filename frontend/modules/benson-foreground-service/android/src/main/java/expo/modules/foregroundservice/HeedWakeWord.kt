@@ -57,6 +57,8 @@ internal class HeedWakeWord(
     // — niciuna din variabilele care decid declansarea sau apelul catre onDetected/Deepgram. Flagul
     // nu schimba deloc comportamentul existent cand e false (implicit). Revert: WAKE_SCORE_AGGREGATION
     // = false (sau sterge blocul — zero alta dependinta).
+    // G9.4 (13.10.2026) — benchmark pozitiv/negativ colectat si incheiat (12 pozitive, 11
+    // negative); concluzie: fara putere de discriminare suplimentara. Revenit la OFF.
     private const val WAKE_SCORE_AGGREGATION = false
     private const val AGGREGATION_WINDOW_FRAMES = 5
 
