@@ -89,6 +89,31 @@ run_no_action_test() {
   fi
 }
 
+# UNIVERSAL_ACTION_STOP (15.10.2026) — cele patru comenzi echivalente. $1 = id, $2 = comanda.
+# Pornim o sarcină lungă (explicație LLM, inofensivă), o oprim, și cerem DOUĂ lucruri:
+#   prezent: INTERRUPT_ALL cu reason=<comanda>;  absent: orice TTS_SPEAK după oprire.
+# Al doilea e esențial: un raport rostit după stop înseamnă sarcină anulată care a continuat.
+run_stop_test() {
+  local id="$1" cmd="$2"
+  echo "--- $id ---"
+  debug_inject "explica-mi detaliat istoria romei antice"
+  sleep 5
+  local offset; offset="$(capture_line_count)"
+  debug_inject "$cmd"
+  local match; match="$(capture_since "$offset" 8 "INTERRUPT_ALL.*reason=$cmd")"
+  local leaked; leaked="$(absent_since "$offset" "TTS_SPEAK")"
+  if [ -n "$match" ] && [ -z "$leaked" ]; then
+    echo "PASS: $id"
+    RESULTS+=("PASS|$id|$(echo "$match" | tail -1)")
+  else
+    echo "FAIL: $id"
+    [ -z "$match" ] && echo "  missing: INTERRUPT_ALL reason=$cmd"
+    [ -n "$leaked" ] && echo "  a vorbit dupa stop: $leaked"
+    RESULTS+=("FAIL|$id|present=$([ -n "$match" ] && echo ok || echo MISSING) spoke_after_stop=$([ -n "$leaked" ] && echo YES || echo no)")
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
 # P3 (15.10.2026) — GARDĂ DE VALIDITATE. Dovedit azi de două ori: când telefonul se deconectează
 # de pe USB, `adb logcat` scrie doar "- waiting for device -", nicio injecție nu ajunge, iar suita
 # raporta senin **10 din 10 FAIL** — adică acuza produsul pentru un cablu. Exact genul de „eșec
@@ -178,6 +203,11 @@ run_test "YT_STOP" "opreste muzica" 5 'NATIVE_ROUTE.*action=media_ctl target="pa
 
 # 5. "oprește muzica" de sine stătător
 run_test "STOP_MUZICA" "opreste muzica" 5 'NATIVE_ROUTE.*action=media_ctl target="pause"'
+
+run_stop_test "INTERRUPT_TACI" "taci"
+run_stop_test "INTERRUPT_STOP" "stop"
+run_stop_test "INTERRUPT_OPRESTE" "opreste"
+run_stop_test "INTERRUPT_MUTE" "mute"
 
 debug_inject_enable false
 stop_capture

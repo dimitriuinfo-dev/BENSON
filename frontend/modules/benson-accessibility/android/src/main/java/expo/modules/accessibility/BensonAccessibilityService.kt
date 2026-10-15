@@ -159,6 +159,21 @@ class BensonAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        // UNIVERSAL_ACTION_STOP (15.10.2026, ordin direct al Masterului) — „TACI/STOP/OPRESTE/MUTE
+        // opresc ACTIUNEA aflata in desfasurare", nu doar vocea. Degetul BENSON (navigare
+        // automata, cautare in aplicatie, redactare, selectie de rezultate) ruleaza in bucle de
+        // pasi; mecanismul de oprire e un singur steag, verificat INTRE pasi. Nu omoara firele
+        // (Thread.stop e interzis) si nu lasa o apasare la jumatate.
+        // Fereastra e scurta ca o comanda noua, imediat dupa stop, sa nu fie blocata; in plus,
+        // fiecare comanda noua apeleaza clearAbort().
+        @Volatile private var abortAtMs = 0L
+        private const val ABORT_WINDOW_MS = 3_000L
+        fun requestAbort() {
+            abortAtMs = System.currentTimeMillis()
+            Log.i("BENSON_AUDIO", "UI_ABORT state=requested")
+        }
+        fun clearAbort() { abortAtMs = 0L }
+        fun isAbortActive(): Boolean = abortAtMs != 0L && System.currentTimeMillis() - abortAtMs < ABORT_WINDOW_MS
         private const val TAG = "BensonA11y"
         // FIX_TREE_CAP_1 (14.10.2026) — CAUZA RADACINA dovedita pe telefon, nu presupusa.
         // Cu plafonul vechi de 400 de noduri, pe ecranul principal Amazon bara de căutare nu intra
@@ -1078,6 +1093,12 @@ class BensonAccessibilityService : AccessibilityService() {
                     Log.i("BENSON_AUDIO", "WAIT_NODE predicate=$anchor foundAfterMs=${System.currentTimeMillis() - startedAt} result=found")
                     return it
                 }
+            }
+            // UNIVERSAL_ACTION_STOP — punctul de oprire cu acoperirea cea mai mare: toate buclele
+            // de pasi (cautare, submit, draft, navigare, calculator) trec prin waitForNode.
+            if (isAbortActive()) {
+                Log.i("BENSON_AUDIO", "WAIT_NODE predicate=$anchor result=aborted")
+                return null
             }
             delay(pollMs)
         }
@@ -3724,6 +3745,8 @@ class BensonAccessibilityService : AccessibilityService() {
     // Apasa rezultatul identificat prin eticheta rostita Masterului. Verifica efectul real
     // (schimbarea ecranului), nu doar reusita performAction (doctrina 9).
     suspend fun clickResultByLabel(label: String): ControlResult = withContext(Dispatchers.Default) {
+        // UNIVERSAL_ACTION_STOP — nu se incepe un pas nou dupa stop.
+        if (isAbortActive()) return@withContext ControlResult(false, "aborted")
         val root = rootInActiveWindow ?: return@withContext ControlResult(false, "Nu găsesc ecranul curent.")
         val pkg = root.packageName?.toString().orEmpty()
         val refs = mutableListOf<AccessibilityNodeInfo>()
@@ -3770,6 +3793,8 @@ class BensonAccessibilityService : AccessibilityService() {
     @Volatile private var lastServedDigest: ScreenDigest? = null
 
     suspend fun tapDigestElement(index: Int, expectedLabel: String): ControlResult = withContext(Dispatchers.Default) {
+        // UNIVERSAL_ACTION_STOP — nu se incepe un pas nou dupa stop.
+        if (isAbortActive()) return@withContext ControlResult(false, "aborted")
         val seen = lastServedDigest
             ?: return@withContext ControlResult(false, "Nu am o observare a ecranului. Observă întâi.")
         val seenEl = seen.element(index)

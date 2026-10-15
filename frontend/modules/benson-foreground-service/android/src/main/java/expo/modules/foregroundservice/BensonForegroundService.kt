@@ -362,6 +362,15 @@ class BensonForegroundService : Service() {
   // serviciului — detectat prin t.defaultEngine, ieftin, fără apel de rețea.
   private var lastBoundTtsEngine: String? = null
   // FIX_WAKE_SELF_ECHO_GUARD_1 (2026-10-03) — see SelfTtsGuard. 0L = "never"/"not speaking".
+  // UNIVERSAL_ACTION_STOP, al doilea defect dovedit pe telefon (15.10.2026): un executor NATIV
+  // deja pornit (yt_open_and_search) a terminat DUPA stop si a rostit propriul raport —
+  //   NATIVE_ROUTE action=interrupt_all -> INTERRUPT_ALL -> TTS "N-am gasit ... pe YouTube."
+  // Executorii nativi nu ruleaza prin agentRunId, deci cancelAgentNow() nu-i atinge. In loc sa
+  // pun un token in fiecare executor (si sa-i rescriu, interzis), pun garda in SINGURUL punct de
+  // rostire: cat e deschisa fereastra, nicio replica a sarcinii anulate nu se aude.
+  // Fereastra se ridica imediat ce Masterul da o comanda nouă (handleNativeCommandFlow).
+  @Volatile private var lastStopAtMs = 0L
+  @Volatile private var commandStartedAtMs = 0L
   @Volatile private var ttsSpeakingSince = 0L
   @Volatile private var ttsLastDoneAt = 0L
 
@@ -590,6 +599,13 @@ class BensonForegroundService : Service() {
   private fun speak(text: String, kind: String? = null) = speakNativeFallbackThenCapture(text, kind)
 
   private fun speakNativeFallbackThenCapture(text: String, kindOverride: String? = null) {
+    // Comanda curenta a pornit INAINTE de ultimul stop => rostirea aparTine unei sarcini moarte.
+    // O comanda noua muta commandStartedAtMs dupa lastStopAtMs, deci vorbeste normal. Dovedit
+    // necesar pe telefon: fereastra pe ceas (2,5 s) lasa sa scape rapoarte la 8 s dupa stop.
+    if (lastStopAtMs > commandStartedAtMs) {
+      AudioDiag.log(this, "SPEAK_SUPPRESSED", "reason=interrupt_all chars=${text.length}")
+      return
+    }
     if (E0_SELF_ECHO) recordSpokenTextForEcho(text)
     val t = nativeTts
     if (t != null && nativeTtsReady) {
@@ -1057,9 +1073,10 @@ class BensonForegroundService : Service() {
             val (txt, _, clipMs) = wakeVerifyTranscribe(wavPath)
             val norm = normalizeForMatch(txt ?: "")
             val isEcho = if (txt.isNullOrBlank()) false else isSelfEchoText(txt).first
-            val hit = !isEcho && SHUTUP_PATTERN.containsMatchIn(norm)
+            val hit = !isEcho && SHUTUP_PATTERN.containsMatchIn(norm) &&
+              !MEDIA_OBJECT_PATTERN.containsMatchIn(norm)
             AudioDiag.log(this, "SHUTUP_CHECK", "text=\"${txt ?: ""}\" echo=$isEcho hit=$hit clipMs=$clipMs")
-            if (hit) mainHandler.post { silenceNow("barge_in") }
+            if (hit) mainHandler.post { interruptAll("barge_in") }
           }, "benson-shutup").start()
         }
         AudioDiag.log(this, "WAKE_IGNORED", "reason=self_tts score=${"%.3f".format(score)}")
@@ -1986,12 +2003,15 @@ class BensonForegroundService : Service() {
   // "oprește muzica" nu se potriveste aici.
   // Revert: INTERRUPT_ENABLED = false.
   private val INTERRUPT_ENABLED = true
+  // INTERRUPT_ALL (15.10.2026, ordin direct al Masterului) — TACI / STOP / OPRESTE / MUTE sunt
+  // ECHIVALENTE si trec toate prin aceeasi functie centrala, `interruptAll`.
+  // Dezambiguizarea e pe OBIECT, nu pe verb, si e data de ancorele ^...$: comanda rostita SINGURA
+  // = intrerupere universala; aceeasi comanda cu obiect ("opreste muzica", "opreste videoclipul")
+  // nu se potriveste aici si ajunge la MEDIA_CTL_PATTERN, neatins.
   private val INTERRUPT_PATTERN = Regex(
-    // "mute" adaugat pe raportul direct al Masterului («nici Benson mute nu merge») — aceeasi
-    // cauza: nu exista vocabular de intrerupere deloc.
-    "^(?:stop|stai|stai asa|stai așa|opreste-te|oprește-te|lasa asta|lasă asta|lasa|lasă|" +
-      "anuleaza|anulează|renunta|renunță|gata|destul|taci|mute|liniste|liniște|" +
-      "nu mai vorbi|taci din gura|taci din gură)$"
+    "^(?:stop|stai|stai asa|stai așa|opreste|oprește|opreste-te|oprește-te|" +
+      "lasa asta|lasă asta|lasa|lasă|anuleaza|anulează|renunta|renunță|gata|destul|ajunge|" +
+      "taci|mute|liniste|liniște|nu mai vorbi|taci din gura|taci din gură)$"
   )
 
   // FIX_SHUTUP_WHILE_SPEAKING_1 - cuvinte care cer TACERE, nu anularea unei sarcini. Pentru ele
@@ -1999,10 +2019,24 @@ class BensonForegroundService : Service() {
   // doar taie vocea si arata in bula. Nu e ancorat ^...$: fraza vine lipita de wake word
   // ("benson taci"), deci se caută si in interiorul transcriptului de verificare.
   private val SHUTUP_WHILE_SPEAKING = true
-  private val SHUTUP_PATTERN = Regex("""(?:\btaci\b|\bgata\b|\bdestul\b|\bajunge\b|\bmute\b|\bliniste\b|nu mai vorbi|opreste-te|lasa asta|\bstop\b)""")
+  private val SHUTUP_PATTERN = Regex("""(?:\btaci\b|\bstop\b|\bopreste\b|\boprește\b|\bmute\b|\bgata\b|\bdestul\b|\bajunge\b|\bliniste\b|nu mai vorbi|lasa asta)""")
+  // Garda de context cerută explicit de Master: „opreste muzica" / „opreste videoclipul" sunt
+  // comenzi MEDIA, nu intrerupere universala. In barge-in nu avem parser complet (lucram pe
+  // transcriptul clipului de wake), deci un obiect media anuleaza interpretarea de tacere.
+  private val MEDIA_OBJECT_PATTERN = Regex(
+    """(?:muzic|melodi|piesa|cantec|cântec|videoclip|video|film|clip|redarea|serial|podcast|radio)"""
+  )
 
-  /** Taiere imediata a vocii + curatare, fara nicio rostire. Folosit de "taci" si de barge-in. */
-  private fun silenceNow(reason: String) {
+  // INTERRUPT_ALL — SINGURUL drum de intrerupere. Cele patru comenzi, barge-in-ul si orice apel
+  // viitor ajung aici; nu exista a doua implementare.
+  // Ce NU atinge, deliberat (punctul 9 din ordin): un apel deja conectat (lifecycle-ul WA/telefonie
+  // si audio-ul apelului nu sunt atinse nicaieri mai jos) si redarea media a altei aplicatii —
+  // „taci" taie vocea lui BENSON, nu filmul Masterului. Pentru media exista MEDIA_CTL.
+  // SOS: cand va exista, se exclude aici, explicit, nu implicit.
+  private fun interruptAll(reason: String) {
+    val callActive = isCallAudioBlockedNow()
+    lastStopAtMs = System.currentTimeMillis()
+    // 1. Creierul si instrumentele: rularea devine invalida si apelul HTTP in zbor e taiat.
     cancelAgentNow()
     pendingResultChoice = null
     pendingAppOpen = null
@@ -2015,12 +2049,46 @@ class BensonForegroundService : Service() {
     try { nativeTts?.stop() } catch (_: Exception) {}
     ttsSpeakingSince = 0L
     ttsLastDoneAt = System.currentTimeMillis()
-    AudioDiag.log(this, "INTERRUPT", "reason=$reason silent=true agent_cancelled=true pendings_cleared=true")
-    updateBubbleNative("Tac.", "taci", terminal = true, dismissDelayMs = 1500L)
+    // 2. Degetul BENSON: buclele de pasi (cautare, submit, redactare, navigare automata) se
+    //    opresc INTRE pasi, prin steagul din serviciul de accesibilitate. Nu inchidem aplicatia
+    //    (punctul 6 din ordin): oprim operatia, nu YouTube.
+    val uiAborted = try {
+      expo.modules.accessibility.BensonAccessibilityService.requestAbort(); true
+    } catch (_: Throwable) { false }
+    // 3. Media: oprim REDAREA (muzica/radio/video) prin acelasi transport MediaSession folosit
+    //    de MEDIA_CTL — executor existent, nu unul nou. Apel conectat: nu atingem nimic.
+    val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    val wasPlaying = try { am.isMusicActive } catch (_: Exception) { false }
+    val pauseSent = if (wasPlaying && !callActive) {
+      try {
+        expo.modules.notificationlistener.MediaTransport.control(applicationContext, "", "pause")
+      } catch (_: Exception) { false }
+    } else false
+    AudioDiag.log(
+      this, "INTERRUPT_ALL",
+      "reason=$reason silent=true tts_stopped=true agent_cancelled=true pendings_cleared=true " +
+        "ui_aborted=$uiAborted media_was_playing=$wasPlaying pause_sent=$pauseSent " +
+        "call_preserved=$callActive",
+    )
+    updateBubbleNative("Am oprit.", reason, terminal = true, dismissDelayMs = 1500L, force = true)
     closeSession(reason)
     setMicOwner("NONE", reason)
     hideWakeRingNative()
     rearmWakeNative(reason)
+    // 4. Verificare reala, nu declarativa (punctul 7): daca redarea continua, bula spune exact
+    //    asta. Nu raportam un stop reusit peste o operatie care merge inainte.
+    if (wasPlaying && !callActive) {
+      mainHandler.postDelayed({
+        val still = try { am.isMusicActive } catch (_: Exception) { false }
+        AudioDiag.log(this, "INTERRUPT_VERIFY", "media_stopped=${!still} still_playing=$still")
+        if (still) {
+          updateBubbleNative(
+            "Am oprit ce puteam. Redarea continuă — aplicația nu o cedează.",
+            reason, terminal = true, dismissDelayMs = 2500L, force = true,
+          )
+        }
+      }, 900L)
+    }
   }
 
   @Volatile private var agentRunId = 0
@@ -2029,30 +2097,11 @@ class BensonForegroundService : Service() {
     if (!INTERRUPT_ENABLED) return false
     val normCmd = normalizeForMatch(command)
     if (!INTERRUPT_PATTERN.matches(normCmd)) return false
-    logRoute("NATIVE_ROUTE", "action=interrupt")
-    if (SHUTUP_PATTERN.containsMatchIn(normCmd)) { silenceNow("shutup"); return true }
-    // 1. Agentul in curs devine invalid: bucla lui vede alt runId si se opreste la pasul urmator.
-    // P0 — anulare COMPLETA: invalideaza rularea SI taie apelul HTTP in zbor (Call.cancel()).
-    // Fara taierea apelului, rularea ramanea blocata ~22 s in OkHttp si putea vorbi dupa aceea.
-    cancelAgentNow()
-    // 2. Orice intrebare in asteptare dispare — un "da" de mai tarziu nu mai autorizeaza nimic.
-    pendingResultChoice = null
-    pendingAppOpen = null
-    pendingNav = null
-    pendingYoutubePlay = null
-    pendingAppSearch = null
-    pendingWaAction = null
-    pendingWaDisambiguation = null
-    pendingControlAction = null
-    // 3. Taiem vocea proprie, ca sa nu continue sa vorbeasca peste Master.
-    try { nativeTts?.stop() } catch (_: Exception) {}
-    AudioDiag.log(this, "INTERRUPT", "agent_cancelled=true pendings_cleared=true")
-    // 4. Confirmare scurta, apoi inapoi la wake. Nu facem nimic altceva: "stop" inseamna stop.
-    updateBubbleNative("Am oprit.", command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
-    speak("Am oprit.", "report")
-    closeSession("interrupt")
-    setMicOwner("NONE", "interrupt")
-    rearmWakeNative("interrupt")
+    logRoute("NATIVE_ROUTE", "action=interrupt_all")
+    // Punctul 7 din ordin: intreruperea e SILENTIOASA. Nu mai exista ramura care rostea
+    // "Am oprit." — era contradictorie (i se cere sa tacă si vorbea) si era al doilea drum de
+    // intrerupere, pe lângă `interruptAll`. Acum e unul singur.
+    interruptAll(normCmd)
     return true
   }
 
@@ -2693,7 +2742,17 @@ class BensonForegroundService : Service() {
   // RUNDA_N3/N4 — "bula = dialog": state carries BENSON's actual spoken response (e.g. "Deschid
   // WhatsApp."), not a generic "gata"; transcript carries the user's last utterance. Suppressed
   // entirely under VOICE_ONLY (screen locked — "bula nu se poate afișa peste ecranul de blocare").
-  private fun updateBubbleNative(state: String, transcript: String, terminal: Boolean, dismissDelayMs: Long) {
+  private fun updateBubbleNative(
+    state: String,
+    transcript: String,
+    terminal: Boolean,
+    dismissDelayMs: Long,
+    force: Boolean = false,
+  ) {
+    if (!force && lastStopAtMs > commandStartedAtMs) {
+      AudioDiag.log(this, "BUBBLE_SUPPRESSED", "reason=interrupt_all")
+      return
+    }
     // VISIBLE WORKING STATE, punctele 3 si 5 (14.10.2026, ordin permanent al Masterului):
     // „Elimină suprimarea generală a bulei în VOICE_ONLY. Separă explicit SCREEN_LOCKED și
     // SCREEN_UNLOCKED." Cauza plangerii „nu există bulă", dovedita in logul testului vocal
@@ -2814,7 +2873,11 @@ class BensonForegroundService : Service() {
       "da-i drumul|dă-i drumul|da drumul|dă drumul|da-i drumu|dă-i drumu|" +
       "urmatorul|următorul|urmatoarea|următoarea|next|mai departe|mergi mai departe|sari peste|" +
       "inapoi|înapoi|precedentul|precedenta|precedentă|previous)" +
-      "\\s*(muzica|muzică|music)?\\s*[.!?]*\\s*$",
+      // INTERRUPT_ALL — Masterul a cerut explicit ca „opreste videoclipul" sa opreasca
+      // videoclipul, nu conversatia. Pana azi obiectul acceptat era doar „muzica", deci fraza
+      // cadea in afara ambelor drumuri.
+      "\\s*(muzica|muzică|music|melodia|melodie|piesa|cantecul|cântecul|videoclipul|videoclip|" +
+      "video|filmul|film|clipul|clip|redarea|serialul|podcastul|radio|radioul|youtube)?\\s*[.!?]*\\s*$",
     RegexOption.IGNORE_CASE,
   )
 
@@ -3963,6 +4026,9 @@ class BensonForegroundService : Service() {
     // Revert: mută `cancelAgentNow()` înapoi doar în `tryAgent`.
     if (agentCall != null || agentRunId > 0) cancelAgentNow()
     if (tryInterrupt(command)) return
+    // UNIVERSAL_ACTION_STOP - comanda noua ridica fereastra de oprire a degetului.
+    commandStartedAtMs = System.currentTimeMillis()
+    try { expo.modules.accessibility.BensonAccessibilityService.clearAbort() } catch (_: Throwable) {}
     if (pendingWaDisambiguation != null) {
       handlePendingWaDisambiguation(command)
       return
