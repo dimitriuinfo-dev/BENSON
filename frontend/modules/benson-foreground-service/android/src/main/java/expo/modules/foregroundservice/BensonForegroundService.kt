@@ -4479,6 +4479,15 @@ class BensonForegroundService : Service() {
         AudioDiag.log(this, "AGENT_VERIFY_PLAYING", "playing=$playing pkg=$fg title=\"${meta?.title.orEmpty().take(40)}\"")
         BensonAgentTools.toolResult(playing, detail) to false
       }
+      // BENSON ISI CUNOASTE COMENZILE — citire din registrul real (canal SYSTEM: constante din
+      // cod, nu ecran si nu web). Nu executa nimic si nu incheie tura: creierul primeste datele
+      // si apoi raspunde cu «say», ca la orice conversatie.
+      BensonAgentTools.EXPLAIN_COMMAND -> {
+        val q = args.optString("query").trim()
+        val text = BensonCommandRegistry.explain(q)
+        AudioDiag.log(this, "EXPLAIN_COMMAND", "query=\"$q\" chars=${text.length}")
+        BensonAgentTools.toolResult(true, text, cap = 3500) to false
+      }
       BensonAgentTools.SAY -> {
         val text = args.optString("text").trim().ifBlank { "Gata." }
         conversationHistory.add("user", originalCommand); conversationHistory.add("assistant", text)
