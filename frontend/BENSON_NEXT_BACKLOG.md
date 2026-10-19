@@ -76,12 +76,15 @@ succes:
 | SURVIVOR verification (deschidere confirmată pe ecran) | da (`classifyLaunchVerification` cablat în `open_app`) | da | da (`AgentOpenAppVerificationTest`) | da, DOAR pentru deschiderea aplicației — `AGENT_OPEN_APP_VERIFY outcome=Success`. Nu verifică CE se apasă înăuntru. |
 | Gard în cod (nu doar prompt): fără apăsare → fără declarație de rezultat | da, nou (3 gărzi, `AgentVerificationGate.kt`) | da, nou | da (18 teste) | parțial — gărzile verifică SECVENȚA (acțiune→observare), nu dacă apăsarea a fost pe butonul CORECT. Insuficiente singure. |
 | Citire rezultat REAL din Calculator, corelată cu ecranul | da — instrucțiune `systemPrompt` + gărzi de cod | da | da (structural) | **NU — confirmat FALS prin testul real al lui Rareș: ecranul arăta `89.979()`, nu rezultatul corect** |
-| UNKNOWN când rezultatul nu poate fi confirmat | da (aceeași instrucțiune) | da | da (text prezent) | de verificat — raportul spune că BENSON "afirmă că nu găsește butoanele", posibil un răspuns onest de eșec (bun semn), dar necesită citatul exact/log-ul pentru confirmare |
+| UNKNOWN când rezultatul nu poate fi confirmat | da (aceeași instrucțiune) | da | da (text prezent) | citat primit: „Nu găsesc calculator butoanele trei șapte si opt pe ecran. Apasă pe calculator butoanele trei șapte si opt." — admite eșecul (bun semn, nu minte „378"), dar fraza repetă comanda către sine, nu doar raportează — semnal al unei confuzii reale, nu doar text |
 
-**Cauză probabilă, NECONFIRMATĂ prin log** (bufferul logcat s-a rotit peste rularea exactă a lui
-Rareș): `89.979()` conține paranteze, butoane care există DOAR în modul științific al Calculatorului
-OnePlus — posibil ca agentul să fi apăsat din greșeală comutatorul de mod, schimbând complet grila
-de butoane între două `observe_screen`-uri. Nu se construiește un fix pe o ipoteză neconfirmată.
+**Cauză REALĂ găsită și reparată (generic, EXECUTOR comun)**: `tapDigestElement` raporta `ok=true`
+necondiționat după orice apăsare acceptată, inclusiv când ecranul NU se schimba deloc — un fals
+pozitiv sistemic care putea lăsa agentul să creadă că progresează fără să fi apăsat efectiv nimic
+util. Reparat + clasificat (`UI_NODE_NOT_FOUND`/`UI_ACTION_REJECTED`/`VERIFICATION_FAILED`/`UNKNOWN`)
+— detalii complete în `BENSON_NEXT_BUILD_STATE.md`, secțiunea „SURVIVOR Verification Engine".
+**Ipoteza modului științific rămâne NECONFIRMATĂ** — nu s-a construit niciun fix pe ea (interzis
+explicit); fix-ul aplicat e independent de orice ipoteză despre CE anume s-a apăsat greșit.
 
 **De ce nu e declarată „misiunea completă"**: tot ce ține de mecanism (agent, AKA, UI discovery,
 executor, SURVIVOR, gărzile de cod) a rulat REAL pe dispozitiv, repetat, cu dovadă în log —

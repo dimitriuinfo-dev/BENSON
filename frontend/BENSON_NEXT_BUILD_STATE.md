@@ -12,6 +12,55 @@ pe commit-ul de checkpoint — vezi secțiunea CHECKPOINT de mai jos.
 pentru distincția pe 4 coloane (implementat/conectat/test automat/DEVICE_PASS) — **primul DEVICE_PASS
 real al acestei runde a fost obținut** (SURVIVOR/navigație Waze), detaliat mai jos.
 
+## SURVIVOR Verification Engine (19.10.2026) — răspuns la DEVICE_FAIL Calculator
+
+Captura lui Rareș: BENSON a spus „Nu găsesc calculator butoanele trei șapte si opt pe ecran. Apasă
+pe calculator butoanele trei șapte si opt." — ecranul final arăta `89.979()`, nu `378`. Cauza
+GENERICĂ (nu specifică Calculatorului) găsită și reparată, în `benson-accessibility` (EXECUTOR
+comun, folosit de orice interacțiune `tap_element`, nu un script special):
+
+**Bug real, confirmat prin citirea codului**: `tapDigestElement()` (`BensonAccessibilityService.kt`)
+întorcea `ControlResult(true, ...)` **necondiționat** după o apăsare acceptată — inclusiv când
+`changed` (ecranul comparat înainte/după) era `false`. Mesajul text era onest ("...dar ecranul pare
+neschimbat."), dar câmpul `ok` rămânea `true`. Agentul primea deci "succes" pentru o apăsare care nu
+produsese NICIUN efect observabil — exact genul de fals pozitiv care, repetat, poate duce la o stare
+finală incoerentă precum `89.979()`.
+
+**Reparat**, pe punctele din mandat:
+1. **Plan/rezultat separate**: codul BENSON nu calculează și nu presupune NICIODATĂ rezultatul
+   matematic așteptat (378) — doar verifică, generic, că fiecare apăsare a avut un efect observabil.
+   Rezultatul final se citește mereu literal de pe ecran, niciodată dedus.
+2. **Dovezi observabile**: fiecare ramură de eșec din `tapDigestElement` loghează acum explicit
+   `classification=<UI_NODE_NOT_FOUND|UI_ACTION_REJECTED|VERIFICATION_FAILED|UNKNOWN>`, nu doar
+   `ok=false`.
+3-4. **Verificare reală a efectului, nu doar prezența unei reobservări**: după apăsare, se citește
+   `screenSignature()` din nou; dacă nu s-a schimbat, rezultatul e acum `ok=false`
+   (`VERIFICATION_FAILED`), nu `true`. Agentul primește mesajul explicit și trebuie să reobserve.
+5. **Fără coordonate fixe, fără repetare oarbă**: neschimbat — `tapDigestElement` tot funcționează
+   doar pe indici dintr-un digest proaspăt, cu verificare de etichetă anti-ecran-schimbat
+   (comportament deja existent, FIX_AGENT_TAP_CONTRACT_1, neatins).
+6. **Calculator — stare inițială/expresie/rezultat**: NU s-a construit logică specifică
+   Calculatorului (interzis explicit, punctul 9) — verificarea rămâne generică ("s-a schimbat ceva
+   observabil pe ecran după apăsare"), aplicabilă oricărei aplicații cu conținut text vizibil.
+7. **Cifrele 3,7,8 — planificare greșită sau răspuns final?** — **NU se poate răspunde din log**:
+   bufferul logcat s-a rotit peste rularea exactă a lui Rareș înainte să pot citi; nu exista încă
+   tag-ul `classification=` din acest fix. Ipoteză, explicit neconfirmată: fals pozitive repetate
+   (`ok=true` pe apăsări fără efect) ar fi putut lăsa agentul să creadă că progresează, ducând la o
+   secvență de apăsări necorelată cu planul inițial. Următoarea rulare reală va avea dovada în log.
+8. **FailureClassifier**: `InteractionVerification.kt` (nou, pur, testat) — exact cele 4 categorii
+   cerute: `UI_NODE_NOT_FOUND`, `UI_ACTION_REJECTED`, `VERIFICATION_FAILED`, `UNKNOWN`.
+9. **Un singur EXECUTOR comun**: fix-ul e în `tapDigestElement`, funcția deja folosită de ORICE
+   apăsare prin agent (`TAP_ELEMENT`) — nu un drum nou, nu un al doilea LIVE.
+10. **Teste + dovezi ADB nedistructive**: 6 teste noi (`InteractionVerificationTest`), 111/111 teste
+    PASS în `benson-accessibility`, 418/418 neschimbate în `benson-foreground-service`.
+    `assembleRelease` reconstruit local (BUILD SUCCESSFUL, semnătură identică `fbbc618da8...`) —
+    **NEINSTALAT** (nicio reautorizare explicită de instalare/cost în acest mesaj) — pregătit pentru
+    reluarea testului real, nu executat.
+
+**Fișiere**: `InteractionVerification.kt`/`InteractionVerificationTest.kt` (noi) +
+`BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
+rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
+
 ## DEVICE_PASS real (19.10.2026) — SURVIVOR / navigație Waze
 Autorizare primită: `adb install -r` după verificare semnătură+dispozitiv, teste OpenAI reale
 plafonate la 0,10 USD. Executat complet:
