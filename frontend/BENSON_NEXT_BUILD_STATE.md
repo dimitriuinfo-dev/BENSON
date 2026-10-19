@@ -61,6 +61,76 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## FIX_PRESS_BUTTON_LABEL_MISMATCH_1 (19.10.2026) — generic, fara liste per limba
+
+Mandat: rezolva generic diferenta dintre SEMNIFICATIA unei actiuni si DENUMIREA reala a
+controlului ("×" vs "Multiplizieren"), reutilizand resursele Accessibility si inteligenta
+multilingva COMUNA, fara liste rigide per limba.
+
+**Solutia**: `ControlLocator.visibleClickableLabels(root, limit=20)` (nou, pur) — cand
+`findButtonCandidates` nu gaseste nimic, `pressButtonByLabel` calculeaza lista REALA a etichetelor
+clickabile vazute acum pe ecran si o include in mesajul de eroare catre agent. Niciun cuvant
+tradus in Kotlin — doar expunerea datelor deja citite din Accessibility. Inteligenta multilingva
+ramane la modelul COMUN (acelasi folosit pentru restul conversatiei), caruia systemPrompt-ul ii
+spune explicit: daca «press_button» raspunde NU_GASIT si lista contine un echivalent semantic
+(alt cuvant, alta limba, alt simbol), sa cheme din nou «press_button» cu eticheta EXACTA de acolo,
+inainte sa treaca la `observe_screen`+`tap_element`.
+
+**Testat LOCAL, fara niciun apel OpenAI** (cerinta explicita a rundei): 3 teste noi in
+`ControlLocatorTest` — printre ele exact scenariul real dovedit in rularea 5
+(`visibleClickableLabelsExposesTheRealLabelEvenWhenTheSymbolSearchFails`, folosind fixtura reala cu
+`desc="Multiplizieren"`). 20/20 in `ControlLocatorTest`, 555/555 in cele doua module atinse
+(`benson-accessibility` + `benson-foreground-service`), zero regresii. Necesita o rulare REALA pe
+dispozitiv (cu buget reautorizat) ca sa confirme ca modelul chiar foloseste lista — cod construit
+si testat local, nu inca DEVICE_PASS pentru acest fix specific.
+
+## CALENDAR AGENT (19.10.2026) — prioritatea noua, cod construit, NU inca DEVICE_PASS
+
+Integrat in ACELASI motor de instrumente deja dovedit pe dispozitiv (`BensonAgentTools` +
+`runAgentToolLocked` din `BensonForegroundService.kt` — cel care ruleaza deja `press_button`/
+`open_app`), NU in scaffold-ul separat `BensonLiveOrchestrator.kt`/`BensonLiveContracts.kt`
+(acela ramane explicit neconectat la productie, per propriul sau comentariu: "implementarile
+reale... se cableaza separat... pana la inlocuire demonstrata" — a construi Calendar acolo ar fi
+insemnat cod care nu ruleaza niciodata pe telefon, contrazicand "testat pe dispozitiv").
+
+**Construit**:
+- `CalendarEventMath.kt` (nou, pur, zero Android/Context) — `intervalsOverlap`, `findConflicts`
+  (exclude evenimentul insusi la UPDATE), `isDuplicate` (titlu normalizat + ora de inceput identica),
+  `findFreeSlots` (fuzioneaza intervalele ocupate care se suprapun, intoarce golurile ≥ durata
+  ceruta). 13 teste noi (`CalendarEventMathTest`), toate verzi.
+- `BensonCalendarExecutor.kt` (nou, Android-dependent, `CalendarContract`) — citire (`readDay`,
+  toate calendarele, read-only), cautare interval liber (`findFreeSlots`), creare/modificare
+  eveniment cu protocol in DOUA FAZE (acelasi tipar ca draftul WhatsApp deja dovedit: intai
+  `confirmed=false` → PROPUNERE cu ziua saptamanii rostita, fara nicio scriere; abia
+  `confirmed=true`, dupa "da" explicit al Masterului intr-o comanda ulterioara → scrie efectiv),
+  conflict/duplicat verificate INAINTE de ambele faze (un conflict se refuza mereu, indiferent de
+  `confirmed`), verificare prin RECITIRE dupa fiecare scriere (doctrina 9 — nu doar "insert nu a
+  aruncat").
+- **Siguranta ceruta explicit**: scrierea (creare/modificare) se face DOAR intr-un calendar LOCAL
+  de test ("BENSON Test", `ACCOUNT_TYPE_LOCAL`, creat automat la prima utilizare) — un calendar
+  local nu se sincronizeaza niciodata, deci nu trimite NICIODATA invitatii. Programul real al
+  Masterului nu e atins cat timp capabilitatea nu e DEVICE_PASS. Citirea ramane pe toate
+  calendarele (read-only, fara risc).
+- **Multilingv, fara liste rigide**: interpretarea datei/orei ("mâine", "vineri viitoare",
+  "übermorgen", "15 noiembrie") ramane la modelul COMUN deja folosit pentru restul conversatiei —
+  executorul primeste deja ISO local (`AAAA-LL-ZZTHH:mm:ss`), niciodata text liber de parsat in
+  Kotlin. Acelasi principiu ca la fixul "×"/"Multiplizieren" de mai sus.
+- Permisiuni: `READ_CALENDAR`+`WRITE_CALENDAR` adaugate in manifestul modulului
+  (`benson-foreground-service/android/src/main/AndroidManifest.xml`) si in `SetupWizard.tsx` (pas
+  nou "calendar", necritic, acelasi tipar ca restul permisiunilor).
+
+**Verificat local**: `npx tsc --noEmit` curat, `CalendarEventMathTest` 13/13, 439/439 in tot
+modulul `benson-foreground-service`, `gradlew :app:assembleRelease` BUILD SUCCESSFUL — manifestul
+RELEASE fuzionat confirmat ca include `READ_CALENDAR`/`WRITE_CALENDAR`. Zero apel OpenAI (buget
+inchis, conform cerintei).
+
+**NU inca DEVICE_PASS**: nicio rulare reala pe telefon a agentului cu instrumentele de calendar —
+nici citire, nici creare de eveniment fictiv in calendarul de test. Pasul urmator, cand bugetul va
+fi reautorizat (sau printr-un smoke-test ADB direct, fara OpenAI, pentru partea CalendarContract
+singura): instalare non-distructiva, citire unei zile reale (read-only, fara risc), apoi creare a
+UNUI eveniment fictiv in calendarul de test + verificare vizuala ca NU a aparut in calendarul real
+si ca nicio invitatie nu a plecat.
+
 ## Semantic UI Resolver (19.10.2026) — a CINCEA rulare reală, progres real confirmat
 
 Mandat: nu repeta testul cu selecția nesigură de index a modelului — construiește o rezolvare
