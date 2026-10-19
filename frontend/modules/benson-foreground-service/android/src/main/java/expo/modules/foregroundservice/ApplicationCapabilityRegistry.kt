@@ -83,3 +83,9 @@ internal fun capabilityRecordsFromStaffMember(member: StaffMember): List<Capabil
       requiresConfirmation = true, // Confirmation Gate existent ramane obligatoriu, neschimbat
     )
   }
+
+// BENSON NEXT (19.10.2026) — agregat peste TOT registrul (StaffRegistry.load(ctx) intoarce lista
+// completa), nu o a doua enumerare: fiecare StaffMember isi aduce propriile capabilitati prin
+// functia de mai sus, aici doar le adunam intr-o singura lista pentru selectBestCapability.
+internal fun allCapabilityRecords(members: List<StaffMember>): List<CapabilityRecord> =
+  members.flatMap { capabilityRecordsFromStaffMember(it) }
