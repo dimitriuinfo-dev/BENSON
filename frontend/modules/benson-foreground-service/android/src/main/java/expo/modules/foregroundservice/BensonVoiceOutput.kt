@@ -15,6 +15,7 @@ object BensonVoiceOutput {
     is MissionResult.Replied -> result.text
     is MissionResult.Clarify -> result.question
     is MissionResult.Rejected -> "Nu am putut duce asta la capăt."
+    is MissionResult.AwaitingConfirmation -> "Confirmi?"
     is MissionResult.Executed -> when (result.outcome) {
       is ExecutionOutcome.Success -> "Gata."
       is ExecutionOutcome.Failed -> "Nu am reușit."

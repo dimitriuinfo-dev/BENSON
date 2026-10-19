@@ -11,6 +11,11 @@ sealed class MissionResult {
   data class Replied(val text: String) : MissionResult()
   data class Clarify(val question: String) : MissionResult()
   data class Rejected(val reason: String) : MissionResult()
+  // Fluxul real de confirmare (ConfirmationGate-ul propriu-zis ramane in LEGACY, neatins) — DOAR
+  // produs cand constructorul cere explicit pasul separat (requireExplicitConfirmationStep=true).
+  // Implicit FALSE -> comportament identic cu inainte (Executed direct), zero schimbare pentru
+  // apelantii/testele existente.
+  data class AwaitingConfirmation(val missionId: String, val action: String, val targetAgent: String) : MissionResult()
   data class Executed(val missionId: String, val outcome: ExecutionOutcome) : MissionResult()
 }
 
@@ -25,7 +30,20 @@ class BensonLiveOrchestrator(
   // actiuni care nu au nevoie de ea). Un singur LIVE Mission Owner consuma MEMORY ca unealta,
   // nu un al doilea orchestrator paralel.
   private val memoryLookup: DestinationMemoryLookup? = null,
+  private val requireExplicitConfirmationStep: Boolean = false,
 ) {
+  private val pendingExecutions = mutableMapOf<String, ExecutionRequest>()
+
+  // Raspunsul utilizatorului la o AwaitingConfirmation in asteptare. Nu reimplementeaza
+  // ConfirmationGate-ul real (ramane in LEGACY) — doar decizia LIVE: confirmat -> executa prin
+  // ACELASI executor, orice altceva -> respinge, fara executie.
+  fun confirmPendingMission(missionId: String, confirmed: Boolean): MissionResult {
+    val request = pendingExecutions.remove(missionId)
+      ?: return MissionResult.Rejected("no_pending_mission:$missionId")
+    return if (confirmed) MissionResult.Executed(missionId, executionEngine.execute(request))
+    else MissionResult.Rejected("user_declined:$missionId")
+  }
+
   // Punctul de intrare unic: text (tastat SAU deja transcris din voce — LIVE nu stie si nu-i
   // pasa de sursa, exact cerinta "aceeasi configuratie TTS/intelegere pentru tastat si vocal").
   fun handleTextInput(text: String, missionId: String): MissionResult {
@@ -75,6 +93,10 @@ class BensonLiveOrchestrator(
     val resolvedPlaceId = resolvedEntities.filterIsInstance<DomainEntity.Destination>().firstOrNull()?.canonicalPlaceId
     val params = resolvedPlaceId?.let { mapOf("resolvedDestination" to it) } ?: emptyMap()
     val request = ExecutionRequest(routing.targetAgent, intent.action, params, risk)
+    if (requireExplicitConfirmationStep && routing.requiresConfirmation) {
+      pendingExecutions[missionId] = request
+      return MissionResult.AwaitingConfirmation(missionId, intent.action, routing.targetAgent)
+    }
     val outcome = executionEngine.execute(request)
     return MissionResult.Executed(missionId, outcome)
   }
