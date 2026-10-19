@@ -178,3 +178,40 @@ implementează pe loc. Fără dată de livrare — se reconsideră abia după ce
     fără date reale de voce umană (doar sintetic Piper); `HeedWakeWord.kt`/
     `BensonForegroundService.kt` NEATINSE — integrarea cere acord explicit + checkpoint Git +
     validare pe telefon, per decizia KWS.
+
+- **TEST DE PARITATE PREPROCESARE — rezultat real, 19.10.2026** (`HeedStreamingPreprocessorParityTest.kt`,
+  5/5 teste, nicio modificare la `HeedWakeWord.kt`/`BensonForegroundService.kt`):
+  - **Defect real, confirmat NUMERIC (nu doar structural)**: `HeedStreamingPreprocessor.kt` nu
+    aplică `peak_normalize` — `heed/infer.py` (referința Python, `WakeWordDetector.step()`) aplică
+    `peak_normalize(-3dBFS)` pe fereastra curentă la FIECARE pas, înainte de log-mel. Măsurat pe
+    același clip: `max|Kotlin - Python(fără normalize)| = 3.4e-5` (practic identic, doar zgomot
+    float32) vs. `max|Kotlin - Python(CU normalize, referința reală)| = 0.6858` — diferența e
+    ÎNTREAGĂ și EXCLUSIV din lipsa acestui pas, nimic altceva.
+  - **De ce nu s-a rupt „Benson" până acum (analiză, nu presupunere)**: CMN (scăderea mediei pe
+    timp, per bandă mel) anulează matematic un gain constant aplicat întregii ferestre — ESTE
+    exact ce arată testul pentru majoritatea cazurilor. Diferența de 0,69 vine din pragul
+    `LOG_FLOOR=1e-9`: la energie joasă, varianta neamplificată atinge pragul și varianta
+    amplificată (peak-normalizată) nu — acolo anularea matematică nu mai e exactă. Afectează
+    probabil marginile/porțiunile liniștite ale clipului, nu vorbirea clară.
+  - **NEREPARAT, deliberat**: fișierul alimentează deja drumul viu, dovedit pentru „Benson" —
+    nu se schimbă algoritmul fără decizia explicită a proprietarului, chiar dacă fișierul nu e pe
+    lista nominal protejată.
+  - **Dependențe noi, doar `testImplementation`, zero impact APK/runtime**: `mockito-core:5.11.0`
+    (necesar ca să instanțiezi clasa reală fără Android real) + `org.json:json:20231013` (org.json e
+    stub sub rulătorul de teste implicit — HeedStreamingPreprocessor.kt îl folosește direct).
+
+- **PROTOCOL VALIDARE VOCE REALĂ — pregătit, NEEXECUTAT** (cere persoane reale, consimțământ,
+  telefon — nimic din ce urmează s-a făcut):
+  1. **Consimțământ explicit, scris**, per persoană: ce se înregistrează („AJUTOR", de mai multe
+     ori), cum se folosește (doar antrenare/testare model local, niciodată transmis extern), cât se
+     păstrează, dreptul de ștergere.
+  2. **Minim 2 persoane distincte** pentru primul test real — o voce masculină, una feminină
+     (lipsesc complet azi, confirmat: `ro_RO-mihai-medium` e un singur vorbitor, bărbat).
+  3. Per persoană: 10 clipuri „AJUTOR" (ton normal) + 5 șoptit/grăbit + 5 de la distanțe diferite
+     (0,5 m / 2 m / 3 m, cameră obișnuită) — **separate explicit în antrenare vs. testare**: clipurile
+     unei persoane nu apar niciodată în ambele seturi.
+  4. **Negative reale, aceleași persoane**: 10 propoziții normale (nu „ajutor"), + televizor/radio
+     în fundal 2 min, + conversație normală 2 min.
+  5. Rulare: `heed eval <nume-proiect> --positive-dir <test> --negative-dir <test>` — raportează
+     TPR/FPR reale pe voce umană, nu sintetic. **Rezultat < acest test = model NEVALIDAT**, indiferent
+     de scorurile sintetice de azi.

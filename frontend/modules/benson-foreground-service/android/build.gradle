@@ -105,4 +105,15 @@ dependencies {
 
   // RUNDA TEST-1 (2026-10-03) — WakeVerifyMatcherTest, plain JVM unit test, no device/instrumentation.
   testImplementation "junit:junit:4.13.2"
+
+  // PARITY TEST (19.10.2026) — needed to instantiate the REAL HeedStreamingPreprocessor in a plain
+  // JVM unit test: its constructor takes a Context and calls context.assets.open(...), both Android
+  // stub classes under the default unit-test runner. Mockito mocks just enough of Context/AssetManager
+  // to serve the real heed_filter_coeffs.json asset from disk — test-only, zero APK/runtime impact,
+  // zero native code. Does not touch HeedWakeWord.kt or BensonForegroundService.kt.
+  testImplementation "org.mockito:mockito-core:5.11.0"
+  // org.json.* is an Android STUB under the default unit-test runner (every real method throws
+  // "not mocked") -- HeedStreamingPreprocessor.kt uses org.json directly (by design, same as
+  // StaffRegistry.kt), so the parity test needs the REAL implementation on the test classpath.
+  testImplementation "org.json:json:20231013"
 }

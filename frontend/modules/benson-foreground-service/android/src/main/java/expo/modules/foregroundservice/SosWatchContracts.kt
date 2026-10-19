@@ -20,11 +20,28 @@ data class SosTrigger(
   val heldDurationMs: Long,       // cat a durat apasarea lunga - 0 pentru tile/BLE instant
 )
 
+// Trei evenimente distincte, cerute explicit (19.10.2026) - niciodata confundate intre ele:
+//   WATCH_EVENT_RECEIVED - telefonul a primit evenimentul de la ceas (DataLayer/MessageClient a
+//     livrat ceva) - nu spune NIMIC despre ce s-a intamplat cu alerta SOS insasi.
+//   SOS_ALERT_DELIVERED - alerta a fost livrata printr-un canal VERIFICABIL (ex. apelul video
+//     WhatsApp a pornit efectiv, SURVIVOR a confirmat - nu doar "s-a trimis un intent").
+//   SOS_ALERT_UNKNOWN - rezultatul alertarii nu poate fi confirmat (canal indisponibil, timeout de
+//     verificare, SURVIVOR nu a primit dovada) - NICIODATA tratat ca succes implicit.
+enum class SosWatchEventStage { WATCH_EVENT_RECEIVED, SOS_ALERT_DELIVERED, SOS_ALERT_UNKNOWN }
+
+// Pastrat pentru compatibilitate cu round-ul anterior (PHONE_UNAVAILABLE e un caz specific de
+// SOS_ALERT_UNKNOWN - vezi toStage()); nu se sterge, se mapeaza.
 enum class SosDeliveryStatus { DELIVERED, UNCONFIRMED, PHONE_UNAVAILABLE }
+
+fun SosDeliveryStatus.toStage(): SosWatchEventStage = when (this) {
+  SosDeliveryStatus.DELIVERED -> SosWatchEventStage.SOS_ALERT_DELIVERED
+  SosDeliveryStatus.UNCONFIRMED, SosDeliveryStatus.PHONE_UNAVAILABLE -> SosWatchEventStage.SOS_ALERT_UNKNOWN
+}
 
 data class SosDeliveryResult(
   val triggerId: String,
   val status: SosDeliveryStatus,
+  val stage: SosWatchEventStage,
   val hapticConfirmed: Boolean,   // true DOAR daca telefonul a confirmat primirea - vezi mai jos
 )
 
@@ -50,4 +67,4 @@ class SosWatchTriggerAuthority(private val authorizedDeviceIds: Set<String>) {
 // livrare se construieste DOAR dupa o dovada reala (vezi EmergencyProtocol/SURVIVOR), niciodata
 // din simpla primire a SosTrigger-ului. hapticConfirmed=true cere status=DELIVERED explicit.
 fun buildDeliveryResult(triggerId: String, status: SosDeliveryStatus): SosDeliveryResult =
-  SosDeliveryResult(triggerId, status, hapticConfirmed = status == SosDeliveryStatus.DELIVERED)
+  SosDeliveryResult(triggerId, status, stage = status.toStage(), hapticConfirmed = status == SosDeliveryStatus.DELIVERED)
