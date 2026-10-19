@@ -4,7 +4,7 @@ Fiecare sarcină: stare (FĂCUT/ÎN LUCRU/URMEAZĂ/BLOCAT), dovada, fișierele a
 dacă o capacitate există deja în LEGACY funcțional, NEXT o reutilizează prin contract, nu o
 reinventează (ex. URI-urile Waze, vocabularul WhatsApp, pragurile HEED rămân sursa de adevăr).
 
-## FĂCUT (371/371 teste, zero DEVICE_PASS)
+## FĂCUT (376/376 teste, zero DEVICE_PASS)
 - [x] D0 — contracte comune
 - [x] BENSON LIVE — orchestrator unic, flux TEXT→LIVE→AKA→EXECUTOR→VERIFIED
 - [x] AKA — cablat la StaffRegistry real (provenență ≠ verificare) + descoperire dinamică (P1.6 respectat)
@@ -18,6 +18,9 @@ reinventează (ex. URI-urile Waze, vocabularul WhatsApp, pragurile HEED rămân 
 - [x] ModelProvider real (OpenAI, cod HTTP + parsare testată; neinvocat cu cheie reală)
 - [x] Pipeline conceptual HEED→STT→LIVE→EXECUTOR→RESPONSE, LEGEA TĂCERII respectată la intrare
 - [x] Anti-confuzie simulat/real (EvidenceLabels)
+- [x] LIVE — flux explicit de confirmare opt-in (`MissionResult.AwaitingConfirmation` +
+      `confirmPendingMission`, implicit dezactivat), modelează "da/nu" pentru acțiuni cu
+      `requiresConfirmation` fără a atinge ConfirmationGate-ul real din LEGACY
 
 ## BLOCAT — cere autorizare explicită, nu se face autonom
 - [ ] **SOS local real** (cablarea modelului KWS „AJUTOR" ca a doua inferență în `HeedWakeWord.kt`)
@@ -31,9 +34,6 @@ reinventează (ex. URI-urile Waze, vocabularul WhatsApp, pragurile HEED rămân 
 - [ ] **Instalare APK, ștergere date, apeluri/mesaje/plăți reale** — în afara autorității BUILD AUTOPILOT.
 
 ## URMEAZĂ — ce rămâne, neblocat, dar neînceput (viitoarea sesiune poate continua direct de aici)
-- [ ] Test de capăt-la-capăt pentru COMMS cu confirmare (requiresConfirmation=true) necesită
-      modelarea răspunsului "da/nu" prin LIVE — încă nefăcut explicit ca test dedicat.
-      (ConfirmationGate-ul real rămâne în LEGACY, neatins — doar fluxul de decizie e de modelat.)
 - [ ] TRAVEL — rută/trafic real (dincolo de navigația simplă) — neînceput.
 - [ ] Extindere SOS Watch către un modul Wear OS real (dependență nouă, decizie separată — menționat deja ca atare).
 
