@@ -1,0 +1,78 @@
+package expo.modules.foregroundservice
+
+// FIX_TTS_VOICE_CACHE_1 (19.10.2026, P0 — "accent indian" dupa comenzi tastate). Logica
+// DECIZIONALA pura din spatele ensureNativeTtsVoiceCurrent() (BensonForegroundService.kt) —
+// orchestrarea efectiva (apeluri reale catre android.speech.tts.TextToSpeech) ramane acolo,
+// netestabila JUnit (Context-dependent, acelasi motiv ca StaffRegistry.kt/PersonalMemoryStorage.kt
+// din aceasta sesiune). Aici doar REGULILE: cand se reincearca, ce stare rezulta, ce voce se alege.
+//
+// CAUZA ORIGINALA (gasita, nu presupusa): vechiul cod seta `lastBoundTtsEngine` INAINTE de a sti
+// daca selectia a reusit, apoi sarea peste orice reselectie cat motorul ramanea neschimbat — o
+// alegere gresita facuta o singura data (ex. inainte ca motorul sa-si fi incarcat vocile ro-RO)
+// ramanea legata pentru tot restul procesului. Tiparea imediat dupa pornire e cazul cel mai expus
+// la aceasta cursa (fereastra mai scurta pana la prima rostire decat o comanda vocala reala).
+
+enum class TtsVoiceState { NOT_INITIALIZED, VOICES_NOT_READY, CONFIRMED, SELECTION_FAILED }
+
+data class TtsVoiceBinding(
+  val engine: String?,
+  val state: TtsVoiceState,
+  val voiceName: String? = null,
+  val language: String? = null,
+)
+
+data class TtsVoiceCandidate(val name: String, val language: String, val country: String = "")
+
+object TtsVoiceSelector {
+  const val MAX_RETRIES = 3
+  const val MIN_RETRY_INTERVAL_MS = 2_000L
+
+  // Cascada existenta (ro -> de -> en-GB -> en), neschimbata ca ordine — doar extrasa pura, din
+  // selectBestTtsVoice() original.
+  fun pickBest(voices: List<TtsVoiceCandidate>): TtsVoiceCandidate? {
+    fun pick(lang: String, country: String? = null) = voices
+      .filter { it.language == lang && (country == null || it.country == country) }
+      .let { pool -> pool.firstOrNull { !it.name.contains("-network") } ?: pool.firstOrNull() }
+    return pick("ro") ?: pick("de") ?: pick("en", "GB") ?: pick("en")
+  }
+
+  // Cerinta 8: motorul s-a schimbat (Setari) -> totul se reia de la zero, inclusiv retry-urile.
+  fun resetForNewEngine(engine: String?): Pair<TtsVoiceBinding, Int> =
+    TtsVoiceBinding(engine, TtsVoiceState.NOT_INITIALIZED) to 0
+
+  // Cerinta 1+4: o selectie CONFIRMATA nu se reincearca la fiecare rostire (cache-ul ramane, dar
+  // DOAR dupa succes real). Una esuata/neincarcata se reincearca, dar plafonat (MAX_RETRIES) si nu
+  // mai des decat MIN_RETRY_INTERVAL_MS — fara bucla infinita, fara reincercare la fiecare replica.
+  fun shouldAttemptSelection(binding: TtsVoiceBinding, retryCount: Int, nowMs: Long, lastAttemptAtMs: Long): Boolean {
+    if (binding.state == TtsVoiceState.CONFIRMED) return false
+    if (retryCount >= MAX_RETRIES) return false
+    if (nowMs - lastAttemptAtMs < MIN_RETRY_INTERVAL_MS) return false
+    return true
+  }
+
+  // Cerinta 2+3: separa explicit "voci inca neincarcate" de "selectie incercata si esuata", si
+  // cere CONFIRMAREA reala (codurile de rezultat + vocea efectiv legata), nu doar atribuirea.
+  fun classifyAttempt(
+    voicesAvailable: List<TtsVoiceCandidate>?,
+    chosen: TtsVoiceCandidate?,
+    setLanguageSucceeded: Boolean,
+    setVoiceSucceeded: Boolean,
+    actuallyBoundVoiceName: String?,
+  ): TtsVoiceState = when {
+    voicesAvailable.isNullOrEmpty() -> TtsVoiceState.VOICES_NOT_READY
+    chosen == null -> TtsVoiceState.SELECTION_FAILED
+    setLanguageSucceeded && setVoiceSucceeded && actuallyBoundVoiceName == chosen.name -> TtsVoiceState.CONFIRMED
+    else -> TtsVoiceState.SELECTION_FAILED
+  }
+
+  // Cerinta 5+6: se vorbeste CU VOCE doar pe o stare CONFIRMATA pentru motorul curent — niciodata
+  // pe o stare esuata/neincarcata, care ar insemna sa lasam motorul sa aleaga singur (exact
+  // mecanismul care a produs vocea nedorita en-IN).
+  fun isSafeToSpeakAudio(binding: TtsVoiceBinding): Boolean = binding.state == TtsVoiceState.CONFIRMED
+
+  // Cerinta 7: comenzile tastate (origin="debug_inject") respecta preferinta de redare audio a
+  // utilizatorului; fara activare explicita, raspunsul ramane text. Orice alt origine (wake,
+  // follow_up, headset_button) nu e afectata — neschimbat.
+  fun shouldSpeakAudioForOrigin(origin: String, debugInjectAudioEnabled: Boolean): Boolean =
+    origin != "debug_inject" || debugInjectAudioEnabled
+}
