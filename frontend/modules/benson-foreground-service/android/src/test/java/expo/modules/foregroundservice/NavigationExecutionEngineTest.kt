@@ -55,6 +55,41 @@ class NavigationExecutionEngineTest {
     assertTrue(outcome is ExecutionOutcome.Failed)
   }
 
+  // --- routeInfoProvider opt-in (implicit null = fara schimbare fata de testele de mai sus) ---
+
+  @Test fun successAttachesHonestRouteEvidenceWhenProviderGiven() {
+    val honestRoute = RouteInfo(1200, RouteDataSource.STATIC_GEOMETRY_ONLY, 7, RouteDataSource.HISTORICAL_ESTIMATE, false)
+    val engine = NavigationExecutionEngine(
+      expectedPackagesFor = { setOf("com.waze") },
+      observeForegroundPackage = { "com.waze" },
+      routeInfoProvider = { honestRoute },
+    )
+    val outcome = engine.execute(request()) as ExecutionOutcome.Success
+    assertEquals("com.waze;distanceMeters=1200;trafficAware=false;etaMinutes=7;etaSource=HISTORICAL_ESTIMATE", outcome.evidence)
+  }
+
+  @Test fun successDoesNotAttachDishonestRouteEvidence() {
+    val dishonestRoute = RouteInfo(1200, RouteDataSource.STATIC_GEOMETRY_ONLY, 7, RouteDataSource.STATIC_GEOMETRY_ONLY, true)
+    val engine = NavigationExecutionEngine(
+      expectedPackagesFor = { setOf("com.waze") },
+      observeForegroundPackage = { "com.waze" },
+      routeInfoProvider = { dishonestRoute },
+    )
+    val outcome = engine.execute(request()) as ExecutionOutcome.Success
+    assertEquals("com.waze", outcome.evidence)
+  }
+
+  @Test fun failureNeverGetsRouteEvidenceAttached() {
+    val engine = NavigationExecutionEngine(
+      expectedPackagesFor = { setOf("com.waze") },
+      observeForegroundPackage = { null },
+      maxPolls = 1,
+      routeInfoProvider = { RouteInfo(1200, RouteDataSource.STATIC_GEOMETRY_ONLY, 7, RouteDataSource.HISTORICAL_ESTIMATE, false) },
+    )
+    val outcome = engine.execute(request())
+    assertTrue(outcome is ExecutionOutcome.Failed)
+  }
+
   // --- Integrat cu BensonLiveOrchestrator (nu izolat) ---
 
   @Test fun wiredIntoLiveOrchestratorProducesVerifiedNavigation() {
