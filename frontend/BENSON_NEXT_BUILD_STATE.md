@@ -61,7 +61,59 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
-## SURVIVOR S4 (19.10.2026) — trei straturi distincte, nu unul singur
+## SURVIVOR S4 — PATRU rulări reale pe dispozitiv (19.10.2026), cauza reală găsită
+
+Autorizare: `adb install -r` după verificare + buget OpenAI suplimentar de 0,10 USD. Patru rulări
+complete ale comenzii EXACTE „Benson, deschide Calculatorul și calculează 27 înmulțit cu 14.",
+fiecare cu captură logcat live, de la început, salvată (`.tmp-s4-run1..4-logcat.txt`). **Niciun
+DEVICE_PASS pentru Calculator** — rezultatul corect (378) nu a fost niciodată introdus și citit
+real. Cost total folosit din bugetul suplimentar: ~0,042 USD din 0,10 USD autorizați (patru rulări
++ reparații intermediare, monitorizat la fiecare pas prin `USAGE_ADD`).
+
+**Cauza reală, principală, găsită DIN LOG (nu presupusă)**: între momentul în care Calculatorul e
+confirmat SURVIVOR în prim-plan și prima apăsare efectivă, agentul „gândește" (un apel HTTP către
+OpenAI, câteva secunde). **În acest interval, o notificare a unei aplicații TERȚE (eBay
+Kleinanzeigen — `MessagesActivity`, posibil un mesaj/evaluare pentru o conversație cu "Katja") a
+preluat prim-planul**, confirmat prin log-urile native `ActivityTaskManager`
+(`setAppVisibility(...calculator..., visible=false)` urmat de `TopActivityComponent:
+ComponentInfo{com.ebay.kleinanzeigen/...MessagesActivity}`). Contractul deja existent
+(`FIX_AGENT_TAP_CONTRACT_1`, "stale_index") a prins corect situația și a refuzat să apese orbește —
+dar o eticheta generic ca "ecranul s-a schimbat" NU distingea asta de o simplă navigare internă,
+consumând pași (buget) pe reîncercări înainte ca agentul să-și dea seama să redeschidă aplicația.
+**Verificat explicit, cerința utilizatorului**: `OVERLAY_POLICY_EVAL isSelfForeground=false
+hadActiveOverlay=false` pe TOT intervalul — overlay-ul PROPRIU al BENSON nu a avut niciun rol;
+cauza a fost strict o notificare externă, în afara controlului BENSON.
+
+**Reparat, generic, în EXECUTOR comun** (`isForeignAppForeground`, `InteractionVerification.kt`):
+compară pachetul aplicației din digestul ORIGINAL servit agentului cu pachetul digestului
+PROASPĂT — dacă diferă, mesajul explicit spune „Altă aplicație a preluat ecranul... Deschide din
+nou aplicația țintă", nu doar „observă din nou" (care nu ajuta cu nimic când ecranul era altă
+aplicație cu totul). 3 teste noi.
+
+**A doua cauză reală găsită, a doua declarație falsă prinsă prin gărzile existente, dar scăpată de
+gardul 4**: rularea 4 a rostit „27 înmulțit cu 14 este 378." deși apăsările reale fuseseră
+„Wissenschaftlich" (comutator mod științific), „löschen" (șterge) ×2, „!" (cursorul însuși),
+„Prozent-Zeichen" (%) — ZERO cifre. Gardul 4 (`claimedNumberMissingFromLastObservation`) ar fi
+trebuit să blocheze, dar **"378" apărea din întâmplare în COORDONATELE unui element** (randarea
+digestului include bounds-ul, ex. „...40,378,500,980" — un ecran de 1080×2414 pixeli produce des
+secvențe de 3 cifre coincidente în coordonate x/y). **Reparat**: coordonatele se elimină explicit
+înaintea comparației de conținut (`BOUNDS_PATTERN`), 2 teste noi.
+
+**A treia constatare, confirmată real pe ecran (rularea 1, independent prin screenshot)**:
+Calculatorul s-a deschis cel puțin o dată în modul FEREASTRĂ PLUTITOARE (nu fullscreen) — probabil
+rezultatul unei apăsări greșite anterioare pe iconița de redimensionare. Resetat manual la
+fullscreen ca pregătire de mediu de test (nu o modificare de cod) — nicio logică specifică acestui
+caz nu a fost construită în BENSON (interzis explicit).
+
+**Concluzie onestă, răspuns la cerința explicită "repară cauza demonstrată, nu printr-un script cu
+coordonate Calculator"**: AMBELE cauze reale găsite (notificare externă + coordonate confundate cu
+conținut) au fost reparate GENERIC, în `InteractionVerification.kt`/`AgentVerificationGate.kt`,
+fără nicio cunoaștere despre pozițiile butoanelor Calculatorului. Rămâne un factor pe care niciun
+cod din EXECUTOR nu-l poate repara: modelul (gpt-5-nano) continuă să aleagă INDICI greșiți pentru
+cifre (dovedit, de 4 ori, cu secvențe fără nicio legătură cu „27,7,1,4" — vezi istoricul complet mai
+jos) — o limită de fiabilitate a modelului ales pentru cost, nu un defect de cod BENSON.
+
+## SURVIVOR S4 (prima precizare, 19.10.2026) — trei straturi distincte, nu unul singur
 Precizări DeepSeek acceptate, aplicate în `InteractionVerification.kt`/`tapDigestElement`:
 
 1. **Trei dovezi, nu una**: `InteractionEvidence` separă explicit `actionAccepted` (apăsare
@@ -82,24 +134,11 @@ Precizări DeepSeek acceptate, aplicate în `InteractionVerification.kt`/`tapDig
 8 teste (`InteractionVerificationTest`, rescrise complet pe noul model), 113/113 PASS în
 `benson-accessibility`, 418/418 neschimbate în `benson-foreground-service`.
 
-## Pregătire retest live (NU executat — aștept autorizare)
-- `assembleRelease` reconstruit local, semnătură verificată identică cu APK-ul instalat acum pe
-  telefon (`fbbc618da8...`) → `adb install -r` ar fi **nedistructiv** (confirmat, nu doar presupus).
-- Comanda EXACTĂ de repetat (cerută explicit, cuvânt cu cuvânt): **„Benson, deschide Calculatorul
-  și calculează 27 înmulțit cu 14."** — nu varianta „27 ori 14"/„27 x 14" folosită în rulările mele
-  anterioare.
-- Plan de captură live: `adb logcat` pornit ÎNAINTE de injectarea comenzii, scris într-un fișier
-  local (nu doar polling), cu un identificator de misiune (ex. timestamp-ul comenzii) și secvența
-  completă `AGENT_TOOL`/`AGENT_TAP_VERIFY` (acum cu `classification=`) — suficient pentru a răspunde
-  punctul „cifrele provin din planificare sau din răspunsul final" DE DATA ASTA. Nu se înregistrează
-  nimic personal — doar etichete de butoane (cifre/operatori) și stări de ecran ale Calculatorului.
-- **Cerere explicită de autorizare** (punctul 8 al mandatului): am nevoie de (a) confirmarea ta
-  pentru `adb install -r` peste instalarea curentă și (b) o nouă autorizare de cost API (bugetul
-  anterior de 0,10 USD a fost parțial folosit, ~0,05 USD rămân — o cifră nouă, explicită, e mai
-  curată decât reluarea celei vechi) înainte să rulez testul real.
-- **DEVICE_PASS pentru Calculator** rămâne definit strict: dovada operației introduse corect ȘI a
-  rezultatului 378 citit efectiv din interfață (captură/uiautomator dump, nu doar ce raportează
-  agentul) — neschimbat față de criteriul stabilit anterior.
+## Pregătire retest live — SUPERSEDAT, executat (vezi secțiunea de sus "PATRU rulări reale")
+Protocolul de mai jos a fost EXECUTAT integral (instalare + 4 rulări live + captură logcat de la
+început, de fiecare dată) sub autorizarea „AUTORIZARE RETEST S4". Rezultatele reale, cu cauzele
+găsite și reparate, sunt în secțiunea „SURVIVOR S4 — PATRU rulări reale" de la începutul acestui
+fișier — secțiunea de mai jos rămâne doar ca istoric al planului dinaintea execuției.
 
 ## DEVICE_PASS real (19.10.2026) — SURVIVOR / navigație Waze
 Autorizare primită: `adb install -r` după verificare semnătură+dispozitiv, teste OpenAI reale
@@ -140,19 +179,24 @@ Separare pe hunk-uri (nu doar pe fișier), ca să nu se amestece validat cu neva
 - APK-ul instalat rămâne cel din ultima rundă (cu gărzile + fix-urile Calculator, necomise — vezi mai
   jos). Nicio dezinstalare, nicio ștergere de date.
 
-## Protocol pregătit — reluare test Calculator (NU executat, așteaptă autorizare)
+## Protocol — reluare test Calculator — EXECUTAT de 4 ori (vezi "PATRU rulări reale" sus)
+Protocolul de mai jos a fost urmat la fiecare din cele 4 rulări. Pentru o a 5-a rulare viitoare,
+rămâne valabil ca listă de pași, cu O ADĂUGARE importantă confirmată necesară: verifică explicit
+(din log, `ActivityTaskManager`/`isForeignAppForeground` acum activ) că aplicația țintă NU a fost
+întreruptă de o notificare externă înainte de a interpreta un eșec ca fiind de altă natură.
 1. `adb shell input keyevent KEYCODE_WAKEUP` + confirmă `dumpsys window` arată launcher/ecran
-   deblocat (NU keyguard) înainte de a începe — cu timeout-ul de 30 min, nu ar trebui să se mai
-   blocheze singur în mijlocul testului.
+   deblocat (NU keyguard) înainte de a începe.
 2. Rearmează harness-ul: `am broadcast -a com.benson.butler.DEBUG_INJECT_ENABLE --ez enabled true`.
-3. Injectează comanda, urmărește `AGENT_*`/`USAGE_ADD` în logcat ca până acum.
+3. Injectează comanda, urmărește `AGENT_*`/`USAGE_ADD` în logcat.
 4. **La final, ÎNAINTE de orice altă acțiune**: `adb shell screencap -p` sau `uiautomator dump`
    direct pe ecranul Calculatorului (fără să se fi blocat între timp) — dovada cerută explicit:
    rezultatul AFIȘAT, nu doar ce a raportat agentul.
-5. Dezarmează harness-ul la final (disciplină neschimbată).
-Cere autorizare separată de cost API înainte de rulare (bugetul de 0,10 USD anterior a fost deja
-folosit parțial — ~0,04-0,05 USD rămân, dar o nouă autorizare explicită e mai curată decât reluarea
-uneia vechi).
+5. Dezarmează harness-ul la final.
+
+**Buget rămas**: ~0,058 USD din cei 0,10 USD autorizați explicit pentru acest retest (4 rulări +
+2 reparații intermediare au folosit ~0,042 USD, monitorizat la fiecare `USAGE_ADD`). O a 5-a
+rulare completă (ce ar costa tipic 0,01-0,03 USD) rămâne posibilă în limita rămasă, dar o nouă
+autorizare explicită, separată, e mai curată decât presupunerea tacită a continuării.
 
 ## Protocol pregătit — Wake / „Benson, taci" / LEGEA TĂCERII (cu Rareș prezent)
 Niciunul din acestea nu poate fi testat de mine singur — necesită vocea reală a lui Rareș lângă
@@ -275,15 +319,23 @@ verificat identic la fiecare instalare (`fbbc618da8...`, CN=BENSON). `firstInsta
 (2026-08-23) la fiecare reinstalare — confirmat nedistructiv, datele aplicației păstrate.
 
 ## Sarcina activă / următoarea
-Checkpoint-ul Waze e făcut (comis, tag-uit, pe GitHub). Rămas, strict cu prezența/autorizarea ta
-(nimic de construit în plus fără asta — vezi protocoalele pregătite mai sus):
-1. **Confirmare vizuală independentă** a ecranului Calculatorului pentru „27×14 = 378".
-2. **Wake/„taci"/LEGEA TĂCERII** — cer vocea ta reală lângă telefon.
-3. **WhatsApp VIDEO_CALL dry-run** prin agentul generic — neîncercat încă pe dispozitiv.
+Checkpoint-ul Waze e făcut (comis, tag-uit, pe GitHub). Patru rulări reale ale misiunii Calculator
+executate, cu două cauze reale găsite și reparate generic (notificare externă confundată cu
+"ecran schimbat"; coordonate confundate cu conținut în gardul 4). Rămas:
+1. **O a 5-a rulare** (sau mai multe), cu fix-urile din această rundă active — buget rămas ~0,058
+   USD din cei 0,10 USD, dar aștept o nouă autorizare explicită înainte de a continua automat mai
+   departe, dată fiind deja seria de patru încercări.
+2. **Confirmare vizuală independentă** a ecranului Calculatorului pentru rezultatul real (378) —
+   nerealizată încă în nicio rulare (fie model greșește butoanele, fie întreruperi externe).
+3. **Wake/„taci"/LEGEA TĂCERII** — cer vocea ta reală lângă telefon, neschimbat.
+4. **WhatsApp VIDEO_CALL dry-run** prin agentul generic — neîncercat încă pe dispozitiv.
 
-Fără autorizare nouă de cost API, nu mai fac alte apeluri OpenAI. Fără arhitectură nouă pentru
-aceste teste (cerut explicit). `search_in_app`/`open_url` rămân identificate dar NEATINSE deliberat
-(vezi BACKLOG — risc de regresie grăbită mai mare decât valoarea imediată).
+Recomandare pentru o rundă viitoare, NECONSTRUITĂ acum (doar observație, nu decizie luată):
+fiabilitatea gpt-5-nano la alegerea INDICILOR corecte pentru cifre rămâne limita reală, dovedită de
+4 ori — niciun gard de cod nu poate repara asta, doar preveni declarații false despre ea. Un model
+mai capabil (cost diferit) sau o cale alternativă generică (ex. `ACTION_SET_TEXT` direct pe un câmp
+editabil, quando există, în loc de apăsări individuale) ar fi direcții de evaluat separat.
+`search_in_app`/`open_url` rămân identificate dar NEATINSE deliberat (vezi BACKLOG).
 
 ## Limită de continuitate, spusă clar
 Acest mediu (sesiune interactivă Claude Code CLI) **nu are un mecanism de rulare neasistată, permanentă, între sesiuni**. Nu am instalat niciun cron/autopilot care rulează fără om — ar necesita o aprobare separată, explicită (tool `CronCreate`/skill `schedule`), nefăcută aici, exact cum cere mandatul „nu instala mecanisme de autoexecutare necontrolate". Reluarea reală se face printr-o sesiune nouă care citește ACEST fișier — manual sau printr-un mecanism de reluare pe care îl configurezi tu explicit.
