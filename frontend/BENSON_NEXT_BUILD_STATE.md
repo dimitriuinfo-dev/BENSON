@@ -61,6 +61,58 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## Semantic UI Resolver (19.10.2026) — a CINCEA rulare reală, progres real confirmat
+
+Mandat: nu repeta testul cu selecția nesigură de index a modelului — construiește o rezolvare
+semantică generică (`press_button(label)`), integrată în AKA/EXECUTOR existent, nu un orchestrator
+nou. Construit, testat local, apoi testat REAL pe dispozitiv (rularea 5 a zilei).
+
+**Construit, pe punctele cerute**:
+1-2. **`ControlLocator.findButtonCandidates(label, root)`** (nou, pur, în motorul G-1 deja
+   existent) — rezolvă ținta din arborele Accessibility ACTUAL (text/desc/viewId, potrivire exactă
+   întâi, parțială ca rezervă), niciodată dintr-un index memorat.
+3. **Ambiguitate**: `candidates.size > 1` → refuz explicit, cu numărul de candidați, cerând
+   `observe_screen`+`tap_element` pentru dezambiguizare prin index — nu un al doilea mecanism de
+   selecție, ci reutilizarea celui existent DOAR pentru acest caz.
+4. **Identitate pachet**: `pressButtonByLabel` reutilizează `isForeignAppForeground` (deja construit
+   pentru `tapDigestElement`) înainte de orice apăsare.
+5-6. **SURVIVOR**: aceeași verificare pe focalizare prioritară + coordonate excluse
+   (`InteractionVerification.kt`, neschimbată) — zero logică nouă de verificare, zero cunoaștere
+   despre Calculator sau poziții de butoane.
+7. **Plan vs. rezultat**: instrucțiune explicită în `systemPrompt` — apasă EXACT cifrele/operatorii
+   EXPRESIEI cerute, niciodată cifrele unui rezultat presupus cunoscut.
+8. **8 teste noi** (`ControlLocatorTest`) — exact scenariile cerute: ordine de noduri schimbată,
+   etichete duplicate (ambiguu), element negăsit, element neclicabil exclus, potrivire exactă vs.
+   parțială.
+
+**Rularea 5, REZULTAT REAL — progres confirmat, nu doar teoretic**:
+```
+AGENT_PRESS label="2" → digit_2 găsit, apăsat, VERIFICAT: focalizarea a CRESCUT cu exact "2" ✓
+AGENT_PRESS label="7" → digit_7 găsit, apăsat, VERIFICAT: focalizarea a CRESCUT cu exact "7" ✓
+AGENT_PRESS label="×" → UI_NODE_NOT_FOUND (eticheta reală e "Multiplizieren", nu simbolul "×")
+```
+**Pentru prima dată în 5 rulări, cifrele corecte (2, apoi 7) au fost identificate și apăsate CORECT,
+cu efectul verificat EXACT corespunzător** (nu doar "ceva s-a schimbat"). Agentul s-a adaptat
+singur după eșecul pe „×" (revenind la `tap_element`+`observe_screen`), exact cum spune
+`systemPrompt`-ul. Eșecul pe „×" are o cauză clară, diferită: eticheta VIZUALĂ a operatorului
+(simbolul „×") nu se potrivește cu `contentDescription`-ul REAL din arborele Accessibility
+(„Multiplizieren", cuvântul german — sistemul telefonului e în germană, deja documentat). Nu e un
+bug de rezolvare — e o diferență reală între ce VEDE omul și ce EXPUNE aplicația pentru accesibilitate.
+
+**Zero afirmație falsă** — exact ca rulările 4 (după reparația coordonatelor): „Nu am reușit să duc
+asta la capăt, Master." Onest, de data asta cu dovadă REALĂ de progres parțial corect în log.
+
+**Constatare separată, de mediu de test**: formula Calculatorului conținea deja conținut rezidual
+("787892...") înainte de prima apăsare din rularea 5 — probabil acumulat din rulările anterioare,
+pentru că `force-stop` + relansare NU garantează o expresie goală (unele calculatoare își salvează
+starea ultimei sesiuni). Nu e un bug BENSON — e o limită a protocolului meu de resetare între
+rulări, notă pentru o rulare viitoare (apăsare „AC" explicită înainte de start).
+
+## Buget EPUIZAT — oprire imediată
+`dayTotalUsd` a ajuns la 0,0962 (din bugetul suplimentar de 0,10 USD autorizat). Am oprit testarea
+live IMEDIAT la atingerea acestui prag — nicio altă rulare, niciun alt apel OpenAI, fără o nouă
+autorizare explicită de buget.
+
 ## SURVIVOR S4 — PATRU rulări reale pe dispozitiv (19.10.2026), cauza reală găsită
 
 Autorizare: `adb install -r` după verificare + buget OpenAI suplimentar de 0,10 USD. Patru rulări
