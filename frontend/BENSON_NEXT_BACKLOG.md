@@ -4,38 +4,40 @@ Fiecare sarcină: stare (FĂCUT/ÎN LUCRU/URMEAZĂ/BLOCAT), dovada, fișierele a
 dacă o capacitate există deja în LEGACY funcțional, NEXT o reutilizează prin contract, nu o
 reinventează (ex. URI-urile Waze, vocabularul WhatsApp, pragurile HEED rămân sursa de adevăr).
 
-## FĂCUT (349/349 teste, zero DEVICE_PASS)
+## FĂCUT (371/371 teste, zero DEVICE_PASS)
 - [x] D0 — contracte comune
 - [x] BENSON LIVE — orchestrator unic, flux TEXT→LIVE→AKA→EXECUTOR→VERIFIED
-- [x] AKA — cablat la StaffRegistry real, provenență separată de verificare
+- [x] AKA — cablat la StaffRegistry real (provenență ≠ verificare) + descoperire dinamică (P1.6 respectat)
 - [x] MEMORY — store criptat + rezolvare multilingvă (ro/de → aceeași locație)
 - [x] TRAVEL — plan misiune + executor navigație cu SURVIVOR
-- [x] COMMS — dry-run WhatsApp (dovedește generalizarea, nu e livrabil final)
+- [x] COMMS — dry-run WhatsApp (apel/video), test RO/DE identice pe VIDEO_CALL, canal neschimbat
+- [x] SHOPPING — al treilea domeniu prin același orchestrator (dry-run, fără plată posibilă)
 - [x] SOS (parțial) — contracte EmergencyProtocol, SOS WATCH, trigger gate, model KWS AJUTOR antrenat
-- [x] VOICE — decizie ONE VOICE (fără client HTTP real încă)
+- [x] VOICE — decizie ONE VOICE + client HTTP real OpenAI TTS (cod, neinvocat)
+- [x] EXECUTOR Android real #1 — Calculator, verificare reală prin serviciul de accesibilitate existent (cod, netestat pe telefon)
+- [x] ModelProvider real (OpenAI, cod HTTP + parsare testată; neinvocat cu cheie reală)
+- [x] Pipeline conceptual HEED→STT→LIVE→EXECUTOR→RESPONSE, LEGEA TĂCERII respectată la intrare
 - [x] Anti-confuzie simulat/real (EvidenceLabels)
 
-## FĂCUT (adăugat, a566beb)
-- [x] **EXECUTOR Android real #1** — `AndroidAppLaunchExecutionEngine.kt`: Calculator, verificare
-      reală prin `BensonAccessibilityService.currentForegroundPackageLive()` existent. Compilat,
-      **netestat pe telefon**.
-- [x] **OpenAI TTS real** — `OpenAiTtsClient.kt`/`TtsAudioPlayer`: cod complet, reutilizează
-      `OpenAiUsageMeter`. **Neinvocat cu cheie reală** — cost nou, cere autorizare explicită.
-- [x] Test RO/DE aceeași intenție canonică pentru VIDEO_CALL (Hannah), canal neschimbat.
+## BLOCAT — cere autorizare explicită, nu se face autonom
+- [ ] **SOS local real** (cablarea modelului KWS „AJUTOR" ca a doua inferență în `HeedWakeWord.kt`)
+      — fișier protejat explicit, cere acordul proprietarului per rundă, + model încă nevalidat pe
+      voce reală/umană (vezi `.benson-training/`, protocolul de validare pregătit, neexecutat).
+- [ ] **Invocarea reală a OpenAI TTS/ModelProvider** cu o cheie reală — cost nou neautorizat explicit.
+- [ ] **Integrarea reală în `BensonForegroundService.kt`** (wiring efectiv al LIVE NEXT peste calea
+      vocală vie) — fișier protejat, deja cu LEGEA TĂCERII necomisă + fix-uri TTS/anti-fals-trezire
+      necomise, în așteptarea confirmării tale pe telefon. O singură schimbare odată, nu paralel.
+- [ ] **Orice DEVICE_PASS** — acest mediu nu are `adb`/dispozitiv conectat.
+- [ ] **Instalare APK, ștergere date, apeluri/mesaje/plăți reale** — în afara autorității BUILD AUTOPILOT.
 
-## ÎN LUCRU
+## URMEAZĂ — ce rămâne, neblocat, dar neînceput (viitoarea sesiune poate continua direct de aici)
+- [ ] Test de capăt-la-capăt pentru COMMS cu confirmare (requiresConfirmation=true) necesită
+      modelarea răspunsului "da/nu" prin LIVE — încă nefăcut explicit ca test dedicat.
+      (ConfirmationGate-ul real rămâne în LEGACY, neatins — doar fluxul de decizie e de modelat.)
+- [ ] TRAVEL — rută/trafic real (dincolo de navigația simplă) — neînceput.
+- [ ] Extindere SOS Watch către un modul Wear OS real (dependență nouă, decizie separată — menționat deja ca atare).
 
-## URMEAZĂ (ordine propusă, nu fixă — se adaptează la ce se blochează)
-- [ ] Pipeline HEED→STT→LIVE NEXT→EXECUTOR→RESPONSE (integrare conceptuală; integrarea REALĂ în
-      `BensonForegroundService.kt` rămâne un pas separat, pe dispozitiv, cu LEGEA TĂCERII respectată)
-- [ ] AKA — descoperire dinamică de aplicații noi (în limitele permisiunilor Android)
-- [ ] SHOPPING — neînceput
-- [ ] SOS local — cablare reală KWS „AJUTOR" în HEED (cere acordul explicit pentru fișierul protejat)
-- [ ] Interpretare conversațională comună (un singur ModelProvider real, nu simulat)
-
-## BLOCAJE REALE, cunoscute
-- Fără `adb`/dispozitiv în acest mediu → zero DEVICE_PASS posibil din sesiune.
-- Fără mecanism de rulare neasistată între sesiuni (vezi `BENSON_NEXT_BUILD_STATE.md`).
-- OpenAI TTS real = cost nou, cere autorizare explicită înainte de prima execuție reală (nu doar cod).
-- Integrarea reală în `BensonForegroundService.kt` (fișier protejat, deja cu LEGEA TĂCERII necomisă)
-  rămâne secvențială, un flag/o rundă odată — nu paralel cu alte modificări pe același fișier.
+## Notă despre reluare
+Orice sesiune viitoare: citește `BENSON_NEXT_BUILD_STATE.md` întâi. Elementele BLOCAT de mai sus
+NU se reîncearcă fără autorizarea specifică cerută — nu sunt "sarcini uitate", sunt limite reale
+ale mediului/autorității curente.

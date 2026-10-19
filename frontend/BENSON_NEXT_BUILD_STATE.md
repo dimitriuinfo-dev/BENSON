@@ -3,10 +3,10 @@
 **Citește acest fișier ÎNTÂI la începutul oricărei sesiuni noi pe `benson-next`. Nu relua auditul general.**
 
 ## Ultimul commit cunoscut-bun
-`a566beb` pe ramura `benson-next` (pornită din `day-2026-10-08`, care rămâne la `01f6cca`, neatinsă).
+`3215b38` pe ramura `benson-next` (pornită din `day-2026-10-08`, care rămâne la `01f6cca`, neatinsă).
 
 ## Teste
-351/351 PASS la ultimul commit (`./gradlew :benson-foreground-service:testDebugUnitTest`). **Niciun DEVICE_PASS** — tot ce există e cod compilat + unit-testat cu fakes/dry-run, zero validare pe telefon (acest mediu nu are `adb`/dispozitiv conectat).
+371/371 PASS la ultimul commit (`./gradlew :benson-foreground-service:testDebugUnitTest`). **Niciun DEVICE_PASS** — tot ce există e cod compilat + unit-testat cu fakes/dry-run, zero validare pe telefon (acest mediu nu are `adb`/dispozitiv conectat).
 
 ## Ce există, funcțional (testat unitar)
 - D0: contracte comune (`BensonAgentContracts.kt`)
@@ -23,7 +23,7 @@
 `BensonForegroundService.kt`/`BensonCommandRegistry.kt`/`CLAUDE.md` pe `day-2026-10-08`: LEGEA TĂCERII (autorizare tură) + fix cache voce TTS (cauza „accent indian" găsită — `ensureNativeTtsVoiceCurrent` memora motorul înainte de confirmarea reală) + cross-check anti-fals-trezire (televizor). **Nu comite, nu instala peste aplicația reală fără confirmarea ta.**
 
 ## Sarcina activă / următoarea
-`AndroidAppLaunchExecutionEngine.kt` (EXECUTOR real, Calculator) + `OpenAiTtsClient.kt` (cod complet, neinvocat — cere cheie + autorizare cost) — FĂCUTE, cod compilat, **niciunul testat pe telefon**. Vezi `BENSON_NEXT_BACKLOG.md` pentru lista completă actualizată. Următorul pas: pipeline-ul HEED→STT→LIVE NEXT→EXECUTOR→RESPONSE (integrare conceptuală, fără atingerea `BensonForegroundService.kt` protejat încă).
+**Toate sarcinile izolate, sigure, neblocate din Master Build sunt FĂCUTE** (vezi `BENSON_NEXT_BACKLOG.md`, secțiunea FĂCUT — D0/LIVE/AKA+descoperire/MEMORY/TRAVEL/COMMS/SHOPPING/VOICE/EXECUTOR real/ModelProvider real/pipeline conceptual). Ce rămâne cere explicit UNA din: (a) dispozitiv real, (b) cheie API + autorizare de cost, (c) atingerea fișierului protejat `BensonForegroundService.kt`/`HeedWakeWord.kt`. Vezi secțiunea BLOCAT din backlog pentru detalii — nu sunt sarcini uitate, sunt limite reale. Secțiunea URMEAZĂ din backlog listează cele 3 iteme rămase neblocate dar neîncepute (test confirmare COMMS, TRAVEL rută/trafic real, SOS Watch Wear OS).
 
 ## Limită de continuitate, spusă clar
 Acest mediu (sesiune interactivă Claude Code CLI) **nu are un mecanism de rulare neasistată, permanentă, între sesiuni**. Nu am instalat niciun cron/autopilot care rulează fără om — ar necesita o aprobare separată, explicită (tool `CronCreate`/skill `schedule`), nefăcută aici, exact cum cere mandatul „nu instala mecanisme de autoexecutare necontrolate". Reluarea reală se face printr-o sesiune nouă care citește ACEST fișier — manual sau printr-un mecanism de reluare pe care îl configurezi tu explicit.
