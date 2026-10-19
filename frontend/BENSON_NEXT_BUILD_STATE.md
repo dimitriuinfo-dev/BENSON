@@ -61,6 +61,46 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## SURVIVOR S4 (19.10.2026) — trei straturi distincte, nu unul singur
+Precizări DeepSeek acceptate, aplicate în `InteractionVerification.kt`/`tapDigestElement`:
+
+1. **Trei dovezi, nu una**: `InteractionEvidence` separă explicit `actionAccepted` (apăsare
+   acceptată tehnic), `screenReobserved`+`overallScreenChanged` (schimbare observată, semnal slab —
+   poate veni din orice parte a ecranului, irelevantă), `focusedContentChanged` (efect CORECT
+   verificat — conținutul elementului(elor) FOCALIZATE, generic pentru orice aplicație cu un câmp
+   activ, nu specific Calculatorului).
+2. **Fără schimbare ≠ eșec presupus**: dacă reobservarea EȘUEAZĂ (nu s-a putut citi ecranul deloc)
+   → `UNKNOWN` (dovadă insuficientă). Dacă reobservarea REUȘEȘTE și NIMIC nu s-a schimbat →
+   `VERIFICATION_FAILED` (absență demonstrabilă, nu presupusă).
+3. **Schimbare ≠ succes automat**: dacă ceva s-a schimbat pe ecran, dar elementul FOCALIZAT (cel
+   relevant pentru acțiune) nu — schimbarea era irelevantă → tot `VERIFICATION_FAILED`. Succes
+   (`null`) necesită fie corespondența confirmată, fie absența oricărui element focalizat de
+   comparat (nu se inventează o concluzie din lipsă de dovadă).
+4. **Fără logică de poziții de butoane**: comparația e pe conținut (`label`) al elementelor
+   focalizate din `ScreenDigest`, niciodată pe coordonate sau indici fixi — generic, orice aplicație.
+
+8 teste (`InteractionVerificationTest`, rescrise complet pe noul model), 113/113 PASS în
+`benson-accessibility`, 418/418 neschimbate în `benson-foreground-service`.
+
+## Pregătire retest live (NU executat — aștept autorizare)
+- `assembleRelease` reconstruit local, semnătură verificată identică cu APK-ul instalat acum pe
+  telefon (`fbbc618da8...`) → `adb install -r` ar fi **nedistructiv** (confirmat, nu doar presupus).
+- Comanda EXACTĂ de repetat (cerută explicit, cuvânt cu cuvânt): **„Benson, deschide Calculatorul
+  și calculează 27 înmulțit cu 14."** — nu varianta „27 ori 14"/„27 x 14" folosită în rulările mele
+  anterioare.
+- Plan de captură live: `adb logcat` pornit ÎNAINTE de injectarea comenzii, scris într-un fișier
+  local (nu doar polling), cu un identificator de misiune (ex. timestamp-ul comenzii) și secvența
+  completă `AGENT_TOOL`/`AGENT_TAP_VERIFY` (acum cu `classification=`) — suficient pentru a răspunde
+  punctul „cifrele provin din planificare sau din răspunsul final" DE DATA ASTA. Nu se înregistrează
+  nimic personal — doar etichete de butoane (cifre/operatori) și stări de ecran ale Calculatorului.
+- **Cerere explicită de autorizare** (punctul 8 al mandatului): am nevoie de (a) confirmarea ta
+  pentru `adb install -r` peste instalarea curentă și (b) o nouă autorizare de cost API (bugetul
+  anterior de 0,10 USD a fost parțial folosit, ~0,05 USD rămân — o cifră nouă, explicită, e mai
+  curată decât reluarea celei vechi) înainte să rulez testul real.
+- **DEVICE_PASS pentru Calculator** rămâne definit strict: dovada operației introduse corect ȘI a
+  rezultatului 378 citit efectiv din interfață (captură/uiautomator dump, nu doar ce raportează
+  agentul) — neschimbat față de criteriul stabilit anterior.
+
 ## DEVICE_PASS real (19.10.2026) — SURVIVOR / navigație Waze
 Autorizare primită: `adb install -r` după verificare semnătură+dispozitiv, teste OpenAI reale
 plafonate la 0,10 USD. Executat complet:
