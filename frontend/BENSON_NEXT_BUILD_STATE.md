@@ -3,10 +3,25 @@
 **Citește acest fișier ÎNTÂI la începutul oricărei sesiuni noi pe `benson-next`. Nu relua auditul general.**
 
 ## Ultimul commit cunoscut-bun
-`e086f00` pe ramura `benson-next` (pornită din `day-2026-10-08`, care rămâne la `01f6cca`, neatinsă).
+`f418976` pe ramura `benson-next` (pornită din `day-2026-10-08`, care rămâne la `01f6cca`, neatinsă).
 
 ## Teste
-400/400 PASS (`./gradlew :benson-foreground-service:testDebugUnitTest`). **Niciun DEVICE_PASS** — vezi `BENSON_NEXT_BACKLOG.md` pentru distincția pe 4 coloane (implementat/conectat/test automat/DEVICE_PASS), introdusă 19.10.2026 ca sursă unică de adevăr asupra a ce chiar rulează pe telefon vs. ce există doar ca fișier.
+410/410 PASS (`./gradlew :benson-foreground-service:testDebugUnitTest`). **Niciun DEVICE_PASS** — vezi `BENSON_NEXT_BACKLOG.md` pentru distincția pe 4 coloane (implementat/conectat/test automat/DEVICE_PASS).
+
+## Telefon conectat (19.10.2026) — verificare, nu instalare
+`adb devices -l`: `9c1464eb device product:CPH2663EEA model:CPH2663` (OnePlus Nord 4), autorizat.
+Aplicația instalată: `com.benson.butler` v1.0.0 (versionCode 1), ultima actualizare 2026-10-16.
+APK-ul instalat tras de pe telefon (`adb pull`) și verificat cu `apksigner`: semnătură **identică**
+cu build-ul local (`fbbc618da8ecd574a05676e260953ef1628d3b8d639ceb0fbc0d1ee9ec5184da`, CN=BENSON) —
+o actualizare `adb install -r` ar fi deci **nedistructivă** (același certificat → Android păstrează
+datele aplicației). **Pregătit, NEINSTALAT** — aștept aprobarea explicită de instalare.
+
+## Verificare obligatorie prin cod (nu doar systemPrompt) — AgentVerificationGate.kt
+Gard de stare pur, cablat în bucla reală a `tryAgent`: după un `tap_element`, nici `say`, nici un
+răspuns conversațional fără instrument nu mai pot încheia tura decât după un `observe_screen` (sau
+`verify_playing`, pe drumul media deja existent) ULTERIOR acelei apăsări — tool-ul `say` e respins
+tehnic (nu doar descurajat prin prompt), forțând o nouă observare. `open_app` nu intră la acest gard
+(are deja propria verificare SURVIVOR internă). 10 teste noi (`AgentVerificationGateTest`).
 
 ## Consolidare arhitecturală (19.10.2026) — UN SINGUR BENSON LIVE
 Mandat explicit: nu construi un al doilea orchestrator alături de agentul OpenAI deja existent
