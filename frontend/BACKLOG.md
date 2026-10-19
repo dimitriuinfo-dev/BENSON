@@ -67,3 +67,114 @@ implementează pe loc. Fără dată de livrare — se reconsideră abia după ce
   `modules/**` nouă") — ambele cer decizia explicită a lui Rareș, numită per rundă, nu o pornire
   din oficiu. Reconsiderat abia după ce lista de 10 e toată verde (azi, 14.10: 9/10 verzi, 1 roșu
   — „deschide calculatorul", cf. `PLAN_REPORT_2026-10-14.md`).
+
+- **BENSON SOS** (19.10.2026, decizia proprietarului) — **PRIORITATE CRITICĂ**, dar **NEÎNCEPUT**:
+  arhitectura e stabilită (mai jos), nicio linie de cod SOS nu există încă. Nu intră în lista
+  închisă BENSON 1.0 — se construiește DUPĂ stabilizarea infrastructurii minime SURVIVOR
+  (Mission Trace + Failure Classification + Verification Engine) și a traseului de execuție
+  LIVE, ca V1: trigger local, contact preferat autorizat, poziție GPS, fallback, acces nativ la
+  112. Flic/ceas/video/VIRGIL-FIRE sunt extinderi ulterioare, nu V1.
+  - **Agent de domeniu, nu orchestrator nou.** BENSON LIVE rămâne unicul orchestrator; SOS nu are
+    chatbot propriu — traseul critic e determinist, fără LLM obligatoriu.
+  - **Contract `EmergencyProtocol`** (stări explicite, închise): `IDLE → TRIGGERED → CONFIRMING`
+    (doar pentru trigger vocal ambiguu — niciodată pentru trigger fizic) `→ ACTIVE → CONTACTING →
+    LOCATION_SHARING → VERIFIED | PARTIALLY_COMPLETED | UNKNOWN | FAILED | CANCELLED`. Traseu
+    PRIORITAR SEPARAT pentru cererea explicită a numărului de urgență (112) — nu trece prin
+    CONTACTING/LOCATION_SHARING, nu așteaptă WhatsApp/GPS/LLM.
+  - **Reutilizează, nu reimplementează**: AKA (capabilități WhatsApp video/GSM), MEMORY (contact
+    SOS autorizat — cerere separată de user, nu „orice contact"), COMMUNICATION (apel/mesaj),
+    EXECUTION ENGINE (Android), SURVIVOR (anti-duplicare, verificare, recuperare), DEVICE
+    INTERFACES (Flic/ceas, ulterior).
+  - **Reguli absolute, deja cerute explicit**: „AJUTOR" rostit → întrebare de confirmare, TĂCEREA
+    nu echivalează cu „da" (încalcă altfel LEGEA TĂCERII); trigger fizic (Flic) ocolește dialogul
+    vocal, pornește direct alertarea; 112 explicit cerut NU așteaptă nimic altceva; fără apeluri
+    multiple/mesaje repetate din timeout (anti-duplicare prin SURVIVOR); fără presupunerea unui
+    API Life360/Maps necontrolat — metodă proprie de transmitere a coordonatelor ca rezervă; fără
+    promisiunea distribuirii live a locației fără internet — traseul GSM de urgență al sistemului
+    rămâne mereu disponibil.
+  - **Teste obligatorii înainte de orice DEVICE_PASS**: trigger vocal vs. fizic separat, fără
+    internet, fără WhatsApp, fără permisiune GPS, anulare + declanșare accidentală — cu
+    contacte/numere de test, NICIODATĂ 112 real în dezvoltare.
+
+- **BENSON SOS — trigger vocal „AJUTOR" independent** (19.10.2026, cerință P0 a proprietarului) —
+  **investigație tehnică făcută, NICIO LINIE DE COD SCRISĂ**, pentru că cele două întrebări
+  centrale au răspuns deja în codul/documentele existente, nu cer presupuneri:
+  - **`VoiceInteractionService`/`AlwaysOnHotwordDetector` — INFEZABIL, deja investigat și
+    documentat de proiect** (`BensonVoiceInteractionService.kt`, comentariul clasei, PASUL 2a,
+    07.10.2026): `AlwaysOnHotwordDetector`/`CAPTURE_AUDIO_HOTWORD` sunt `@SystemApi` — indisponibile
+    unei aplicații terțe, indiferent de implementare. Serviciul respectiv există DOAR pentru
+    `RoleManager.ROLE_ASSISTANT` + excepția de pornire FGS din fundal, nu e legat niciodată de
+    codul propriu BENSON. Nu se reinvestighează — e deja o concluzie, nu o presupunere.
+  - **HEED nu suportă azi mai multe cuvinte**: `HeedWakeWord.kt` (protejat) rulează UN model ONNX
+    (`heed_candidate.onnx`), UN prag, UN `phrase` (meta JSON) — arhitectură single-keyword, nu
+    multi-clasă. Confirmă explicit avertismentul proprietarului: suportul multi-wake-word NU
+    există deja.
+  - **Arhitectura propusă (cel mai mic risc, de aprobat separat)**: NU un al doilea proprietar de
+    microfon — al doilea model ONNX ("AJUTOR"), independent antrenat, cu propriul prag, rulat ca a
+    doua inferență pe ACELEAȘI cadre audio pe care HEED le capturează deja (același
+    `AudioRecord`, aceeași bucla). Funcționarea cu ecranul stins/fundal/după reboot se obține GRATUIT
+    prin construcție — e aceeași buclă deja dovedită pentru „Benson" în exact aceste condiții.
+  - **Costul real NU e de cod, e de date**: un model nou cere un ciclu de antrenare complet
+    (pozitive „AJUTOR" generate Piper + negative licențiate + augmentare + export + validare pe
+    dispozitiv) — exact procesul descris în `docs/VOICE_WAKEWORD_BENSON_TRAINING.md`. Pipeline-ul
+    EXISTĂ deja pe disc (`.benson-training/`, netrackat: `piper-sample-generator`, `datasets`,
+    `positive_wav`/`negative_wav`, `train-export.log`) — nu se pornește de la zero — dar rularea lui
+    nu se poate face dintr-o sesiune de cod; cere date reale și o validare reală pe telefon.
+  - **Discrepanță REZOLVATĂ (19.10.2026, din cod, nu din presupunere)**: `heed/export.py`
+    (`.benson-training/heed-wakeword/`) exportă ONNX ca format PRIMAR întotdeauna; TFLite e un
+    extra opțional (`--tflite`, cere pachetul `litert-torch`, absent aici — de aici mențiunea
+    „microWakeWord/TFLite" din `VOICE_WAKEWORD_BENSON_TRAINING.md`, probabil dintr-o încercare
+    anterioară a flagului opțional, nu motorul real folosit). `heed_candidate.onnx` deployat a
+    venit din acest pipeline „heed" (Python, PyTorch→ONNX), nu din altă unealtă.
+  - **Implică editarea `HeedWakeWord.kt`** (fișier protejat) pentru integrarea finală — NEFĂCUTĂ,
+    rămâne blocată pe acordul explicit per rundă, cerut deja de regula WAKE-UL E PROTEJAT.
+
+- **BENSON SOS — KWS „AJUTOR", primul candidat real antrenat** (19.10.2026, decizie KWS aprobată:
+  HEED/ONNX rămân, zero bibliotecă externă — `openwakeword-android-kt`/`voicute`/`emergency_any.onnx`
+  respinse explicit, acesta din urmă experimental și pentru coreeană). **Prototip antrenat cu succes
+  în `.benson-training/`, NEINTEGRAT, NEVALIDAT pe dispozitiv.**
+  - **Pipeline-ul real e `heed-wakeword`** (Python/PyTorch, `.benson-training/heed-wakeword/`,
+    comandă `heed`) — nu alt tool. Două lacune reale găsite și reparate chiar în acest pachet de
+    training (nu în codul Android): CLI-ul `train` avea deja câmpul `TrainerConfig.tts_voice_name`,
+    dar nu-l expunea (`--tts-voice-name`, adăugat) și garda de disponibilitate a vocii ignora vocea
+    aleasă (`is_voice_available()` fără `name=`, corectat). Verificat: `heed smoke` dă AUC identic
+    (0.906) înainte și după — zero regresie în unealta de training.
+  - **Vocea română `ro_RO-mihai-medium` era deja cache-uită local** (`.benson-training/voices/`) —
+    copiată (nu mutată) în `~/.heed/voices/`, verificată byte-identic cu sursa. **Clarificare**:
+    vocea Piper e DOAR pentru generarea sintetică a datelor de antrenare „AJUTOR" — nu are nicio
+    legătură cu vocea cu care BENSON răspunde (TTS nativ Android, separat).
+  - **Prima antrenare reală**: `heed init ajutor --phrase "AJUTOR"` + 24 pozitive TTS directe +
+    100 pozitive augmentate (voci Piper diferite, vorbitori ținuți deoparte pentru test) + 40
+    negative reutilizate din `.benson-training/negative_wav` (zero corpus nou construit) + 28 seturi
+    de distractori auto-generați. Model `TinyWakeWordNet` „small", **10 513 parametri (44 KB)**,
+    antrenat în **124,7 secunde**. Prag calibrat 0.65 (TPR=1.00/FPR=0.00 pe setul de validare
+    sintetic — optimist, NU echivalent cu o validare reală pe voce umană/zgomot ambiental, exact
+    avertismentul din `VOICE_WAKEWORD_BENSON_TRAINING.md`).
+  - **Export verificat**: `ajutor/export/wake.onnx` (44,1 KB, eroare max față de modelul PyTorch
+    original = 0) + `wake.json`. **Compatibilitate confirmată din date, nu presupusă**: `wake.json`
+    are EXACT aceleași chei ca `heed_candidate.json` deployat (preprocessing/trigger/energy_gate/
+    `heed_export_version`) — același pipeline de caracteristici (n_mels/n_fft/hop_length identice),
+    deci zero adaptor necesar pentru a fi citit de același cod care citește azi modelul „Benson".
+    Varianta int8 s-a produs, dar verificarea ei a picat în acest mediu (operator `ConvInteger`
+    neimplementat în versiunea de `onnxruntime` de pe acest disc — limitare de mediu, nu dovadă că
+    modelul e stricat; neutilizată, nerecomandată fără re-verificare).
+  - **Arhitectura de integrare (definită, NEIMPLEMENTATĂ)**: un singur proprietar de microfon —
+    HEED calculează caracteristicile mel O SINGURĂ DATĂ per cadru (identice între cele două
+    modele), le trimite la ambele sesiuni ONNX; fiecare scor trece prin propria poartă de
+    declanșare. Poarta de declanșare (consecutive_frames + refractory_seconds — identică ca formă
+    la ambele modele) e deja scrisă și testată IZOLAT, pur Kotlin, fără ONNX:
+    `SosTriggerGate.kt`/`SosTriggerGateTest.kt`, zero atingere a `HeedWakeWord.kt`.
+  - **Cost/latență**: doar ESTIMAT, nu măsurat pe dispozitiv — 10,5K parametri e un model minuscul
+    (comparabil ca ordin de mărime cu ce rulează deja HEED la fiecare 100ms); de măsurat real
+    înainte de orice integrare.
+  - **Multilingv (RO/DE/EN/ES/ZH/HI)**: „AJUTOR" (română) e primul, folosit ca șablon reproductibil
+    — fiecare limbă următoare cere propria frază + propria voce Piper/Kokoro + propriul ciclu
+    `heed init/train/export`, NU un singur model presupus universal.
+  - **Declanșare independentă vs. conversațională**: „AJUTOR" spus SINGUR (fără „Benson") trece
+    exclusiv prin acest detector local; o urgență menționată ÎN CONVERSAȚIE („Benson, am nevoie de
+    ajutor") rămâne pe calea existentă, prin inteligența conversațională multilingvă a BENSON LIVE —
+    nu sunt același traseu.
+  - **Blocaje reale**: fără măsurători CPU/RAM/baterie/latență pe dispozitiv (necesită telefonul);
+    fără date reale de voce umană (doar sintetic Piper); `HeedWakeWord.kt`/
+    `BensonForegroundService.kt` NEATINSE — integrarea cere acord explicit + checkpoint Git +
+    validare pe telefon, per decizia KWS.
