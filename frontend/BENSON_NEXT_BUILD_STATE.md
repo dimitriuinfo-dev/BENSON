@@ -78,7 +78,29 @@ telefon. Pregătit pentru rulare, nu executat:
    regresie de prioritate zero (identic cu incidentul din 16.10.2026 care a generat legea).
 Zero cod atins pe aceste căi în toată sesiunea — regresie improbabilă, dar neconfirmată pe dispozitiv.
 
-## Misiunea „Calculator 27×14" — DEVICE EXECUTAT, NU DEVICE_PASS complet
+## Misiunea „Calculator 27×14" — DEVICE_FAIL CONFIRMAT (19.10.2026, testul lui Rareș)
+Test real pe OnePlus Nord 4, capturi de la Rareș: Calculatorul s-a deschis, dar BENSON **NU** a
+introdus `27 × 14`. Ecranul final arată `89.979()` — nu `378`, și nici o expresie parțială
+recognoscibilă ca "27×14 în curs". BENSON a raportat că nu găsește butoanele necesare. **Acesta
+anulează orice interpretare optimistă a rulărilor mele anterioare** (unde răspunsul vorbit fusese
+„27 ori 14 = 378" — acum confirmat, printr-un test real independent, că nu corespundea ecranului).
+
+Ipoteză de cauză (neconfirmată încă prin log, bufferul logcat s-a rotit peste rularea exactă a lui
+Rareș înainte să pot citi): `89.979()` conține paranteze — butoane care NU apar în grila simplă de
+cifre, ci doar în modul științific al Calculatorului OnePlus (`item_science_calculator`/
+`science_GridLayout`, văzute în `uiautomator dump`-ul unei rulări anterioare). Posibil ca agentul să
+fi apăsat accidental comutatorul "Wissenschaftlich", schimbând complet grila de butoane ÎNTRE două
+`observe_screen` — ceea ce ar rupe presupunerea implicită a gărzilor mele (indexul+eticheta rămân
+valide doar dacă NU se schimbă setul de butoane disponibile, nu doar ecranul în sens larg).
+Necesită log-ul exact al rulării lui Rareș (sau o reluare cu logcat capturat live) pentru confirmare
+— **nu construiesc un fix pe o ipoteză neconfirmată**.
+
+**Stare onestă**: Calculator = DEVICE_FAIL confirmat, nu doar "nevalidat". Gărzile de cod au prevenit
+(probabil — de confirmat din log) o declarație verbală falsă de "378", dar NU au prevenit apăsarea
+unor butoane greșite. Asta e o limită diferită, nouă, nedocumentată până acum: gărzile verifică
+SECVENȚA (acțiune→observare), nu CORECTITUDINEA apăsării în sine.
+
+## Misiunea „Calculator 27×14" — istoric rulărilor MELE anterioare (depășit de testul real de mai sus)
 Trei bug-uri reale găsite ȘI reparate, fiecare dovedit pe dispozitiv (reprodus → reparat → reverificat):
 
 1. **`MAX_STEPS` insuficient** (10, apoi 16 insuficient) — gărzile de verificare dublează costul de

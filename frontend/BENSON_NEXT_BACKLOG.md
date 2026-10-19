@@ -57,7 +57,14 @@ Testat pe OnePlus Nord 4 conectat, cu autorizare explicită de instalare + cost 
 INDEPENDENT prin `dumpsys window` (`mCurrentFocus=...com.waze...`). Tag:
 `DEVICE_PASS_SURVIVOR_WAZE_NAV_2026-10-19`. Detalii complete în `BENSON_NEXT_BUILD_STATE.md`.
 
-## Misiunea de acceptare: „Benson, deschide Calculatorul și calculează 27 × 14" — EXECUTAT REAL, nu PASS complet
+## Misiunea de acceptare: „Benson, deschide Calculatorul și calculează 27 × 14" — DEVICE_FAIL CONFIRMAT
+
+**Testul real al lui Rareș (19.10.2026) a eșuat**: Calculatorul s-a deschis, dar BENSON NU a introdus
+`27 × 14`; ecranul final arăta `89.979()`, nu `378`. Acest FAIL, dintr-un test independent, **corectează**
+rândurile de mai jos — rulările mele anterioare (fără verificare vizuală independentă) arătau un
+răspuns vorbit „378" plauzibil, dar testul real dovedește că apăsările de butoane nu corespundeau
+cererii. Tabelul rămâne ca istoric al mecanismului (ce rulează real vs. ce nu), nu ca declarație de
+succes:
 
 | Pas din mandat | Cod implementat | Conectat în aplicație | Test automat | DEVICE_PASS |
 |---|---|---|---|---|
@@ -65,11 +72,16 @@ INDEPENDENT prin `dumpsys window` (`mCurrentFocus=...com.waze...`). Tag:
 | LIVE MISSION (clasificare + răspuns într-un apel) | da (preexistent, `tryAgent`) | da | n/a | da — rulat real, mai multe runde |
 | AKA / identificare aplicație fără comandă preprogramată | da (`tryNativeOpenApp`, `findLaunchablePackage`, sinonime) | da | parțial | da — `open_app` a găsit Calculatorul de fiecare dată |
 | UI DISCOVERY (`observe_screen`) | da (preexistent) | da | n/a | da — apelat real, de mai multe ori per rulare |
-| ACTION PLAN + ACCESSIBILITY EXECUTOR (`tap_element`) | da (preexistent) | da | n/a | da — apăsări reale cu durată realistă (200-2600ms) |
-| SURVIVOR verification (deschidere confirmată pe ecran) | da (`classifyLaunchVerification` cablat în `open_app`) | da | da (`AgentOpenAppVerificationTest`) | **da** — `AGENT_OPEN_APP_VERIFY outcome=Success` la fiecare rulare |
-| Gard în cod (nu doar prompt): fără apăsare → fără declarație de rezultat | da, nou (3 gărzi, `AgentVerificationGate.kt`) | da, nou | da (18 teste) | **da** — `AGENT_VERIFY_GATE blocked=compound_open_say`/`blocked=tap_without_observe` observate REAL, blocând exact două declarații premature |
-| Citire rezultat REAL din Calculator, corelată cu ecranul | da — instrucțiune `systemPrompt` + gărzi de cod | da | da (structural) | **NU — telefonul s-a blocat (PIN) înainte să pot verifica EU, independent, afișajul final; nu am încercat să deblochez** |
-| UNKNOWN când rezultatul nu poate fi confirmat | da (aceeași instrucțiune) | da | da (text prezent) | neexersat — modelul a ajuns de fiecare dată la un răspuns, niciodată la UNKNOWN explicit |
+| ACTION PLAN + ACCESSIBILITY EXECUTOR (`tap_element`) | da (preexistent) | da | n/a | **NU — apăsări reale, dar pe butoanele GREȘITE** (ecran final `89.979()`, nu o secvență 27×14 recognoscibilă). Asta e bug-ul real, nereparat. |
+| SURVIVOR verification (deschidere confirmată pe ecran) | da (`classifyLaunchVerification` cablat în `open_app`) | da | da (`AgentOpenAppVerificationTest`) | da, DOAR pentru deschiderea aplicației — `AGENT_OPEN_APP_VERIFY outcome=Success`. Nu verifică CE se apasă înăuntru. |
+| Gard în cod (nu doar prompt): fără apăsare → fără declarație de rezultat | da, nou (3 gărzi, `AgentVerificationGate.kt`) | da, nou | da (18 teste) | parțial — gărzile verifică SECVENȚA (acțiune→observare), nu dacă apăsarea a fost pe butonul CORECT. Insuficiente singure. |
+| Citire rezultat REAL din Calculator, corelată cu ecranul | da — instrucțiune `systemPrompt` + gărzi de cod | da | da (structural) | **NU — confirmat FALS prin testul real al lui Rareș: ecranul arăta `89.979()`, nu rezultatul corect** |
+| UNKNOWN când rezultatul nu poate fi confirmat | da (aceeași instrucțiune) | da | da (text prezent) | de verificat — raportul spune că BENSON "afirmă că nu găsește butoanele", posibil un răspuns onest de eșec (bun semn), dar necesită citatul exact/log-ul pentru confirmare |
+
+**Cauză probabilă, NECONFIRMATĂ prin log** (bufferul logcat s-a rotit peste rularea exactă a lui
+Rareș): `89.979()` conține paranteze, butoane care există DOAR în modul științific al Calculatorului
+OnePlus — posibil ca agentul să fi apăsat din greșeală comutatorul de mod, schimbând complet grila
+de butoane între două `observe_screen`-uri. Nu se construiește un fix pe o ipoteză neconfirmată.
 
 **De ce nu e declarată „misiunea completă"**: tot ce ține de mecanism (agent, AKA, UI discovery,
 executor, SURVIVOR, gărzile de cod) a rulat REAL pe dispozitiv, repetat, cu dovadă în log —
