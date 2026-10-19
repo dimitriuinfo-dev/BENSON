@@ -1,0 +1,61 @@
+package expo.modules.foregroundservice
+
+// BENSON NEXT — BENSON LIVE, orchestratorul unic (19.10.2026). Primul flux complet:
+// TEXT -> LIVE (intelegere + validare) -> AKA (capabilitate) -> EXECUTOR -> REZULTAT VERIFICAT.
+// Pur, testabil, zero Context/Android — orchestrarea reala (model provider legat de un LLM real,
+// AKA legat de StaffRegistry, executor legat de AccessibilityService) ramane cablata separat.
+// Reutilizeaza D0 (CanonicalIntent/classifyIntentValidation/routeCanonicalIntent/MissionStep) si
+// ApplicationCapabilityRegistry (isSafeToStateAsOperational) — nicio redefinire.
+
+sealed class MissionResult {
+  data class Replied(val text: String) : MissionResult()
+  data class Clarify(val question: String) : MissionResult()
+  data class Rejected(val reason: String) : MissionResult()
+  data class Executed(val missionId: String, val outcome: ExecutionOutcome) : MissionResult()
+}
+
+class BensonLiveOrchestrator(
+  private val modelProvider: ModelProvider,
+  private val knownActions: Set<String>,
+  private val actionToAgent: Map<String, String>,
+  private val confirmRequiredActions: Set<String>,
+  private val capabilityLookup: ApplicationCapabilityLookup,
+  private val executionEngine: ExecutionEngine,
+) {
+  // Punctul de intrare unic: text (tastat SAU deja transcris din voce — LIVE nu stie si nu-i
+  // pasa de sursa, exact cerinta "aceeasi configuratie TTS/intelegere pentru tastat si vocal").
+  fun handleTextInput(text: String, missionId: String): MissionResult {
+    val turns = listOf(ConversationTurn(Channel.USER_VOICE, text))
+    return when (val brainOutput = modelProvider.converse(turns, knownActions)) {
+      is BrainOutput.Reply -> MissionResult.Replied(brainOutput.text)
+      is BrainOutput.Clarify -> MissionResult.Clarify(brainOutput.question)
+      is BrainOutput.Failure -> MissionResult.Rejected(brainOutput.reason)
+      is BrainOutput.Plan -> MissionResult.Rejected("compound_plan_not_yet_supported_in_next")
+      is BrainOutput.ActionRequest -> {
+        when (val validation = classifyIntentValidation(brainOutput, knownActions)) {
+          is IntentValidationOutcome.Validated -> runMission(validation.intent, missionId)
+          is IntentValidationOutcome.NeedsClarification -> MissionResult.Clarify(validation.reason)
+          is IntentValidationOutcome.Rejected -> MissionResult.Rejected(validation.reason)
+        }
+      }
+    }
+  }
+
+  // AKA -> EXECUTOR -> rezultat verificat. LLM-ul NU executa nimic — doar a produs intentia;
+  // de aici incolo totul e determinist (Doctrina 7, reutilizata din LEGACY, nu reinventata).
+  private fun runMission(intent: CanonicalIntent, missionId: String): MissionResult {
+    val routing = routeCanonicalIntent(intent, actionToAgent, confirmRequiredActions)
+      ?: return MissionResult.Rejected("no_agent_for_action:${intent.action}")
+
+    val capability = capabilityLookup.selectCapability(intent.action)
+    if (capability == null || !isSafeToStateAsOperational(capability)) {
+      // Nu se executa pe o capabilitate doar DECLARED/INFERRED/UNIT_TESTED — exact regula D0.
+      return MissionResult.Rejected("no_verified_capability:${intent.action}")
+    }
+
+    val risk = if (routing.requiresConfirmation) RiskLevel.CONFIRM_REQUIRED else RiskLevel.LOW
+    val request = ExecutionRequest(routing.targetAgent, intent.action, emptyMap(), risk)
+    val outcome = executionEngine.execute(request)
+    return MissionResult.Executed(missionId, outcome)
+  }
+}
