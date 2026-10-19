@@ -15,13 +15,15 @@ reinventează (ex. URI-urile Waze, vocabularul WhatsApp, pragurile HEED rămân 
 - [x] VOICE — decizie ONE VOICE (fără client HTTP real încă)
 - [x] Anti-confuzie simulat/real (EvidenceLabels)
 
+## FĂCUT (adăugat, a566beb)
+- [x] **EXECUTOR Android real #1** — `AndroidAppLaunchExecutionEngine.kt`: Calculator, verificare
+      reală prin `BensonAccessibilityService.currentForegroundPackageLive()` existent. Compilat,
+      **netestat pe telefon**.
+- [x] **OpenAI TTS real** — `OpenAiTtsClient.kt`/`TtsAudioPlayer`: cod complet, reutilizează
+      `OpenAiUsageMeter`. **Neinvocat cu cheie reală** — cost nou, cere autorizare explicită.
+- [x] Test RO/DE aceeași intenție canonică pentru VIDEO_CALL (Hannah), canal neschimbat.
+
 ## ÎN LUCRU
-- [ ] **EXECUTOR Android real #1** — acțiune nepericuloasă (Calculator, deja CAP_CALCULATE dovedit
-      în LEGACY), verificare SURVIVOR reală prin `BensonAccessibilityService.currentForegroundPackageLive()`
-      existent (NU un AccessibilityService nou). Cod compilat, **netestat pe telefon**.
-- [ ] **OpenAI TTS real** — client HTTP (cod), estimare cost (reutilizează `OpenAiUsageMeter`),
-      redare audio. **Apelul real NU se execută** fără autorizare explicită de cost (mandat §5).
-- [ ] Test RO/DE aceeași intenție canonică pentru VIDEO_CALL (Hannah) — fără schimbare neautorizată de canal.
 
 ## URMEAZĂ (ordine propusă, nu fixă — se adaptează la ce se blochează)
 - [ ] Pipeline HEED→STT→LIVE NEXT→EXECUTOR→RESPONSE (integrare conceptuală; integrarea REALĂ în
