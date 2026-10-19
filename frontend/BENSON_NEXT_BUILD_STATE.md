@@ -3,7 +3,9 @@
 **Citește acest fișier ÎNTÂI la începutul oricărei sesiuni noi pe `benson-next`. Nu relua auditul general.**
 
 ## Ultimul commit cunoscut-bun
-`f418976` pe ramura `benson-next` (pornită din `day-2026-10-08`, care rămâne la `01f6cca`, neatinsă).
+`6c7940a` pe ramura `benson-next` (pornită din `day-2026-10-08`, care rămâne la `01f6cca`, neatinsă).
+**Împins pe GitHub** (`origin/benson-next`), cu tag-ul `DEVICE_PASS_SURVIVOR_WAZE_NAV_2026-10-19`
+pe commit-ul de checkpoint — vezi secțiunea CHECKPOINT de mai jos.
 
 ## Teste
 418/418 PASS (`./gradlew :benson-foreground-service:testDebugUnitTest`). Vezi `BENSON_NEXT_BACKLOG.md`
@@ -23,6 +25,58 @@ plafonate la 0,10 USD. Executat complet:
    cablat anterior a rulat REAL pe dispozitiv. Confirmat INDEPENDENT (nu doar din logul propriu al
    aplicației): `adb shell dumpsys window` a arătat `mCurrentFocus=...com.waze...` imediat după.
    **Acesta e primul DEVICE_PASS real al BENSON NEXT** — tag: `DEVICE_PASS_SURVIVOR_WAZE_NAV_2026-10-19`.
+
+## CHECKPOINT (19.10.2026) — comis, tag-uit, împins pe GitHub
+Separare pe hunk-uri (nu doar pe fișier), ca să nu se amestece validat cu nevalidat:
+- **Comis + tag-uit + pus pe GitHub** (`6c7940a`, tag `DEVICE_PASS_SURVIVOR_WAZE_NAV_2026-10-19`):
+  LEGEA TĂCERII, fix-ul TTS „accent indian", cross-check-urile anti-fals-trezire/„taci", SURVIVOR
+  în `handlePendingNavAnswer` — exact ce a fost validat pe dispozitiv.
+- **Rămas intenționat NECOMIS** (același fișier, în working tree, NU pe GitHub): gărzile de
+  verificare ale agentului, `MAX_STEPS`, timeout-ul HTTP, fix-ul `open_app` — tot ce ține de
+  misiunea Calculator, nevalidată încă. Verificat explicit: `git status` arată `M` (nu `MM`) pe
+  `BensonForegroundService.kt` după commit — diff-ul rămas conține DOAR cele 5 hunk-uri Calculator.
+- `BensonAgentTools.kt` și fișierele noi (`AgentOpenAppVerification.kt`, `AgentVerificationGate.kt`
+  + testele lor) rămân complet netrackuite — nu fac parte din checkpoint-ul Waze.
+- Compilare verificată DUPĂ separare (working tree neschimbat pe disc, doar indexul git) — BUILD
+  SUCCESSFUL, nimic stricat de operația de split.
+
+## Date/configurație telefon — nimic pierdut, un singur setting reversibil schimbat
+- `adb devices`/`pm`/`dumpsys` — doar citire, zero ștergere de date.
+- **`screen_off_timeout`: 30000ms → 1800000ms (30 min)**, setare standard Display, reversibilă
+  (`adb shell settings put system screen_off_timeout 30000` revine la valoarea inițială) — scopul:
+  evitarea blocării ecranului în timpul testelor viitoare, FĂRĂ a ocoli PIN-ul (timeout-ul mai lung
+  e o preferință normală de utilizator, nu o slăbire a securității propriu-zise).
+- `debug_inject_enabled`/`debug_inject_enabled_at`: dezarmat la finalul rundei anterioare (disciplină
+  LEGEA TĂCERII); va trebui rearmat explicit la următoarea rundă de testare.
+- APK-ul instalat rămâne cel din ultima rundă (cu gărzile + fix-urile Calculator, necomise — vezi mai
+  jos). Nicio dezinstalare, nicio ștergere de date.
+
+## Protocol pregătit — reluare test Calculator (NU executat, așteaptă autorizare)
+1. `adb shell input keyevent KEYCODE_WAKEUP` + confirmă `dumpsys window` arată launcher/ecran
+   deblocat (NU keyguard) înainte de a începe — cu timeout-ul de 30 min, nu ar trebui să se mai
+   blocheze singur în mijlocul testului.
+2. Rearmează harness-ul: `am broadcast -a com.benson.butler.DEBUG_INJECT_ENABLE --ez enabled true`.
+3. Injectează comanda, urmărește `AGENT_*`/`USAGE_ADD` în logcat ca până acum.
+4. **La final, ÎNAINTE de orice altă acțiune**: `adb shell screencap -p` sau `uiautomator dump`
+   direct pe ecranul Calculatorului (fără să se fi blocat între timp) — dovada cerută explicit:
+   rezultatul AFIȘAT, nu doar ce a raportat agentul.
+5. Dezarmează harness-ul la final (disciplină neschimbată).
+Cere autorizare separată de cost API înainte de rulare (bugetul de 0,10 USD anterior a fost deja
+folosit parțial — ~0,04-0,05 USD rămân, dar o nouă autorizare explicită e mai curată decât reluarea
+uneia vechi).
+
+## Protocol pregătit — Wake / „Benson, taci" / LEGEA TĂCERII (cu Rareș prezent)
+Niciunul din acestea nu poate fi testat de mine singur — necesită vocea reală a lui Rareș lângă
+telefon. Pregătit pentru rulare, nu executat:
+1. **Wake**: telefonul în fundal/ecran stins, Rareș spune „Benson" — urmăresc în paralel
+   `adb logcat` pentru `WAKE_DETECT`/`WAKE_VERIFY`/`WAKE_ACK_DONE` (tag `BENSON_AUDIO`), fără nicio
+   injectare DEBUG — exact calea acustică reală, neatinsă de nicio schimbare a mea.
+2. **„Benson, taci"**: în timp ce BENSON vorbește, Rareș spune „taci" — urmăresc
+   `SHUTUP_CHECK`/`interruptAll`/`SPEAK_SUPPRESSED`.
+3. **LEGEA TĂCERII**: confirm că NICIO rostire nu apare fără `TURN_AUTHORIZED` în log imediat înainte
+   — cel mai simplu test negativ: dacă Rareș nu spune nimic și totuși BENSON vorbește spontan, e o
+   regresie de prioritate zero (identic cu incidentul din 16.10.2026 care a generat legea).
+Zero cod atins pe aceste căi în toată sesiunea — regresie improbabilă, dar neconfirmată pe dispozitiv.
 
 ## Misiunea „Calculator 27×14" — DEVICE EXECUTAT, NU DEVICE_PASS complet
 Trei bug-uri reale găsite ȘI reparate, fiecare dovedit pe dispozitiv (reprodus → reparat → reverificat):
@@ -110,16 +164,15 @@ verificat identic la fiecare instalare (`fbbc618da8...`, CN=BENSON). `firstInsta
 (2026-08-23) la fiecare reinstalare — confirmat nedistructiv, datele aplicației păstrate.
 
 ## Sarcina activă / următoarea
-Rămas de verificat, strict pe dispozitiv (nimic de construit în plus fără asta):
-1. **Confirmare vizuală independentă** a ecranului Calculatorului pentru „27×14 = 378" (telefonul
-   s-a blocat înainte să pot verifica eu — cere fie testul tău direct, fie o rulare viitoare unde
-   ecranul rămâne deblocat până la verificare).
-2. **WhatsApp VIDEO_CALL dry-run** prin agentul generic — neîncercat încă pe dispozitiv (genericitatea
-   mecanismului e dovedită doar structural, prin test, nu prin execuție reală).
-3. **Wake/„taci"/LEGEA TĂCERII** — regresie neverificată pe dispozitiv (vezi secțiunea de mai sus).
+Checkpoint-ul Waze e făcut (comis, tag-uit, pe GitHub). Rămas, strict cu prezența/autorizarea ta
+(nimic de construit în plus fără asta — vezi protocoalele pregătite mai sus):
+1. **Confirmare vizuală independentă** a ecranului Calculatorului pentru „27×14 = 378".
+2. **Wake/„taci"/LEGEA TĂCERII** — cer vocea ta reală lângă telefon.
+3. **WhatsApp VIDEO_CALL dry-run** prin agentul generic — neîncercat încă pe dispozitiv.
 
-`search_in_app`/`open_url` rămân identificate dar NEATINSE deliberat (vezi BACKLOG — risc de
-regresie grăbită mai mare decât valoarea imediată, fără dovadă că ar fi nevoie acum).
+Fără autorizare nouă de cost API, nu mai fac alte apeluri OpenAI. Fără arhitectură nouă pentru
+aceste teste (cerut explicit). `search_in_app`/`open_url` rămân identificate dar NEATINSE deliberat
+(vezi BACKLOG — risc de regresie grăbită mai mare decât valoarea imediată).
 
 ## Limită de continuitate, spusă clar
 Acest mediu (sesiune interactivă Claude Code CLI) **nu are un mecanism de rulare neasistată, permanentă, între sesiuni**. Nu am instalat niciun cron/autopilot care rulează fără om — ar necesita o aprobare separată, explicită (tool `CronCreate`/skill `schedule`), nefăcută aici, exact cum cere mandatul „nu instala mecanisme de autoexecutare necontrolate". Reluarea reală se face printr-o sesiune nouă care citește ACEST fișier — manual sau printr-un mecanism de reluare pe care îl configurezi tu explicit.
