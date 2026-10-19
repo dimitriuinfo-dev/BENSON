@@ -17,6 +17,13 @@ interface ApplicationCapabilityLookup {
   fun selectCapability(operation: String): CapabilityRecord?
 }
 
+// MEMORY — consuma PersonalMemoryStore (deja construit) pentru rezolvarea destinatiilor numite
+// (nume -> SavedPlace). Interfata, nu implementarea - un fake in teste, PersonalMemoryStore real
+// la integrare. Nu inventeaza nicio adresa: null = destinatia nu e cunoscuta, LIVE cere clarificare.
+interface DestinationMemoryLookup {
+  fun resolve(requesterAgent: String, query: String): SavedPlace?
+}
+
 // EXECUTOR — interfata catre executia reala Android (AccessibilityService/Intent/etc., ramasa
 // AFARA din BENSON NEXT pana la o rundă dedicată). Rezultatul e deja tipul D0 (ExecutionOutcome) —
 // "verificat", nu doar "incercat".

@@ -21,6 +21,10 @@ class BensonLiveOrchestrator(
   private val confirmRequiredActions: Set<String>,
   private val capabilityLookup: ApplicationCapabilityLookup,
   private val executionEngine: ExecutionEngine,
+  // MEMORY — optional (null = fara rezolvare de destinatii, comportament neschimbat pentru
+  // actiuni care nu au nevoie de ea). Un singur LIVE Mission Owner consuma MEMORY ca unealta,
+  // nu un al doilea orchestrator paralel.
+  private val memoryLookup: DestinationMemoryLookup? = null,
 ) {
   // Punctul de intrare unic: text (tastat SAU deja transcris din voce — LIVE nu stie si nu-i
   // pasa de sursa, exact cerinta "aceeasi configuratie TTS/intelegere pentru tastat si vocal").
@@ -47,6 +51,20 @@ class BensonLiveOrchestrator(
     val routing = routeCanonicalIntent(intent, actionToAgent, confirmRequiredActions)
       ?: return MissionResult.Rejected("no_agent_for_action:${intent.action}")
 
+    // MEMORY — doar daca a fost furnizata (compatibilitate cu actiuni fara nevoie de destinatie,
+    // ex. WHATSAPP_CALL): o Destination neresolvata se rezolva aici sau se cere clarificare.
+    // Nu se inventeaza NICIODATA o adresa — null de la memorie = clarificare, nu ghicire.
+    val resolvedEntities = mutableListOf<DomainEntity>()
+    for (entity in intent.entities) {
+      if (memoryLookup != null && entity is DomainEntity.Destination && entity.canonicalPlaceId == null) {
+        val place = memoryLookup.resolve(routing.targetAgent, entity.rawQuery)
+          ?: return MissionResult.Clarify("destination_unknown:${entity.rawQuery}")
+        resolvedEntities += DomainEntity.Destination(entity.rawQuery, place.canonicalName)
+      } else {
+        resolvedEntities += entity
+      }
+    }
+
     val capability = capabilityLookup.selectCapability(intent.action)
     if (capability == null || !isSafeToStateAsOperational(capability)) {
       // Nu se executa pe o capabilitate doar DECLARED/INFERRED/UNIT_TESTED — exact regula D0.
@@ -54,7 +72,9 @@ class BensonLiveOrchestrator(
     }
 
     val risk = if (routing.requiresConfirmation) RiskLevel.CONFIRM_REQUIRED else RiskLevel.LOW
-    val request = ExecutionRequest(routing.targetAgent, intent.action, emptyMap(), risk)
+    val resolvedPlaceId = resolvedEntities.filterIsInstance<DomainEntity.Destination>().firstOrNull()?.canonicalPlaceId
+    val params = resolvedPlaceId?.let { mapOf("resolvedDestination" to it) } ?: emptyMap()
+    val request = ExecutionRequest(routing.targetAgent, intent.action, params, risk)
     val outcome = executionEngine.execute(request)
     return MissionResult.Executed(missionId, outcome)
   }
