@@ -360,7 +360,24 @@ class BensonForegroundService : Service() {
   // implicită (en-IN). Fix: verificare + re-selecție înaintea FIECĂREI rostiri, în applyTtsRouting
   // (singurul loc deja comun ambelor căi de speak, cf. L8-EXT), nu doar o dată la pornirea
   // serviciului — detectat prin t.defaultEngine, ieftin, fără apel de rețea.
-  private var lastBoundTtsEngine: String? = null
+  //
+  // FIX_TTS_VOICE_CACHE_1 (19.10.2026, P0 — "accent indian" dupa comenzi tastate) — CAUZA REALA,
+  // dovedita in cod: fix-ul de mai sus (12.10) memora motorul INAINTE de a sti daca selectia
+  // vocii a reusit (`lastBoundTtsEngine = engine` necondiTionat), apoi sarea peste orice
+  // reselectie cat motorul ramanea neschimbat. Daca PRIMA rostire a procesului avea loc inainte ca
+  // motorul sa-si fi incarcat lista completa de voci (cursa reala, documentata pentru
+  // TextToSpeech), `selectBestTtsVoice` intorcea null, `t.voice` nu se seta explicit, iar engine-ul
+  // cadea pe vocea lui implicita (en-IN) — si ramanea asa tot restul procesului, pentru ca
+  // `lastBoundTtsEngine` deja se schimbase. Tiparea imediat dupa pornire (DEBUG_INJECT) are o
+  // fereastra mai scurta pana la prima rostire decat o comanda vocala reala (care asteapta
+  // wake+STT), deci lovea cursa mai des.
+  // Logica noua traieste in TtsVoiceSelector.kt (pur, testat JUnit) — aici doar starea si
+  // orchestrarea reala a apelurilor Android. `engine` nu mai inseamna singur "configurat cu
+  // succes": starea CONFIRMED se obtine DOAR dupa citirea rezultatelor reale ale setLanguage()/
+  // setVoice() SI confirmarea ca t.voice chiar e vocea ceruta — niciodata doar din atribuire.
+  private var ttsVoiceBinding: TtsVoiceBinding = TtsVoiceBinding(null, TtsVoiceState.NOT_INITIALIZED)
+  private var ttsVoiceRetryCount = 0
+  private var ttsVoiceLastAttemptAtMs = 0L
   // FIX_WAKE_SELF_ECHO_GUARD_1 (2026-10-03) — see SelfTtsGuard. 0L = "never"/"not speaking".
   // UNIVERSAL_ACTION_STOP, al doilea defect dovedit pe telefon (15.10.2026): un executor NATIV
   // deja pornit (yt_open_and_search) a terminat DUPA stop si a rostit propriul raport —
@@ -369,6 +386,44 @@ class BensonForegroundService : Service() {
   // pun un token in fiecare executor (si sa-i rescriu, interzis), pun garda in SINGURUL punct de
   // rostire: cat e deschisa fereastra, nicio replica a sarcinii anulate nu se aude.
   // Fereastra se ridica imediat ce Masterul da o comanda nouă (handleNativeCommandFlow).
+  // LEGEA TACERII (16.10.2026, lege noua a Masterului): „Este interzis sa porneasca singur BENSON,
+  // fara wakeword."
+  // Cauza dovedita a incidentului de azi: NU exista niciun drum de auto-pornire in cod (intrarile
+  // in handleNativeCommandFlow sunt doar: wake verificat x3, follow-up in sesiune deschisa,
+  // DEBUG_INJECT) — a vorbit pentru ca EU injectam comenzi de test pe telefonul Masterului.
+  // Legea devine structurala, nu accidentala: nicio rostire fara un declansator AUTORIZAT,
+  // inregistrat explicit. Daca o cale viitoare incearca sa vorbeasca fara autorizare, tace si se
+  // vede in log (SPEAK_SUPPRESSED reason=no_wake_authorization).
+  // Fereastra acopera o tura intreaga (agent + follow-up); dupa ea, orice rostire tardiva tace.
+  // Revert: TURN_AUTH_REQUIRED = false.
+  private val TURN_AUTH_REQUIRED = true
+  private val TURN_AUTH_WINDOW_MS = 90_000L
+  @Volatile private var turnOrigin = ""
+  @Volatile private var turnAuthorizedAtMs = 0L
+
+  // Harness-ul de test e armat doar daca a fost pornit EXPLICIT si nu a trecut fereastra.
+  private fun isDebugInjectArmed(prefs: android.content.SharedPreferences): Boolean {
+    if (!prefs.getBoolean("debug_inject_enabled", false)) return false
+    val at = prefs.getLong("debug_inject_enabled_at", 0L)
+    if (at == 0L) return true
+    val fresh = System.currentTimeMillis() - at < DEBUG_INJECT_TTL_MS
+    if (!fresh) AudioDiag.log(this, "DEBUG_INJECT", "action=rejected reason=expired")
+    return fresh
+  }
+  private val DEBUG_INJECT_TTL_MS = 30 * 60 * 1000L
+
+  private fun authorizeTurn(origin: String) {
+    turnOrigin = origin
+    turnAuthorizedAtMs = System.currentTimeMillis()
+    AudioDiag.log(this, "TURN_AUTHORIZED", "origin=$origin")
+  }
+
+  private fun isTurnAuthorized(): Boolean {
+    if (!TURN_AUTH_REQUIRED) return true
+    if (turnOrigin.isEmpty()) return false
+    return System.currentTimeMillis() - turnAuthorizedAtMs < TURN_AUTH_WINDOW_MS
+  }
+
   @Volatile private var lastStopAtMs = 0L
   @Volatile private var commandStartedAtMs = 0L
   @Volatile private var ttsSpeakingSince = 0L
@@ -413,30 +468,7 @@ class BensonForegroundService : Service() {
         ttsLastDoneAt = System.currentTimeMillis()
         if (utteranceId?.startsWith("wake_") != true) return
         AudioDiag.log(this@BensonForegroundService, "WAKE_ACK_DONE", "utteranceId=$utteranceId")
-        // P5.1 (08.10.2026, ZIUA v3) — "wake_ack_" (speakNativeAckThenCapture, betonat, NEATINS)
-        // always opens the first-command window, unchanged. "wake_say_" covers BOTH confirmation
-        // questions AND final result reports (RUNDA SPEAK-1's single speak() point) — distinguished
-        // here not by the text, but by whether a pending-answer state is still set: a question sets
-        // one of these fields right before speaking it (see handleNativeCommandFlow's own check
-        // order) and only clears it once answered, so "nothing pending" at this exact instant means
-        // the utterance that just finished WAS the final report, not a question.
-        if (AC2F_P5_SESSION_CLOSE && utteranceId.startsWith("wake_say_") && !hasAnyPendingNativeState()) {
-          // F1 (12.10.2026, arhitect-aprobat) — closeSession() singur nu atinge niciodată micOwner/
-          // HEED; până acum doar OwnerWatchdog (45s) recupera după un raport final fără întrebare.
-          // Același drum, idempotent, folosit deja la sfârșitul capturii de follow-up goale
-          // (line ~3136, reason=no_followup_command) — reutilizat aici verbatim, nu un drum nou.
-          mainHandler.post {
-            closeSession("command_done")
-            setMicOwner("NONE", "native_report_done")
-            hideWakeRingNative()
-            rearmWakeNative("command_done")
-          }
-        } else {
-          // E0.1 (08.10.2026, self-echo) — capture stays closed from TTS_START to TTS_DONE+300ms,
-          // not opened the instant onDone fires. HeedWakeWord/wake keeps listening the whole time
-          // (barge-in, untouched) — this delay only affects the separate COMMAND capture.
-          mainHandler.postDelayed({ startFollowUpCapture() }, E0_TTS_TAIL_SETTLE_MS)
-        }
+        continueSessionAfterUtterance(utteranceId)
       }
       // FIX_TTS_STOP_STATE_1 (15.10.2026) - BUG DOVEDIT DIN CONTRACTUL API: TextToSpeech.stop() NU
       // cheama onDone, ci onStop (implementare implicita goala). Deci dupa orice intrerupere
@@ -458,6 +490,36 @@ class BensonForegroundService : Service() {
         mainHandler.postDelayed({ startFollowUpCapture() }, E0_TTS_TAIL_SETTLE_MS)
       }
     })
+  }
+
+  // P5.1 (08.10.2026, ZIUA v3) — "wake_ack_" (speakNativeAckThenCapture, betonat, NEATINS) always
+  // opens the first-command window, unchanged. "wake_say_" covers BOTH confirmation questions AND
+  // final result reports (RUNDA SPEAK-1's single speak() point) — distinguished here not by the
+  // text, but by whether a pending-answer state is still set: a question sets one of these fields
+  // right before speaking it (see handleNativeCommandFlow's own check order) and only clears it
+  // once answered, so "nothing pending" at this exact instant means the utterance that just
+  // finished WAS the final report, not a question.
+  // FIX_TTS_VOICE_CACHE_1 (19.10.2026) — extras identic din onDone (zero schimbare de comportament
+  // pentru calea existenta) ca sa poata fi reutilizat si cand vocea e sarita deliberat (text-only,
+  // vezi speakNativeFallbackThenCapture) — o singura cale de continuare a sesiunii, nu doua.
+  private fun continueSessionAfterUtterance(utteranceId: String) {
+    if (AC2F_P5_SESSION_CLOSE && utteranceId.startsWith("wake_say_") && !hasAnyPendingNativeState()) {
+      // F1 (12.10.2026, arhitect-aprobat) — closeSession() singur nu atinge niciodată micOwner/
+      // HEED; până acum doar OwnerWatchdog (45s) recupera după un raport final fără întrebare.
+      // Același drum, idempotent, folosit deja la sfârșitul capturii de follow-up goale
+      // (line ~3136, reason=no_followup_command) — reutilizat aici verbatim, nu un drum nou.
+      mainHandler.post {
+        closeSession("command_done")
+        setMicOwner("NONE", "native_report_done")
+        hideWakeRingNative()
+        rearmWakeNative("command_done")
+      }
+    } else {
+      // E0.1 (08.10.2026, self-echo) — capture stays closed from TTS_START to TTS_DONE+300ms, not
+      // opened the instant onDone fires. HeedWakeWord/wake keeps listening the whole time
+      // (barge-in, untouched) — this delay only affects the separate COMMAND capture.
+      mainHandler.postDelayed({ startFollowUpCapture() }, E0_TTS_TAIL_SETTLE_MS)
+    }
   }
 
   // NATIVE_CMD_1 (2026-10-02, user-approved) — speaks the ack and, once it is actually done
@@ -513,37 +575,58 @@ class BensonForegroundService : Service() {
     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
     .build()
 
-  // Cascadă ro-RO -> de-DE -> en-GB, preferă o voce fără "-network" (local, fără latență/cost de
-  // rețea) când există mai multe pe aceeași limbă.
-  private fun selectBestTtsVoice(t: android.speech.tts.TextToSpeech): android.speech.tts.Voice? {
-    val voices = try { t.voices } catch (_: Exception) { null } ?: return null
-    fun pick(lang: String, country: String? = null) = voices
-      .filter { it.locale.language == lang && (country == null || it.locale.country == country) }
-      .let { pool -> pool.firstOrNull { !it.name.contains("-network") } ?: pool.firstOrNull() }
-    return pick("ro") ?: pick("de") ?: pick("en", "GB") ?: pick("en")
-  }
-
-  // Re-rulează selecția de voce doar când motorul activ s-a schimbat fată de ultima rostire (ieftin
-  // altfel: un singur getter, fără query pe voices). TTS_NO_RO_VOICE + flag persistat (citibil de
-  // ecranul Dezvoltator) doar când NICIO voce ro-RO nu există pe motorul curent — cascada de mai jos
-  // tot alege ce e mai bun disponibil, dar raportează explicit lipsa românei.
+  // FIX_TTS_VOICE_CACHE_1 (19.10.2026) — orchestrarea reala (apeluri Android), decizia e in
+  // TtsVoiceSelector (pur, testat JUnit). O selectie CONFIRMATA nu se reincearca la fiecare
+  // rostire; una esuata/neincarcata se reincearca, plafonat, fara bucla infinita (cerintele 1+4+8).
+  // Nu se mai atribuie niciodata `t.language`/`t.voice` orbeste cand nu exista o voce aleasa —
+  // asta era exact mecanismul care lasa motorul sa cada pe vocea lui implicita (en-IN).
   private fun ensureNativeTtsVoiceCurrent(t: android.speech.tts.TextToSpeech) {
     val engine = try { t.defaultEngine } catch (_: Exception) { null }
-    if (engine == lastBoundTtsEngine) return
-    lastBoundTtsEngine = engine
-    val voices = try { t.voices } catch (_: Exception) { null } ?: emptySet()
-    val hasRo = voices.any { it.locale.language == "ro" }
-    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
-    if (!hasRo) {
-      AudioDiag.log(this, "TTS_NO_RO_VOICE", "engine=$engine")
-      prefs.edit().putBoolean("tts_no_ro_voice", true).apply()
-    } else {
-      prefs.edit().putBoolean("tts_no_ro_voice", false).apply()
+    if (engine != ttsVoiceBinding.engine) {
+      val (resetBinding, resetRetries) = TtsVoiceSelector.resetForNewEngine(engine)
+      ttsVoiceBinding = resetBinding
+      ttsVoiceRetryCount = resetRetries
     }
-    val chosen = selectBestTtsVoice(t)
-    try { t.language = chosen?.locale ?: java.util.Locale("ro", "RO") } catch (_: Exception) {}
-    if (chosen != null) t.voice = chosen
-    AudioDiag.log(this, "TTS_VOICE_SELECT", "engine=$engine requested=${chosen?.name ?: "none"} locale=${chosen?.locale}")
+    val nowMs = System.currentTimeMillis()
+    if (!TtsVoiceSelector.shouldAttemptSelection(ttsVoiceBinding, ttsVoiceRetryCount, nowMs, ttsVoiceLastAttemptAtMs)) return
+    ttsVoiceLastAttemptAtMs = nowMs
+
+    val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+    val androidVoices = try { t.voices } catch (_: Exception) { null }
+    val candidates = androidVoices?.map { TtsVoiceCandidate(it.name, it.locale.language, it.locale.country) }
+    if (androidVoices != null) {
+      val hasRo = candidates?.any { it.language == "ro" } == true
+      prefs.edit().putBoolean("tts_no_ro_voice", !hasRo).apply()
+      if (!hasRo) AudioDiag.log(this, "TTS_NO_RO_VOICE", "engine=$engine")
+    }
+
+    val chosenCandidate = candidates?.let { TtsVoiceSelector.pickBest(it) }
+    val chosenVoice = chosenCandidate?.let { cand -> androidVoices?.firstOrNull { it.name == cand.name } }
+
+    // Cerinta 3: se citesc REZULTATELE reale, nu se presupune succes din simpla atribuire.
+    var langResult = android.speech.tts.TextToSpeech.LANG_NOT_SUPPORTED
+    var voiceResult = android.speech.tts.TextToSpeech.ERROR
+    if (chosenVoice != null) {
+      langResult = try { t.setLanguage(chosenVoice.locale) } catch (_: Exception) { android.speech.tts.TextToSpeech.LANG_NOT_SUPPORTED }
+      voiceResult = try { t.setVoice(chosenVoice) } catch (_: Exception) { android.speech.tts.TextToSpeech.ERROR }
+    }
+    val langOk = langResult == android.speech.tts.TextToSpeech.LANG_AVAILABLE ||
+      langResult == android.speech.tts.TextToSpeech.LANG_COUNTRY_AVAILABLE ||
+      langResult == android.speech.tts.TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
+    val voiceOk = voiceResult == android.speech.tts.TextToSpeech.SUCCESS
+    // Cerinta 3: confirmare REALA — ce a ramas efectiv legat (getVoice()) chiar e ce s-a cerut.
+    val actuallyBound = try { t.voice?.name } catch (_: Exception) { null }
+
+    val newState = TtsVoiceSelector.classifyAttempt(candidates, chosenCandidate, langOk, voiceOk, actuallyBound)
+    ttsVoiceBinding = TtsVoiceBinding(engine, newState, chosenCandidate?.name, chosenCandidate?.language)
+    ttsVoiceRetryCount = if (newState == TtsVoiceState.CONFIRMED) 0 else ttsVoiceRetryCount + 1
+
+    AudioDiag.log(
+      this, "TTS_VOICE_SELECT",
+      "engine=$engine state=$newState requested=${chosenCandidate?.name ?: "none"} " +
+        "locale=${chosenCandidate?.language ?: "none"} langResult=$langResult voiceResult=$voiceResult " +
+        "actuallyBound=${actuallyBound ?: "none"} attempt=$ttsVoiceRetryCount",
+    )
   }
 
   // Applied right before every speak() — car mode can toggle mid-session (cable plugged/unplugged).
@@ -567,6 +650,8 @@ class BensonForegroundService : Service() {
     AudioDiag.log(this, "TTS_SPEAK", "kind=$kind lang=ro voice=$voiceId chars=${text.length}")
   }
 
+  // Ack-ul wake e prima rostire a unei ture legitime; autorizarea se pune aici, nu in HeedWakeWord
+  // (fisier protejat) si fara sa schimbam nimic din logica sau parametrii ack-ului.
   private fun speakNativeAckThenCapture() {
     val t = nativeTts
     if (t != null && nativeTtsReady) {
@@ -606,6 +691,14 @@ class BensonForegroundService : Service() {
       AudioDiag.log(this, "SPEAK_SUPPRESSED", "reason=interrupt_all chars=${text.length}")
       return
     }
+    // LEGEA TACERII — fara declansator autorizat, BENSON tace. Fara excepTii.
+    if (!isTurnAuthorized()) {
+      AudioDiag.log(
+        this, "SPEAK_SUPPRESSED",
+        "reason=no_wake_authorization origin=\"$turnOrigin\" chars=${text.length}",
+      )
+      return
+    }
     if (E0_SELF_ECHO) recordSpokenTextForEcho(text)
     val t = nativeTts
     if (t != null && nativeTtsReady) {
@@ -619,16 +712,32 @@ class BensonForegroundService : Service() {
       // separate, bigger round if still wanted.
       applyTtsRouting(t)
       val utteranceId = "wake_say_${System.currentTimeMillis()}"
-      // ADĂUGARE — BENSON ÎNTREABĂ CA O ÎNTREBARE (06.10.2026, product-owner-directed): textul
-      // complet, cu punctuația, ca să se poată verifica pe log că „?" ajunge intact la motorul de
-      // voce — nu e trunchiat/sanitizat nicăieri pe acest drum (t.speak primește `text` neschimbat).
-      AudioDiag.log(this, "TTS_NATIVE_REQUEST", "text=\"$text\"")
-      val result = t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, utteranceId)
-      AudioDiag.log(this, "WAKE_FALLBACK", "engine=native result=$result")
-      // LEGE L8-EXT — kind explicit (V5: "chat"/"clarify") câștigă; altfel inferat din starea
-      // pendinte la momentul vorbirii (același tipar ca P5): ceva pendinte ÎNCĂ = confirm; nimic
-      // pendinte = raport final.
-      logTtsSpeak(kindOverride ?: (if (hasAnyPendingNativeState()) "confirm" else "report"), text)
+      // FIX_TTS_VOICE_CACHE_1 (19.10.2026, P0 — "accent indian", cerintele 5+6+7) — nu se vorbeste
+      // CU VOCE decat pe o selectie CONFIRMATA pentru acest motor (altfel inseamna sa lasam
+      // motorul sa aleaga singur, exact mecanismul care a produs en-IN) SI doar daca originea turei
+      // respecta preferinta de redare audio (cerinta 7 — tastat fara activare explicita = text).
+      // Niciodata nu schimba pe-ascuns identitatea vocii: daca nu e sigur, raspunsul ramane text
+      // (bula, deja afisata de apelant inainte de speak()) + raportare explicita in log.
+      val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+      val debugInjectAudioEnabled = prefs.getBoolean("debug_inject_audio_enabled", false)
+      val voiceConfirmed = TtsVoiceSelector.isSafeToSpeakAudio(ttsVoiceBinding)
+      val originAllowsAudio = TtsVoiceSelector.shouldSpeakAudioForOrigin(turnOrigin, debugInjectAudioEnabled)
+      if (voiceConfirmed && originAllowsAudio) {
+        // ADĂUGARE — BENSON ÎNTREABĂ CA O ÎNTREBARE (06.10.2026, product-owner-directed): textul
+        // complet, cu punctuația, ca să se poată verifica pe log că „?" ajunge intact la motorul de
+        // voce — nu e trunchiat/sanitizat nicăieri pe acest drum (t.speak primește `text` neschimbat).
+        AudioDiag.log(this, "TTS_NATIVE_REQUEST", "text=\"$text\"")
+        val result = t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        AudioDiag.log(this, "WAKE_FALLBACK", "engine=native result=$result")
+        // LEGE L8-EXT — kind explicit (V5: "chat"/"clarify") câștigă; altfel inferat din starea
+        // pendinte la momentul vorbirii (același tipar ca P5): ceva pendinte ÎNCĂ = confirm; nimic
+        // pendinte = raport final.
+        logTtsSpeak(kindOverride ?: (if (hasAnyPendingNativeState()) "confirm" else "report"), text)
+      } else {
+        val reason = if (!voiceConfirmed) "voice_not_confirmed:${ttsVoiceBinding.state}" else "typed_audio_not_enabled"
+        AudioDiag.log(this, "TTS_TEXT_ONLY", "reason=$reason engine=${ttsVoiceBinding.engine ?: "unset"}")
+        continueSessionAfterUtterance(utteranceId)
+      }
     } else {
       AudioDiag.log(this, "WAKE_FALLBACK", "fallback=tone")
       mainHandler.postDelayed({ startFollowUpCapture() }, 400)
@@ -1070,12 +1179,20 @@ class BensonForegroundService : Service() {
         // Revert: SHUTUP_WHILE_SPEAKING = false.
         if (SHUTUP_WHILE_SPEAKING && ttsSpeakingSince != 0L && wavPath.isNotEmpty()) {
           Thread({
-            val (txt, _, clipMs) = wakeVerifyTranscribe(wavPath)
+            val (txt0, _, clipMs) = wakeVerifyTranscribe(wavPath)
+            // FIX_SHUTUP_CROSSCHECK_1 (19.10.2026, P0 — raport real: „Benson, taci" nu opreste
+            // vorbirea). CAUZA DOVEDITA IN COD: `hit` depindea EXCLUSIV de `wakeVerifyTranscribe`
+            // (un singur apel rapid la cloud); daca intoarce null/gol (acelasi esec de retea/
+            // timeout deja documentat in alta parte a acestui fisier pentru verificarea de trezire),
+            // SHUTUP_PATTERN nu avea pe ce sa se potriveasca si opritul tacea complet, fara niciun
+            // semnal in afara liniei de log SHUTUP_CHECK. O singura incercare suplimentara cu
+            // nativeTranscribe (acelasi lant existent de 3 furnizori) inainte de a renunta.
+            val txt = if (txt0.isNullOrBlank()) nativeTranscribe(wavPath) else txt0
             val norm = normalizeForMatch(txt ?: "")
             val isEcho = if (txt.isNullOrBlank()) false else isSelfEchoText(txt).first
             val hit = !isEcho && SHUTUP_PATTERN.containsMatchIn(norm) &&
               !MEDIA_OBJECT_PATTERN.containsMatchIn(norm)
-            AudioDiag.log(this, "SHUTUP_CHECK", "text=\"${txt ?: ""}\" echo=$isEcho hit=$hit clipMs=$clipMs")
+            AudioDiag.log(this, "SHUTUP_CHECK", "text=\"${txt ?: ""}\" echo=$isEcho hit=$hit clipMs=$clipMs crosschecked=${txt0.isNullOrBlank()}")
             if (hit) mainHandler.post { interruptAll("barge_in") }
           }, "benson-shutup").start()
         }
@@ -1099,11 +1216,33 @@ class BensonForegroundService : Service() {
       val acceptedAtMs = System.currentTimeMillis()
       Thread({
         val (verifyTranscript, connReused, clipMs) = wakeVerifyTranscribe(wavPath)
-        val verified = isWakeVerified(verifyTranscript, score)
-        val resultLabel = if (verifyTranscript == null) "offline" else if (verified) "accepted" else "rejected"
+        // FIX_WAKE_FALSE_ACCEPT_CROSSCHECK_1 (19.10.2026, P0 — raport real: BENSON asculta
+        // televizorul si comenta spontan). CAUZA DOVEDITA IN COD, nu presupusa: cand verify-ul
+        // rapid de mai sus nu intoarce text, isWakeVerified() (mai jos in fisier) accepta DOAR pe
+        // scorul acustic HEED (OFFLINE_ACCEPT_SCORE_THRESHOLD=0.95) — dar comentariul
+        // FIX_WAKE_VERIFY_FAILSAFE_1, scris chiar langa acel prag, documenteaza deja alarme false
+        // masurate la 0.795-0.984, ADICA PESTE pragul ales. Un zgomot de fundal (televizor) care
+        // depaseste 0.95 trecea garda fara nicio confirmare reala de text.
+        // Fix: inainte de a avea incredere oarba in scor, se mai incearca O DATA, cu nativeTranscribe
+        // (acelasi lant de 3 furnizori deja folosit ca rezerva mai jos in handleNativeCommandFlow —
+        // nu e cod nou, doar mutat mai devreme, ca sa decida ACCEPTAREA, nu doar textul comenzii).
+        // Nu schimba pragul HEED (0.789, protejat), nu schimba OFFLINE_ACCEPT_SCORE_THRESHOLD (decizia
+        // explicita a proprietarului ramane, pentru cazul real fara nicio conexiune), nu adauga un
+        // proprietar nou de microfon. Revert: sterge blocul de mai jos, foloseste verifyTranscript direct.
+        val crossCheckedTranscript = if (WakeVerifyMatcher.needsScoreFallback(verifyTranscript)) {
+          val t = nativeTranscribe(wavPath)
+          AudioDiag.log(this, "WAKE_CROSSCHECK", "attempted=true text=\"${t ?: ""}\"")
+          t
+        } else null
+        val effectiveTranscript = crossCheckedTranscript ?: verifyTranscript
+        val verified = isWakeVerified(effectiveTranscript, score)
+        val resultLabel = if (effectiveTranscript == null) "offline" else if (verified) "accepted" else "rejected"
+        // Punctul 6 (19.10.2026, P0) — traseul COMPLET al ambelor transcrieri ramane in log, nu
+        // doar rezultatul combinat: daca televizorul tot declanseaza, verify_text (incercarea
+        // rapida) si crosscheck_text (a doua incercare) trebuie sa poata fi citite separat.
         AudioDiag.log(
           this, "WAKE_VERIFY",
-          "result=$resultLabel text=\"${verifyTranscript ?: ""}\" score=${"%.3f".format(score)} clipMs=$clipMs latencyMs=${System.currentTimeMillis() - acceptedAtMs} connReused=$connReused",
+          "result=$resultLabel verify_text=\"${verifyTranscript ?: ""}\" crosscheck_text=\"${crossCheckedTranscript ?: ""}\" effective_text=\"${effectiveTranscript ?: ""}\" score=${"%.3f".format(score)} clipMs=$clipMs latencyMs=${System.currentTimeMillis() - acceptedAtMs} connReused=$connReused crosschecked=${crossCheckedTranscript != null}",
         )
         // FIX_WAKE_DATASET_1 (2026-10-03, user-directed) — "offline" is skipped: a timeout tells
         // us nothing about whether the clip was really "Benson", so it's never labeled either way.
@@ -1129,7 +1268,14 @@ class BensonForegroundService : Service() {
           openSession(if (bargeIn) "barge_in" else "wake_detected", mayDuck = !bargeIn)
           applyWakeForegroundPolicy()
           AudioDiag.log(this, "WAKE_COMMAND_AUDIO_READY", "engine=heed path=${java.io.File(wavPath).name}")
-          if (WAKE_FULL_STT) {
+          if (crossCheckedTranscript != null) {
+            // FIX_WAKE_FALSE_ACCEPT_CROSSCHECK_1 — cross-check-ul de mai sus a rulat deja
+            // nativeTranscribe o data pentru decizia de acceptare; daca a reusit, il refolosim ca
+            // text de comanda in loc sa platim/asteptam un al doilea apel identic la cloud.
+            AudioDiag.log(this, "CMD_SOURCE", "reused_crosscheck text=\"$crossCheckedTranscript\"")
+            authorizeTurn("wake")
+            handleNativeCommandFlow(crossCheckedTranscript, isFollowUp = false, originalPhrase = phrase, originalWavPath = wavPath)
+          } else if (WAKE_FULL_STT) {
             val sttStartMs = System.currentTimeMillis()
             Thread({
               val transcript = nativeTranscribe(wavPath)
@@ -1137,12 +1283,14 @@ class BensonForegroundService : Service() {
               val durMs = (java.io.File(wavPath).length() - 44).coerceAtLeast(0) * 1000 / (16_000 * 2)
               AudioDiag.log(this, "CMD_SOURCE", "full_capture durMs=$durMs sttMs=$sttMs text=\"${transcript ?: ""}\"")
               mainHandler.post {
+                authorizeTurn("wake")
                 handleNativeCommandFlow(transcript ?: "", isFollowUp = false, originalPhrase = phrase, originalWavPath = wavPath)
               }
             }, "benson-native-cmd-stt").start()
           } else if (verifyTranscript != null) {
             // Revert (WAKE_FULL_STT=false) — comportamentul vechi: verify's own transcript, posibil
             // trunchiat la clipMs=2500, folosit direct ca text de comandă.
+            authorizeTurn("wake")
             handleNativeCommandFlow(verifyTranscript, isFollowUp = false, originalPhrase = phrase, originalWavPath = wavPath)
           } else {
             // Accepted only via the score>=0.90 offline fallback — verify never got a transcript,
@@ -1150,6 +1298,7 @@ class BensonForegroundService : Service() {
             Thread({
               val transcript = nativeTranscribe(wavPath)
               mainHandler.post {
+                authorizeTurn("wake")
                 handleNativeCommandFlow(transcript ?: "", isFollowUp = false, originalPhrase = phrase, originalWavPath = wavPath)
               }
             }, "benson-native-cmd-stt").start()
@@ -1170,6 +1319,11 @@ class BensonForegroundService : Service() {
       return
     }
     AudioDiag.log(this, "WAKE_DETECT", "engine=headset_button")
+    // LEGEA TACERII — apasarea fizica a butonului de pe casca E un declansator explicit al
+    // Masterului (nu o auto-pornire), deci se autorizeaza aici. Era singura cale legitima de
+    // rostire care NU trecea prin handleNativeCommandFlow; fara linia asta, legea ar fi amutit
+    // ack-ul de la buton.
+    authorizeTurn("headset_button")
     suspendNativeWake("COMMAND")
     setMicOwner("COMMAND_STT", "headset_long_press")
     openSession("headset_long_press", mayDuck = true)
@@ -2162,22 +2316,61 @@ class BensonForegroundService : Service() {
         pendingNav = null
         val enc = try { java.net.URLEncoder.encode(pending.dest, "UTF-8") } catch (_: Exception) { pending.dest }
         // Aceleasi URI-uri dovedite pe dispozitiv (wazeTool.ts): Waze intai, google.navigation ca
-        // rezerva. Verificarea reala a pornirii navigatiei (doctrina 9) ramane de facut cu
-        // AccessibilityService — deocamdata se raporteaza doar lansarea reusita a aplicatiei.
+        // rezerva.
         val uris = if (pending.pkg == "com.waze") {
           listOf("waze://?q=$enc&navigate=yes", "google.navigation:q=$enc")
         } else listOf("google.navigation:q=$enc", "waze://?q=$enc&navigate=yes")
         var ok = false
-        for (u in uris) {
+        var succeededIndex = -1
+        for ((idx, u) in uris.withIndex()) {
           ok = try {
             startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(u)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             true
           } catch (_: Exception) { false }
-          if (ok) { AudioDiag.log(this, "NAV_LAUNCH", "pkg=${pending.pkg} ok=true"); break }
+          if (ok) { succeededIndex = idx; AudioDiag.log(this, "NAV_LAUNCH", "pkg=${pending.pkg} ok=true"); break }
         }
         if (!ok) AudioDiag.log(this, "NAV_LAUNCH", "pkg=${pending.pkg} ok=false reason=launch_failed")
         val resp = if (ok) "Te duc la ${pending.dest}." else "N-am putut porni navigația spre ${pending.dest}."
         finishBrainCommandSuccess(resp, "du-mă la ${pending.dest}", "nav_done")
+
+        // SURVIVOR (BENSON NEXT, 19.10.2026) — inchide gaura numita chiar in comentariul original
+        // de mai sus ("verificarea reala... ramane de facut cu AccessibilityService"): NU schimba
+        // raspunsul deja rostit (zero risc pentru comportamentul dovedit, "Navigație Waze cu
+        // destinație corectă"), doar adauga o corectie asincrona, onesta, cand lansarea a "reusit"
+        // (fara exceptie) dar aplicatia nu a ajuns de fapt pe ecran. Scop ingust, deliberat: doar
+        // cazul neambiguu — URI-ul PRINCIPAL catre Waze, acelasi pachet verificat — pentru ca
+        // fallback-ul generic (google.navigation:) poate rezolva la orice aplicatie instalata,
+        // iar un pachet asteptat ghicit ar incalca doctrina 8 (fara cod specific unei aplicatii
+        // fara dovada ca motorul generic nu ajunge). Reutilizeaza clasificatorul SURVIVOR deja
+        // scris si testat (NavigationMissionTrace.kt) — nicio logica noua de verificare.
+        if (ok && succeededIndex == 0 && pending.pkg == "com.waze") {
+          val startedAtSnapshot = commandStartedAtMs
+          val destForLog = pending.dest
+          Thread({
+            var attempt = 0
+            var outcome: ExecutionOutcome = ExecutionOutcome.Unverified
+            while (outcome is ExecutionOutcome.Unverified) {
+              val observed = expo.modules.accessibility.BensonAccessibilityService.instance?.currentForegroundPackageLive()
+              outcome = classifyLaunchVerification(setOf(pending.pkg), observed, attempt, 10)
+              if (outcome is ExecutionOutcome.Unverified) Thread.sleep(400)
+              attempt++
+            }
+            AudioDiag.log(this, "NAV_VERIFY", "pkg=${pending.pkg} dest=\"$destForLog\" outcome=$outcome")
+            if (outcome is ExecutionOutcome.Failed && commandStartedAtMs == startedAtSnapshot) {
+              mainHandler.post {
+                // A doua verificare, chiar inainte de rostire (acelasi tipar ca AGENT_SPEECH_SUPPRESSED):
+                // o comanda noua intre timp face corectia tardiva si nerelevanta, nu doar stramba.
+                if (commandStartedAtMs == startedAtSnapshot) {
+                  val correction = "Nu pot confirma că am ajuns la $destForLog cu Waze."
+                  updateBubbleNative(correction, "du-mă la $destForLog", terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+                  speak(correction, "chat")
+                } else {
+                  AudioDiag.log(this, "NAV_VERIFY", "speech_suppressed reason=newer_command")
+                }
+              }
+            }
+          }, "benson-nav-verify").start()
+        }
       }
       "NO" -> {
         pendingNav = null
@@ -4939,6 +5132,7 @@ class BensonForegroundService : Service() {
       mainHandler.post { startFollowUpCapture() }
     } else {
       mainHandler.post {
+        authorizeTurn("follow_up")
         handleNativeCommandFlow(transcript ?: "", isFollowUp = true, originalPhrase = "", originalWavPath = null)
       }
       if (V4_SHADOW && !transcript.isNullOrBlank()) triggerShadowInterpretation(transcript)
@@ -5239,11 +5433,17 @@ class BensonForegroundService : Service() {
       when (intent?.action) {
         "com.benson.butler.DEBUG_INJECT_ENABLE" -> {
           val enabled = intent.getBooleanExtra("enabled", false)
-          prefs.edit().putBoolean("debug_inject_enabled", enabled).apply()
+          // LEGEA TACERII, partea a doua: steagul de test era PERSISTENT, deci un harness uitat
+          // pornit putea face BENSON sa execute si sa vorbeasca zile mai tarziu. Acum are
+          // marca de timp si expira; suita de regresie il reporneste oricum la fiecare rulare.
+          prefs.edit()
+            .putBoolean("debug_inject_enabled", enabled)
+            .putLong("debug_inject_enabled_at", if (enabled) System.currentTimeMillis() else 0L)
+            .apply()
           AudioDiag.log(context, "DEBUG_INJECT", "action=set_enabled value=$enabled")
         }
         "com.benson.butler.DEBUG_INJECT" -> {
-          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+          if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
             return
           }
@@ -5251,6 +5451,7 @@ class BensonForegroundService : Service() {
           if (text.isNullOrBlank()) return
           AudioDiag.log(context, "DEBUG_INJECT", "action=run text=\"$text\"")
           mainHandler.post {
+            authorizeTurn("debug_inject")
             handleNativeCommandFlow(text, isFollowUp = true, originalPhrase = "DEBUG_INJECT", originalWavPath = null)
           }
           if (V4_SHADOW) triggerShadowInterpretation(text)
@@ -5265,7 +5466,7 @@ class BensonForegroundService : Service() {
         // ZERO acțiune pe ecran, zero apel LLM, zero cost. Doar proba ca "ochii" vad corect.
         // Revert: sterge aceasta ramura + addAction-ul DEBUG_SCREEN_DIGEST.
         "com.benson.butler.DEBUG_SCREEN_DIGEST" -> {
-          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+          if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
             return
           }
@@ -5286,7 +5487,7 @@ class BensonForegroundService : Service() {
           }, "benson-screen-digest").start()
         }
         "com.benson.butler.DEBUG_INJECT_WAV" -> {
-          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+          if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
             return
           }
@@ -5308,7 +5509,7 @@ class BensonForegroundService : Service() {
         // calls handleNativeCommandFlow directly and bypasses the self-echo filter entirely. Only
         // way to test E0 deterministically without real acoustic feedback in the room.
         "com.benson.butler.DEBUG_INJECT_TRANSCRIPT" -> {
-          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+          if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
             return
           }
@@ -5323,7 +5524,7 @@ class BensonForegroundService : Service() {
         // debug_inject_enabled gate as every other DEBUG_INJECT_* action). "clear" extra removes
         // the override, falling back to the real AudioManager.mode query.
         "com.benson.butler.DEBUG_INJECT_CALL_MODE" -> {
-          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+          if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
             return
           }
@@ -5341,7 +5542,7 @@ class BensonForegroundService : Service() {
         // here would be silently ignored downstream. NativeConfirmationListener.classify() is the
         // same classifier a real capture uses, so verdict/transcript stay consistent with a real one.
         "com.benson.butler.DEBUG_INJECT_CONFIRM" -> {
-          if (!prefs.getBoolean("debug_inject_enabled", false)) {
+          if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
             return
           }
