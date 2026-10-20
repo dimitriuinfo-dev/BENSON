@@ -317,6 +317,125 @@ class BensonForegroundService : Service() {
   // continuare, citit aici ca să ţină sesiunea deschisă, golit la următorul răspuns al agentului.
   @Volatile private var agentAwaitingReply = false
 
+  // FIX_LIVE_PENDING_PROPOSAL_1 (20.10.2026, ordin "DEVICE_FAIL: promite căutarea, dar nu o
+  // execută") — cand agentul propune o cautare concreta intr-o alta aplicatie (ex.
+  // incompatibilitate semantica: "Spotify nu e potrivit, pot cauta pe Amazon Shopping?"), pachetul
+  // si interogarea se retin STRUCTURAT aici — exact acelasi tipar ca pendingNav/pendingWaAction —
+  // ca urmatorul raspuns afirmativ sa execute DIRECT (open_app + search_in_app confirmed=true),
+  // fara alt apel OpenAI de reconstructie a intentiei. appPkg vine DEJA validat prin AKA
+  // (findLaunchablePackage, acelasi resolver ca open_app) la momentul STOCARII, nu doar la executie.
+  private data class PendingAgentProposal(
+    val appPkg: String,
+    val appLabel: String,
+    val query: String,
+    val createdAtMs: Long,
+    val originalCommand: String,
+  )
+  // Siguranta #1 din ordin: o propunere veche, neexecutata, nu ramane valabila la nesfarsit.
+  private val PENDING_AGENT_PROPOSAL_TTL_MS = 90_000L
+  @Volatile private var pendingAgentProposal: PendingAgentProposal? = null
+
+  // Siguranta #3 din ordin: "nu doar o lista rigida de cuvinte romanesti... pastreaza BENSON
+  // multilingv" — distinct, DELIBERAT, de classifyConfirmationNative/CONFIRM_YES_RE/CONFIRM_NO_RE
+  // (subsistem deja validat, NEATINS, folosit de pendingNav/pendingWaAction etc.). "si"/"sim" sunt
+  // excluse deliberat din lista de DA — ar coincide, dupa eliminarea diacriticelor, cu "și" (RO,
+  // conjunctie foarte frecventa), producand acceptari false pe fraze nelegate de propunere.
+  private val AGENT_PROPOSAL_YES_RE = Regex(
+    "\\b(da|sigur|exact|asa|perfect|cauta|ok|okay|yes|yeah|yep|sure|ja|genau|oui)\\b"
+  )
+  private val AGENT_PROPOSAL_NO_RE = Regex(
+    "\\b(nu|anuleaza|renunta|stop|opreste|no|nein|non|nicht)\\b"
+  )
+
+  private fun classifyAgentProposalAcceptance(text: String): String {
+    val norm = normalizeForMatch(text)
+    if (AGENT_PROPOSAL_NO_RE.containsMatchIn(norm)) return "NO"
+    if (AGENT_PROPOSAL_YES_RE.containsMatchIn(norm)) return "YES"
+    return "UNKNOWN"
+  }
+
+  // Siguranta #2 din ordin: consuma propunerea necondiTionat (DA, NU sau necunoscut deopotriva) —
+  // orice alt verdict decat DA lasa comanda sa treaca mai departe NESCHIMBATA prin restul
+  // lantului (o comanda noua/un refuz/ambiguitate invalideaza simplu propunerea, nu o executa).
+  private fun handlePendingAgentProposalAnswer(command: String): Boolean {
+    val pending = pendingAgentProposal ?: return false
+    pendingAgentProposal = null
+    val ageMs = System.currentTimeMillis() - pending.createdAtMs
+    if (ageMs > PENDING_AGENT_PROPOSAL_TTL_MS) {
+      AudioDiag.log(this, "AGENT_PROPOSAL", "verdict=expired ageMs=$ageMs")
+      return false
+    }
+    val verdict = classifyAgentProposalAcceptance(command)
+    AudioDiag.log(this, "AGENT_PROPOSAL", "verdict=$verdict pkg=${pending.appPkg} ageMs=$ageMs")
+    if (verdict != "YES") return false
+    executeAgentProposal(pending)
+    return true
+  }
+
+  // Executie DIRECTA, autorizata STRICT pentru cautari (ordin, siguranta #5): reutilizeaza EXACT
+  // aceleasi doua instrumente deja validate ale agentului (open_app, search_in_app confirmed=true),
+  // niciun cod de executie nou — doar apelate direct, fara bucla LLM. SURVIVOR ramane acelasi
+  // (search_in_app isi pastreaza propria verificare de rezultat, neschimbata).
+  private fun executeAgentProposal(pending: PendingAgentProposal) {
+    Thread({
+      val t0 = System.currentTimeMillis()
+      AudioDiag.log(this, "AGENT_PROPOSAL", "action=execute_start pkg=${pending.appPkg} query=\"${pending.query}\"")
+      val openArgs = JSONObject().apply { put("name", pending.appLabel) }
+      val (openResult, _) = synchronized(agentFingerLock) {
+        runAgentToolLocked(BensonAgentTools.OPEN_APP, openArgs, pending.originalCommand)
+      }
+      val openOk = runCatching { JSONObject(openResult).optBoolean("ok", false) }.getOrDefault(false)
+      AudioDiag.log(this, "AGENT_PROPOSAL", "step=open_app ok=$openOk ms=${System.currentTimeMillis() - t0}")
+      val finalMsg: String
+      if (!openOk) {
+        finalMsg = runCatching { JSONObject(openResult).optString("detail") }.getOrDefault("")
+          .ifBlank { "Nu am reușit să deschid ${pending.appLabel}." }
+      } else {
+        val t1 = System.currentTimeMillis()
+        val searchArgs = JSONObject().apply { put("query", pending.query); put("confirmed", true) }
+        val (searchResult, _) = synchronized(agentFingerLock) {
+          runAgentToolLocked(BensonAgentTools.SEARCH_IN_APP, searchArgs, pending.originalCommand)
+        }
+        val searchOk = runCatching { JSONObject(searchResult).optBoolean("ok", false) }.getOrDefault(false)
+        val detail = runCatching { JSONObject(searchResult).optString("detail") }.getOrDefault("")
+        AudioDiag.log(this, "AGENT_PROPOSAL", "step=search_in_app ok=$searchOk ms=${System.currentTimeMillis() - t1} totalMs=${System.currentTimeMillis() - t0}")
+        finalMsg = if (searchOk) {
+          "Am căutat „${pending.query}” în ${pending.appLabel}.${if (detail.isNotBlank()) " $detail" else ""}"
+        } else {
+          detail.ifBlank { "Nu am reușit căutarea „${pending.query}” în ${pending.appLabel}." }
+        }
+      }
+      conversationHistory.add("assistant", finalMsg)
+      mainHandler.post {
+        agentAwaitingReply = false
+        updateBubbleNative(finalMsg, pending.originalCommand, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+        finishBrainCommandSuccess(finalMsg, pending.originalCommand, "agent_proposal_done")
+      }
+    }, "benson-agent-proposal").start()
+  }
+
+  // FIX_LIVE_SEMANTIC_PRECHECK_1 (20.10.2026, "verifică mecanismul de execuție, nu doar
+  // systemPrompt") — fapt dinamic, calculat per comandă din acelaşi inventar unic (StaffRegistry,
+  // LEGEA PERSONALULUI, zero a doua enumerare), injectat ÎNAINTE de prima decizie a modelului —
+  // nu doar o instrucţiune statică. Dacă Masterul numeşte explicit o aplicaţie cu domeniu CUNOSCUT,
+  // modelul vede faptul chiar din primul apel şi poate răspunde direct cu «say» (propunere), fără
+  // să mai cheme «open_app» deloc — reduce un caz de incompatibilitate de la 3 apeluri OpenAI
+  // secvenţiale la 1 singur (dovadă: testul Spotify/lămpi, ~30s → ~10s aşteptat).
+  private fun explicitlyNamedAppCompatibilityHint(command: String): String? = try {
+    val norm = normalizeForMatch(command)
+    val named = StaffRegistry.load(this)
+      .filter { !it.archived && it.caps.isNotEmpty() }
+      .firstOrNull { m ->
+        val label = normalizeForMatch(m.displayName)
+        label.length >= 3 && norm.contains(label)
+      }
+    val hint = named?.let { StaffRegistryCore.namedCapabilityDomainHints(it.caps) }
+    if (named == null || hint == null) null else
+      "Masterul a numit explicit aplicația „${named.displayName}”. $hint Dacă cererea nu se " +
+        "potrivește cu acest domeniu, NU deschide această aplicație — răspunde direct cu «say», " +
+        "explică incompatibilitatea și propune o alternativă (proposed_app/proposed_query)."
+  } catch (_: Exception) { null }
+
   private fun hasAnyPendingNativeState(): Boolean =
     pendingWaDisambiguation != null || pendingWaAction != null || pendingAppSearch != null ||
       pendingControlAction != null || pendingYoutubePlay != null || pendingAppOpen != null ||
@@ -2211,6 +2330,7 @@ class BensonForegroundService : Service() {
     pendingWaDisambiguation = null
     pendingControlAction = null
     agentAwaitingReply = false
+    pendingAgentProposal = null
     try { nativeTts?.stop() } catch (_: Exception) {}
     ttsSpeakingSince = 0L
     ttsLastDoneAt = System.currentTimeMillis()
@@ -4263,6 +4383,10 @@ class BensonForegroundService : Service() {
       handlePendingNavAnswer(command)
       return
     }
+    // FIX_LIVE_PENDING_PROPOSAL_1 — un "da"/"caută" la o propunere a agentului execută direct
+    // (vezi handlePendingAgentProposalAnswer); orice alt verdict consumă propunerea și lasă
+    // comanda să treacă mai departe, neschimbată, prin restul lanțului.
+    if (pendingAgentProposal != null && handlePendingAgentProposalAnswer(command)) return
     // RUNDA VOICE-ONLY — alegere rostită din lista citită. FIX_RESULT_CHOICE_NO_SWALLOW_1:
     // consumă rostirea DOAR dacă e un ordinal sau o anulare; altfel comanda nouă trece mai departe.
     if (pendingResultChoice != null && handlePendingResultChoice(command)) return
@@ -5014,7 +5138,26 @@ class BensonForegroundService : Service() {
         val text = args.optString("text").trim().ifBlank { "Gata." }
         val expectsReply = args.optBoolean("expects_reply", false)
         conversationHistory.add("user", originalCommand); conversationHistory.add("assistant", text)
-        if (expectsReply) {
+        // FIX_LIVE_PENDING_PROPOSAL_1 — stocheaza propunerea DOAR daca pachetul propus e un
+        // rezultat REAL al aceluiasi resolver folosit de open_app (findLaunchablePackage, AKA/
+        // StaffRegistry) — un nume pe care modelul l-a inventat sau care nu e instalat nu produce
+        // nicio propunere activa (siguranta #4, "valideaza aplicatia prin AKA").
+        val proposedApp = args.optString("proposed_app").trim()
+        val proposedQuery = args.optString("proposed_query").trim()
+        var proposalStored = false
+        if (proposedApp.isNotBlank() && proposedQuery.isNotBlank()) {
+          val pkg = findLaunchablePackage(normalizeForMatch(proposedApp))
+          if (pkg != null) {
+            pendingAgentProposal = PendingAgentProposal(pkg, proposedApp, proposedQuery, System.currentTimeMillis(), originalCommand)
+            proposalStored = true
+            AudioDiag.log(this, "AGENT_PROPOSAL", "action=stored pkg=$pkg app=\"$proposedApp\" query=\"$proposedQuery\"")
+          } else {
+            AudioDiag.log(this, "AGENT_PROPOSAL", "action=rejected reason=app_not_resolved app=\"$proposedApp\"")
+          }
+        }
+        // Siguranta #6 (ordin) — o propunere activa TREBUIE sa tina sesiunea deschisa, garantat de
+        // cod, nu doar de judecata modelului asupra lui expects_reply.
+        if (expectsReply || proposalStored) {
           agentAwaitingReply = true
           continueAgentConversation(text, originalCommand)
         } else {
@@ -5056,6 +5199,12 @@ class BensonForegroundService : Service() {
           put("role", "system")
           put("content", BensonAgentTools.systemPrompt(foregroundAppLabel(), agentInstalledAppsSummary(command)))
         })
+        // FIX_LIVE_SEMANTIC_PRECHECK_1 — fapt dinamic, calculat per comandă (vezi funcția), nu
+        // parte din promptul static — ajunge la model ÎNAINTE de prima lui decizie, ca o aplicație
+        // numită explicit și incompatibilă să nu mai fie deschisă deloc (1 apel OpenAI, nu 3).
+        explicitlyNamedAppCompatibilityHint(command)?.let { hint ->
+          put(JSONObject().apply { put("role", "system"); put("content", hint) })
+        }
         for (turn in conversationHistory.snapshot()) {
           put(JSONObject().apply { put("role", turn.role); put("content", turn.text) })
         }

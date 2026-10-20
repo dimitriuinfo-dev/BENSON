@@ -122,4 +122,21 @@ class BensonAgentToolsGenericityTest {
     val prompt = BensonAgentTools.systemPrompt("orice", "orice")
     assertTrue(prompt.contains("expects_reply"))
   }
+
+  // --- proposed_app/proposed_query (20.10.2026, DEVICE_FAIL "promite căutarea, dar nu o
+  // execută") — proba de schema pentru propunerea in asteptare; logica de stocare/executie e
+  // Context-dependenta (BensonForegroundService), verificata pe dispozitiv, nu aici. ---
+
+  @Test fun sayToolSchemaExposesProposedAppAndQueryFields() {
+    val json = BensonAgentTools.toolsJson()
+    assertTrue(json.contains("\"proposed_app\""))
+    assertTrue(json.contains("\"proposed_query\""))
+  }
+
+  @Test fun systemPromptInstructsModelNotToExtendProposalBeyondSearch() {
+    val prompt = BensonAgentTools.systemPrompt("orice", "orice").lowercase()
+    assertTrue(prompt.contains("proposed_app"))
+    // Siguranta #5 din ordin: interzis explicit pentru actiuni sensibile.
+    assertTrue(prompt.contains("plăți".lowercase()) || prompt.contains("plati"))
+  }
 }

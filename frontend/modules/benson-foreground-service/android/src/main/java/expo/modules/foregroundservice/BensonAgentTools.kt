@@ -163,8 +163,8 @@ object BensonAgentTools {
       "description":"Verifică dacă se aude efectiv audio pe telefon acum. OBLIGATORIU înainte de a spune că ai pornit un radio, o melodie sau un video.",
       "parameters":{"type":"object","properties":{},"additionalProperties":false}}},
      {"type":"function","function":{"name":"$SAY",
-      "description":"Vorbește cu Masterul. Folosește-l pentru ORICE replică — răspuns, întrebare de clarificare, propunere de alternativă sau eșec explicat — niciodată text simplu fără acest instrument. `expects_reply=true` când pui o întrebare sau inviți la continuarea conversației (BENSON rămâne în ascultare, Masterul poate răspunde fără alt «Benson»); `expects_reply=false` când e un răspuns final/raport încheiat (sesiunea se închide, e nevoie de «Benson» din nou data viitoare).",
-      "parameters":{"type":"object","properties":{"text":{"type":"string"},"expects_reply":{"type":"boolean"}},"required":["text","expects_reply"],"additionalProperties":false}}},
+      "description":"Vorbește cu Masterul. Folosește-l pentru ORICE replică — răspuns, întrebare de clarificare, propunere de alternativă sau eșec explicat — niciodată text simplu fără acest instrument. `expects_reply=true` când pui o întrebare sau inviți la continuarea conversației (BENSON rămâne în ascultare, Masterul poate răspunde fără alt «Benson»); `expects_reply=false` când e un răspuns final/raport încheiat (sesiunea se închide, e nevoie de «Benson» din nou data viitoare). Când propui o CĂUTARE concretă într-o altă aplicație (ex. incompatibilitate semantică — «Spotify nu e potrivit, pot căuta pe Amazon Shopping?»), completează și `proposed_app` (numele exact al aplicației propuse) și `proposed_query` (exact ce ai căuta) — dacă Masterul acceptă la următoarea replică, BENSON execută căutarea direct, fără să te mai întrebe o dată ce și unde. Lasă-le goale când nu propui nicio căutare. NU folosi asta pentru apeluri, mesaje, cumpărături, plăți sau ștergeri — doar pentru o căutare simplă.",
+      "parameters":{"type":"object","properties":{"text":{"type":"string"},"expects_reply":{"type":"boolean"},"proposed_app":{"type":"string"},"proposed_query":{"type":"string"}},"required":["text","expects_reply","proposed_app","proposed_query"],"additionalProperties":false}}},
       {"type":"function","function":{"name":"explain_command",
       "description":"Citeste registrul real de comenzi BENSON: ce stie sa faca, cum i se cere, ce e doar planificat. Foloseste-l OBLIGATORIU cand Masterul intreaba «cum iti spun sa...», «ce comanda folosesc», «stii sa...», «ce poti face». Lasa `query` gol ca sa primesti tot registrul.",
       "parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}}},
@@ -360,6 +360,17 @@ object BensonAgentTools {
       "așteaptă. Dacă domeniul se potrivește (sau instrumentul spune că nu există niciun domeniu " +
       "cunoscut de verificat), cheamă din nou «search_in_app» cu confirmed=true și continuă normal. " +
       "Dacă nu ești sigur dacă se potrivește, întreabă Masterul pe scurt, nu presupune.\n" +
+      // FIX_LIVE_SEMANTIC_PRECHECK_1 (20.10.2026, "nu deschide inutil aplicatia") — daca aplicatia
+      // numita explicit are deja un domeniu cunoscut atasat ca fapt (poate aparea ca mesaj separat,
+      // ÎNAINTE de orice instrument), decide pe baza LUI, nu dupa ce deschizi aplicatia: daca nu se
+      // potriveste, raspunde direct cu «say» (propunand alternativa, cu proposed_app/proposed_query
+      // completate) FARA sa chemi «open_app» deloc pentru aplicatia nepotrivita. Deschide-o doar
+      // daca se potriveste sau daca nu exista niciun fapt de domeniu atasat.
+      "Dacă propui o CĂUTARE alternativă (ex. Amazon Shopping în loc de Spotify), completează în " +
+      "«say» câmpurile «proposed_app»/«proposed_query» cu exact aplicația și textul căutării — " +
+      "dacă Masterul acceptă la următoarea replică, BENSON caută direct, fără să-l mai întrebi o " +
+      "dată ce și unde. Nu completa aceste câmpuri decât pentru o simplă căutare, niciodată pentru " +
+      "apeluri, mesaje, cumpărături, plăți sau ștergeri.\n" +
       // TRAVEL/MOBILITY (20.10.2026) — doar pentru misiuni COMPUSE; o comanda simpla de navigatie
       // nu ajunge niciodata aici (e deja rezolvata separat, inainte).
       "Pentru o misiune COMPUSĂ care implică navigație («navighează spre X și găsește-mi o parcare " +
