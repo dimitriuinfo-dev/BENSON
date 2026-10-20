@@ -3573,6 +3573,15 @@ class BensonAccessibilityService : AccessibilityService() {
         val message: String,
         val needsConfirmation: Boolean = false,
         val confirmLabel: String = "",
+        // AKA V1 (20.10.2026, punctele 1+3 ale corectiei) — `packageName` e pachetul citit DIN
+        // DIGESTUL de ÎNAINTE de apasare (nu o re-interogare a prim-planului DUPA verificare, care
+        // ar putea atribui dovada aplicatiei gresite daca altceva a preluat ecranul intre timp).
+        // `strongEffectEvidence` e adevarat STRICT cand semnalul de focalizare (cel mai specific,
+        // generic pentru orice camp activ) a confirmat efectul — niciodata doar pe baza unei
+        // schimbari oarecare a ecranului intreg. Apelantul (AKA) nu are voie sa inregistreze
+        // cunostinte persistate decat cand aceasta e adevarat.
+        val packageName: String = "",
+        val strongEffectEvidence: Boolean = false,
     )
 
     // FAZA 3 / SCREEN OBSERVATION — singurul punct public prin care ecranul activ devine un
@@ -3796,21 +3805,51 @@ class BensonAccessibilityService : AccessibilityService() {
         // UNIVERSAL_ACTION_STOP — nu se incepe un pas nou dupa stop.
         if (isAbortActive()) return@withContext ControlResult(false, "aborted")
         val seen = lastServedDigest
-            ?: return@withContext ControlResult(false, "Nu am o observare a ecranului. Observă întâi.")
+            ?: return@withContext ControlResult(false, "Nu am o observare a ecranului. Observă întâi.").also {
+                Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=no_prior_observation classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
+            }
         val seenEl = seen.element(index)
-            ?: return@withContext ControlResult(false, "Nu exista elementul $index in ultima observare.")
+            ?: return@withContext ControlResult(false, "Nu exista elementul $index in ultima observare.").also {
+                Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=not_in_last_digest classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
+            }
         val digest = observeScreen()
-            ?: return@withContext ControlResult(false, "Nu pot citi ecranul.")
+            ?: return@withContext ControlResult(false, "Nu pot citi ecranul.").also {
+                Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=cannot_observe classification=${InteractionFailureReason.UNKNOWN}")
+            }
         val el = digest.element(index)
-            ?: return@withContext ControlResult(false, "Nu există elementul $index pe ecran.")
+            ?: return@withContext ControlResult(false, "Nu există elementul $index pe ecran.").also {
+                Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=not_on_screen_now classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
+            }
         // Punctul 2 din ordin: fara apasare oarba. Un element fara eticheta nu e identificabil.
         if (el.label.isBlank()) {
-            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=blank_label")
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=blank_label classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
             return@withContext ControlResult(false, "Elementul $index nu are nicio etichetă; nu apăs în necunoscut. Observă din nou sau alege altul.")
         }
         // Punctul 3: indexul e valid doar pentru observatia curenta.
         if (!seenEl.label.equals(el.label, ignoreCase = true)) {
-            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=stale_index seen=\"${seenEl.label.take(30)}\" now=\"${el.label.take(30)}\"")
+            // S4 RETEST (19.10.2026, DOVADA PE TELEFON, root-cause gasit DIN LOG, nu presupus) —
+            // distinge GENERIC (orice aplicatie, nu Calculator) doua cazuri diferite ascunse pana
+            // acum sub acelasi "stale_index": (a) ACEEASI aplicatie, dar ecranul s-a schimbat intern
+            // (navigare, animatie) vs. (b) O ALTA aplicatie a preluat prim-planul cu totul — dovedit
+            // real: in timp ce agentul "gandea" (apel HTTP), o notificare a eBay Kleinanzeigen a
+            // adus `MessagesActivity` in prim-plan, inlocuind Calculatorul; `lastServedDigest` ramas
+            // de la Calculator a facut ca indicii sa para "stale" cand de fapt ecranul intreg nu mai
+            // era Calculatorul. `OVERLAY_POLICY_EVAL isSelfForeground=false hadActiveOverlay=false`
+            // in acelasi interval confirma ca overlay-ul PROPRIU al BENSON nu a avut niciun rol —
+            // cauza a fost strict o notificare externa, in afara controlului BENSON.
+            val foreignApp = isForeignAppForeground(seen.packageName, digest.packageName)
+            if (foreignApp) {
+                Log.i(
+                    "BENSON_AUDIO",
+                    "AGENT_TAP index=$index ok=false reason=foreign_app_foreground expected_pkg=${seen.packageName} " +
+                        "actual_pkg=${digest.packageName} classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}",
+                )
+                return@withContext ControlResult(
+                    false,
+                    "Altă aplicație a preluat ecranul între timp (probabil o notificare). Deschide din nou aplicația țintă înainte să continui.",
+                )
+            }
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=stale_index seen=\"${seenEl.label.take(30)}\" now=\"${el.label.take(30)}\" classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
             return@withContext ControlResult(false, "Ecranul s-a schimbat de la ultima observare. Observă din nou.")
         }
         val want = expectedLabel.trim().lowercase()
@@ -3818,25 +3857,220 @@ class BensonAccessibilityService : AccessibilityService() {
         val labelOk = want.isBlank() || want == el.role.name.lowercase() ||
             have.contains(want.take(20)) || want.contains(have.take(20))
         if (!labelOk) {
-            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=label_mismatch have=\"${el.label.take(40)}\"")
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=label_mismatch have=\"${el.label.take(40)}\" classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
             return@withContext ControlResult(false, "Elementul $index arată altfel acum (\"${el.label.take(40)}\").")
         }
         if (el.safety == ButtonSafetyClassifier.Verdict.REFUSE) {
-            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=refused")
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=refused classification=${InteractionFailureReason.UI_ACTION_REJECTED}")
             return@withContext ControlResult(false, "Nu apăs acel buton: ține de plată sau cumpărare.")
         }
         val node = el.ref as? AccessibilityNodeInfo
-            ?: return@withContext ControlResult(false, "Elementul $index nu mai e accesibil.")
-        val before = screenSignature()?.first
+            ?: return@withContext ControlResult(false, "Elementul $index nu mai e accesibil.").also {
+                Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=node_not_accessible classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
+            }
+        // S4 (19.10.2026, precizari DeepSeek acceptate) — "inainte" vine din digest-ul DEJA
+        // observat (proaspat, chiar mai sus) — nu un read separat — si include ATAT semnatura
+        // intregului ecran (semnal slab, "ceva s-a schimbat"), CAT SI continutul elementelor
+        // FOCALIZATE (semnal tare, generic pentru orice aplicatie cu un camp activ — nu doar
+        // Calculator): un digit/operator tastat intr-un camp de input/formula ii schimba de regula
+        // STAREA DE FOCUS/continutul, indiferent de aplicatie.
+        val beforeAll = digest.elements.joinToString("|") { it.label }
+        val beforeFocused = digest.elements.filter { it.focused }.joinToString("|") { it.label }
         val clicked = clickNodeOrAncestor(node)
         Log.i("BENSON_AUDIO", "AGENT_TAP index=$index clicked=$clicked label=\"${el.label.take(40)}\"")
-        if (!clicked) return@withContext ControlResult(false, "N-am putut apăsa \"${el.label.take(40)}\".")
+        if (!clicked) {
+            Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=click_not_accepted classification=${InteractionFailureReason.UI_ACTION_REJECTED}")
+            return@withContext ControlResult(false, "N-am putut apăsa \"${el.label.take(40)}\".")
+        }
         delay(1800)
-        val after = screenSignature()?.first
-        val changed = after != null && after != before
-        Log.i("BENSON_AUDIO", "AGENT_TAP_VERIFY index=$index screen_changed=$changed")
-        ControlResult(true, if (changed) "Am apăsat \"${el.label.take(40)}\"; ecranul s-a schimbat."
-        else "Am apăsat \"${el.label.take(40)}\", dar ecranul pare neschimbat.")
+        // SURVIVOR/EXECUTOR (19.10.2026, DEVICE_FAIL Calculator) — CAUZA REALA, dovedita pe
+        // dispozitiv: pana aici se intorcea `ControlResult(true, ...)` NECONDITIONAT, chiar cand
+        // ecranul NU se schimba deloc dupa apasare — mesajul text era onest, dar `ok=true` ascundea
+        // esecul de la agent, care credea ca a facut progres. TREI straturi distincte (S4): apasare
+        // acceptata (deja verificat mai sus) / schimbare observata (beforeAll vs afterAll) / efect
+        // CORECT verificat (beforeFocused vs afterFocused — nu doar "ceva", ci exact ce conteaza).
+        // Reutilizeaza classifyInteractionOutcome (InteractionVerification.kt, pur, testat).
+        val afterDigest = observeScreen()
+        val screenReobserved = afterDigest != null
+        val overallChanged = afterDigest != null && afterDigest.elements.joinToString("|") { it.label } != beforeAll
+        val afterFocused = afterDigest?.elements?.filter { it.focused }?.joinToString("|") { it.label }
+        // Fara element focalizat nici inainte, nici dupa — nu exista nimic de comparat pe acest
+        // strat; nu se inventeaza o concluzie din lipsa de dovada (vezi InteractionEvidence).
+        val focusedComparable = afterDigest != null && (beforeFocused.isNotBlank() || afterFocused.orEmpty().isNotBlank())
+        val focusedChanged = if (!focusedComparable) null else afterFocused != beforeFocused
+        val evidence = InteractionEvidence(
+          elementFound = true,
+          actionAccepted = true,
+          screenReobserved = screenReobserved,
+          overallScreenChanged = overallChanged,
+          focusedContentChanged = focusedChanged,
+        )
+        val failure = classifyInteractionOutcome(evidence)
+        // S4, diagnostic (19.10.2026) — nu doar "s-a schimbat da/nu", ci VALORILE efective, ca
+        // sa se poata raspunde onest intrebarii "de unde vin cifrele gresite" la o rulare viitoare
+        // (cerinta explicita: pastreaza dovezile observabile). Doar etichete scurte de butoane
+        // (cifre/operatori) — nu date personale.
+        Log.i(
+          "BENSON_AUDIO",
+          "AGENT_TAP_VERIFY index=$index screen_reobserved=$screenReobserved overall_changed=$overallChanged " +
+            "focused_changed=$focusedChanged classification=${failure ?: "none"} " +
+            "before_focused=\"${beforeFocused.take(60)}\" after_focused=\"${afterFocused.orEmpty().take(60)}\"",
+        )
+        // AKA punctul 1: `digest.packageName` e pachetul citit ÎNAINTE de apasare (chiar mai sus,
+        // linia "val digest = observeScreen()") — nu o re-interogare a prim-planului de ACUM, care
+        // ar putea fi alta aplicatie daca ceva a preluat ecranul in cele 1800ms de asteptare.
+        when (failure) {
+          InteractionFailureReason.VERIFICATION_FAILED ->
+            ControlResult(false, "VERIFICATION_FAILED: am apăsat \"${el.label.take(40)}\", dar efectul nu corespunde.", packageName = digest.packageName)
+          InteractionFailureReason.UNKNOWN ->
+            ControlResult(false, "UNKNOWN: am apăsat \"${el.label.take(40)}\", dar nu pot reobserva ecranul ca să confirm efectul.", packageName = digest.packageName)
+          else -> ControlResult(
+            true, "Am apăsat \"${el.label.take(40)}\"; ecranul s-a schimbat.",
+            packageName = digest.packageName,
+            // AKA punctul 3: doar semnalul de FOCALIZARE (specific, nu "ceva s-a schimbat oarecum")
+            // califica drept dovada suficient de forte pentru a fi PERSISTATA ca cunostinta AKA.
+            strongEffectEvidence = focusedChanged == true,
+          )
+        }
+    }
+
+    // SEMANTIC UI RESOLVER (19.10.2026, raspuns direct la DEVICE_FAIL Calculator repetat de 4 ori:
+    // selectia de INDEX dintr-un digest a fost dovedit nesigura — modelul alegea constant butoane
+    // gresite). Alternativa la `tapDigestElement`: nu primeste un index memorat, ci o ETICHETA
+    // SEMANTICA ("2", "×", "Multiplizieren") si rezolva tinta DIN ARBORELE ACTUAL, de fiecare data
+    // — niciun index vechi, nicio coordonata retinuta. Reutilizeaza ACELASI motor generic
+    // (ControlLocator.findButtonCandidates, G-1) si ACEEASI verificare SURVIVOR (clasificatorul din
+    // InteractionVerification.kt) ca tapDigestElement — nu un executor nou, nu o cale paralela.
+    //
+    // Ordinul, punct cu punct:
+    //  1-2. Actiunea semantica = parametrul `label`; rezolvarea foloseste text/desc/viewId din
+    //       arborele Accessibility ACTUAL (snapshotTree, chiar aici, nu un digest vechi).
+    //  3. Ambiguitate (>1 candidat): NU se ghiceste — se refuza explicit, cu numarul de candidati,
+    //     cerand agentului sa observe ecranul (index-based tap_element ramane calea de
+    //     dezambiguizare, prin indici expliciti vizibili in digest — nu un al doilea mecanism).
+    //  4. Identitatea pachetului se verifica INAINTE de apasare (isForeignAppForeground, reutilizat
+    //     de la tapDigestElement) — daca exista o observare anterioara si pachetul curent difera,
+    //     refuza si cere redeschiderea aplicatiei tinta, fara sa incerce o apasare oarba.
+    //  5-6. Verificarea efectului dupa apasare reutilizeaza EXACT acelasi clasificator SURVIVOR
+    //       (focalizare prioritara, coordonate excluse) — zero logica noua de verificare, zero
+    //       cunoastere despre Calculator sau orice alta aplicatie anume.
+    suspend fun pressButtonByLabel(label: String): ControlResult = withContext(Dispatchers.Default) {
+        if (isAbortActive()) return@withContext ControlResult(false, "aborted")
+        if (label.isBlank()) return@withContext ControlResult(false, "Lipsește eticheta butonului de apăsat.")
+        val root = rootInActiveWindow
+            ?: return@withContext ControlResult(false, "Nu găsesc ecranul curent.")
+        val pkg = root.packageName?.toString().orEmpty()
+        val expectedPkg = lastServedDigest?.packageName.orEmpty()
+        if (expectedPkg.isNotBlank() && isForeignAppForeground(expectedPkg, pkg)) {
+            Log.i(
+                "BENSON_AUDIO",
+                "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=foreign_app_foreground " +
+                    "expected_pkg=$expectedPkg actual_pkg=$pkg classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}",
+            )
+            return@withContext ControlResult(
+                false,
+                "Altă aplicație a preluat ecranul între timp (probabil o notificare). Deschide din nou aplicația țintă înainte să continui.",
+            )
+        }
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        val (candidates, beforeDigest, visibleLabels) = try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val epoch = screenEpoch.incrementAndGet()
+            val digest = ScreenDigestBuilder.build(tree, pkg, epoch).also { lastServedDigest = it }
+            val found = ControlLocator.findButtonCandidates(label, tree)
+            // FIX_PRESS_BUTTON_LABEL_MISMATCH_1: doar cand nu s-a gasit nimic, se calculeaza lista
+            // reala a etichetelor clickabile vizibile acum — folosita mai jos ca indiciu generic,
+            // niciodata o traducere hardcodata.
+            val visible = if (found.isEmpty()) ControlLocator.visibleClickableLabels(tree) else emptyList()
+            Triple(found, digest, visible)
+        } catch (_: Exception) {
+            return@withContext ControlResult(false, "Nu pot citi ecranul.").also {
+                Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=cannot_observe classification=${InteractionFailureReason.UNKNOWN}")
+            }
+        }
+        if (candidates.isEmpty()) {
+            Log.i(
+                "BENSON_AUDIO",
+                "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=not_found classification=${InteractionFailureReason.UI_NODE_NOT_FOUND} " +
+                    "visible=\"${visibleLabels.joinToString(", ").take(200)}\"",
+            )
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+            val hint = if (visibleLabels.isEmpty()) "" else
+                " Butoane vizibile acum pe ecran: ${visibleLabels.joinToString(", ")}. Dacă unul dintre " +
+                    "acestea înseamnă același lucru (poate în altă limbă sau alt simbol), cheamă din nou " +
+                    "«press_button» cu eticheta EXACTĂ de acolo."
+            return@withContext ControlResult(false, "UI_NODE_NOT_FOUND: nu găsesc niciun buton \"${label.take(40)}\" pe ecranul curent.$hint")
+        }
+        if (candidates.size > 1) {
+            // Punctul 3 din ordin: NU se ghiceste intre candidati ambigui.
+            Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=ambiguous count=${candidates.size} classification=${InteractionFailureReason.UNKNOWN}")
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+            return@withContext ControlResult(
+                false,
+                "AMBIGUU: ${candidates.size} butoane \"${label.take(40)}\" găsite pe ecran. Cheamă «observe_screen» și " +
+                    "apasă prin indexul exact din listă, ca să nu fie ambiguitate.",
+            )
+        }
+        val target = candidates.single()
+        val targetLabel = target.text.ifBlank { target.desc }
+        if (ButtonSafetyClassifier.classify(targetLabel, target.desc, pkg) == ButtonSafetyClassifier.Verdict.REFUSE) {
+            Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=refused classification=${InteractionFailureReason.UI_ACTION_REJECTED}")
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+            return@withContext ControlResult(false, "Nu apăs acel buton: ține de plată sau cumpărare.")
+        }
+        val node = target.ref as? AccessibilityNodeInfo
+        val beforeFocused = beforeDigest.elements.filter { it.focused }.joinToString("|") { it.label }
+        val beforeAll = beforeDigest.elements.joinToString("|") { it.label }
+        val result = if (node == null) {
+            Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=node_not_accessible classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
+            ControlResult(false, "Butonul \"${label.take(40)}\" nu mai e accesibil.")
+        } else {
+            val clicked = clickNodeOrAncestor(node)
+            Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" clicked=$clicked viewId=${target.viewId}")
+            if (!clicked) {
+                Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=click_not_accepted classification=${InteractionFailureReason.UI_ACTION_REJECTED}")
+                ControlResult(false, "N-am putut apăsa \"${label.take(40)}\".")
+            } else {
+                delay(1800)
+                // Acelasi clasificator SURVIVOR ca tapDigestElement — focalizare prioritara,
+                // coordonate excluse (InteractionVerification.kt, pur, testat).
+                val afterDigest = observeScreen()
+                val screenReobserved = afterDigest != null
+                val overallChanged = afterDigest != null && afterDigest.elements.joinToString("|") { it.label } != beforeAll
+                val afterFocused = afterDigest?.elements?.filter { it.focused }?.joinToString("|") { it.label }
+                val focusedComparable = afterDigest != null && (beforeFocused.isNotBlank() || afterFocused.orEmpty().isNotBlank())
+                val focusedChanged = if (!focusedComparable) null else afterFocused != beforeFocused
+                val evidence = InteractionEvidence(
+                    elementFound = true, actionAccepted = true,
+                    screenReobserved = screenReobserved, overallScreenChanged = overallChanged,
+                    focusedContentChanged = focusedChanged,
+                )
+                val failure = classifyInteractionOutcome(evidence)
+                Log.i(
+                    "BENSON_AUDIO",
+                    "AGENT_PRESS_VERIFY label=\"${label.take(40)}\" screen_reobserved=$screenReobserved " +
+                        "overall_changed=$overallChanged focused_changed=$focusedChanged classification=${failure ?: "none"} " +
+                        "before_focused=\"${beforeFocused.take(60)}\" after_focused=\"${afterFocused.orEmpty().take(60)}\"",
+                )
+                // AKA punctul 1: `pkg` e pachetul citit ÎNAINTE de apasare (varful functiei, din
+                // root-ul proaspat), nu o re-interogare a prim-planului de ACUM.
+                when (failure) {
+                    InteractionFailureReason.VERIFICATION_FAILED ->
+                        ControlResult(false, "VERIFICATION_FAILED: am apăsat \"${label.take(40)}\", dar efectul nu corespunde.", packageName = pkg)
+                    InteractionFailureReason.UNKNOWN ->
+                        ControlResult(false, "UNKNOWN: am apăsat \"${label.take(40)}\", dar nu pot reobserva ecranul ca să confirm efectul.", packageName = pkg)
+                    else -> ControlResult(
+                        true, "Am apăsat \"${label.take(40)}\"; ecranul s-a schimbat.",
+                        packageName = pkg,
+                        // AKA punctul 3: doar semnalul de FOCALIZARE calificat drept dovada forte,
+                        // suficienta pentru a fi PERSISTATA ca cunostinta AKA (nu o schimbare oarecare).
+                        strongEffectEvidence = focusedChanged == true,
+                    )
+                }
+            }
+        }
+        for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        result
     }
 
     fun firstResultLabel(query: String): String? {

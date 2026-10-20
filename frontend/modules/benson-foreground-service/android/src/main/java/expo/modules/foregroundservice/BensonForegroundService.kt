@@ -4374,10 +4374,17 @@ class BensonForegroundService : Service() {
   // telefon imediat: cu doar callTimeout(25s) a aparut `BRAIN_ERROR type=SocketTimeoutException`
   // la `ms=10006`, adica readTimeout-ul IMPLICIT al OkHttp (10 s) ramasese plafonul real. Se seteaza
   // explicit toate trei. Revert: doar .callTimeout(10, SECONDS).
+  // FIX_AGENT_TIMEOUT_1 (19.10.2026, DOVADA PE TELEFON, test real Calculator) — CAUZA DOVEDITA,
+  // reprodusa IDENTIC de doua ori: al treilea apel HTTP al unei rulari (primul care include un
+  // rezultat de tool mare, raspunsul observe_screen) a picat cu InterruptedIOException la exact
+  // 25s de ambele dati (AGENT_RUN steps=3, la 18:00:13 si din nou la 18:05:43 pe acelasi build).
+  // 25s era suficient pentru raspunsuri scurte, dar nu si pentru un prompt crescut cu un digest de
+  // ecran real. Ridicat la 45s — doar o margine mai mare, niciun comportament nou; o cerere care
+  // oricum reusea in <25s nu e afectata.
   private val brainHttpClient = OkHttpClient.Builder()
-    .callTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+    .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
     .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-    .readTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+    .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
     .writeTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
 
   private val BRAIN_TURN_SCHEMA = """
@@ -4567,6 +4574,30 @@ class BensonForegroundService : Service() {
       runAgentToolLocked(name, args, originalCommand)
     }
 
+  // AKA V1 (20.10.2026), CORECTAT (20.10.2026, dupa raportul af27cf7, 3 cerinte explicite) — unica
+  // punte dintre EXECUTOR/SURVIVOR (press_button/tap_element, deja verificate prin
+  // InteractionVerification.classifyInteractionOutcome) și cunoștințele PERSISTATE ale AKA
+  // (StaffRegistry.markVerified, deja existent, deja scris pe disc — pana acum, niciodata apelat).
+  //
+  // Punctul 1 (atribuire corecta): `packageName` vine DIN ControlResult, citit de EXECUTOR ÎNAINTE
+  // de apasare — niciodata o re-interogare a prim-planului de ACUM (care ar putea fi alta
+  // aplicatie, ajunsa in prim-plan intre apasare si acest apel).
+  // Punctul 2 (dovada specifica, nu un flag pe toata aplicatia): cheia e
+  // StaffRegistryCore.uiControlCapabilityId(label) — "ui_control:7" e o dovada diferita de
+  // "ui_control:cauta", in ACELASI map caps (niciun registru nou).
+  // Punctul 3 (verificare relevanta, nu o schimbare oarecare): se persisteaza STRICT cand
+  // strongEvidence e adevarat (semnalul de focalizare, nu doar "ceva s-a schimbat pe ecran
+  // undeva") — mai conservator decat raspunsul dat Masterului, deliberat.
+  private fun recordUiControlVerifiedLocked(packageName: String, label: String, strongEvidence: Boolean) {
+    if (!strongEvidence || packageName.isBlank() || label.isBlank()) return
+    try {
+      val capId = StaffRegistryCore.uiControlCapabilityId(label)
+      StaffRegistry.markVerified(applicationContext, packageName, capId)
+      AudioDiag.log(this, "AKA_RECORD", "pkg=$packageName cap=$capId")
+    } catch (_: Exception) {
+    }
+  }
+
   private fun runAgentToolLocked(name: String, args: JSONObject, originalCommand: String): Pair<String, Boolean> {
     val svc = expo.modules.accessibility.BensonAccessibilityService.instance
     return when (name) {
@@ -4574,7 +4605,36 @@ class BensonForegroundService : Service() {
         val app = args.optString("name").trim()
         if (app.isBlank()) return BensonAgentTools.toolResult(false, "lipsește numele aplicației") to false
         val resp = tryNativeOpenApp("deschide $app")
-        BensonAgentTools.toolResult(resp != null, resp ?: "nu am găsit aplicația $app") to false
+        // FIX_AGENT_OPEN_APP_HONESTY_1 (19.10.2026, BENSON NEXT consolidare) — vezi
+        // AgentOpenAppVerification.kt: `resp != null` trata gresit textele de ESEC ale
+        // tryNativeOpenApp ("Am gasit X, dar n-am putut...", "Nu pornesc video...") ca succes.
+        if (!classifyOpenAppResponseText(resp)) {
+          return BensonAgentTools.toolResult(false, resp ?: "nu am găsit aplicația $app") to false
+        }
+        // SURVIVOR (acelasi principiu ca la navigatia Waze, 19.10.2026) — nu ne oprim la
+        // "startActivity nu a aruncat" (ce intoarce deja tryNativeOpenApp), verificam REAL ca
+        // aplicatia a ajuns in prim-plan inainte sa raportam succes agentului. Thread-ul agentului
+        // tolereaza deja asteptari similare (verify_playing/open_url/play_stream, mai sus) — acelasi
+        // tipar, nu unul nou. Reutilizeaza classifyLaunchVerification (NavigationMissionTrace.kt).
+        val pkg = findLaunchablePackage(normalizeForMatch(app))
+        val outcome = if (pkg != null && svc != null) {
+          var attempt = 0
+          var result: ExecutionOutcome = ExecutionOutcome.Unverified
+          while (result is ExecutionOutcome.Unverified) {
+            val observed = svc.currentForegroundPackageLive()
+            result = classifyLaunchVerification(setOf(pkg), observed, attempt, 10)
+            if (result is ExecutionOutcome.Unverified) Thread.sleep(400)
+            attempt++
+          }
+          result
+        } else null
+        AudioDiag.log(this, "AGENT_OPEN_APP_VERIFY", "pkg=${pkg ?: "unknown"} outcome=${outcome ?: "skipped_no_accessibility"}")
+        when (outcome) {
+          is ExecutionOutcome.Failed -> BensonAgentTools.toolResult(false, "am pornit $app, dar nu a ajuns pe ecran") to false
+          // Success, sau imposibil de verificat (accesibilitate/pachet necunoscut) — raspunsul deja
+          // onest al tryNativeOpenApp ramane cel raportat, exact comportamentul dinainte de fix.
+          else -> BensonAgentTools.toolResult(true, resp ?: "am deschis aplicația") to false
+        }
       }
       BensonAgentTools.SEARCH_IN_APP -> {
         val q = args.optString("query").trim()
@@ -4590,7 +4650,16 @@ class BensonForegroundService : Service() {
       BensonAgentTools.OBSERVE_SCREEN -> {
         val d = svc?.observeScreen()
         if (d == null) BensonAgentTools.toolResult(false, "nu pot citi ecranul") to false
-        else BensonAgentTools.toolResult(true, d.render()) to false
+        else {
+          // AKA punctul 5 ("LIVE consulta efectiv cunostintele AKA") — observe_screen e singurul
+          // punct unde agentul primeste DEJA cunostinte persistate din rulari anterioare (nu doar
+          // ce vede acum), citite din ACELASI StaffRegistry, nicio sursa noua. Compunerea textuala
+          // insasi e `StaffRegistryCore.attachKnownUiControls` (pura, testata JUnit separat —
+          // "contractul complet", 20.10.2026) — aici doar citirea Context-dependenta a datelor.
+          val caps = try { StaffRegistry.capsOf(applicationContext, d.packageName) } catch (_: Exception) { emptyMap() }
+          val detail = StaffRegistryCore.attachKnownUiControls(d.render(), caps)
+          BensonAgentTools.toolResult(true, detail) to false
+        }
       }
       BensonAgentTools.TAP_ELEMENT -> {
         val label = args.optString("label").trim()
@@ -4601,6 +4670,67 @@ class BensonForegroundService : Service() {
         val idx = args.optInt("index", -1)
         if (idx < 0) return BensonAgentTools.toolResult(false, "lipsește indexul elementului") to false
         val r = kotlinx.coroutines.runBlocking { svc.tapDigestElement(idx, label) }
+        if (r.ok) recordUiControlVerifiedLocked(r.packageName, label, r.strongEffectEvidence)
+        BensonAgentTools.toolResult(r.ok, r.message) to false
+      }
+      // SEMANTIC UI RESOLVER (19.10.2026, raspuns la DEVICE_FAIL Calculator repetat de 4 ori) —
+      // nicio logica noua aici: doar cablarea apelului catre pressButtonByLabel (benson-accessibility,
+      // ControlLocator.findButtonCandidates — acelasi motor G-1, acelasi clasificator SURVIVOR ca
+      // tapDigestElement). Executie reala, nu un drum paralel.
+      BensonAgentTools.PRESS_BUTTON -> {
+        val label = args.optString("label").trim()
+        if (label.isBlank()) return BensonAgentTools.toolResult(false, "lipsește eticheta butonului") to false
+        if (svc == null) return BensonAgentTools.toolResult(false, "accesibilitatea nu e disponibilă") to false
+        val r = kotlinx.coroutines.runBlocking { svc.pressButtonByLabel(label) }
+        if (r.ok) recordUiControlVerifiedLocked(r.packageName, label, r.strongEffectEvidence)
+        BensonAgentTools.toolResult(r.ok, r.message) to false
+      }
+      // CALENDAR AGENT (19.10.2026) — API oficial Android (CalendarContract), nu Accessibility;
+      // toata decizia (conflict/duplicat/interval liber) traieste in CalendarEventMath.kt, pura.
+      // Clasificate implicit AgentStepKind.OTHER (agentStepKindFor) — fiecare isi face verificarea
+      // SURVIVOR prin recitire chiar in BensonCalendarExecutor, exact ca open_app; gardul de
+      // "apasare neverificata" e specific Accessibility (observe_screen/tap_element), irelevant aici.
+      BensonAgentTools.CALENDAR_READ_DAY -> {
+        val startMs = BensonCalendarExecutor.parseIsoLocal(args.optString("start_iso"))
+        val endMs = BensonCalendarExecutor.parseIsoLocal(args.optString("end_iso"))
+        if (startMs == null || endMs == null) return BensonAgentTools.toolResult(false, "dată/oră nevalidă") to false
+        val events = BensonCalendarExecutor.readDay(contentResolver, startMs, endMs)
+        val detail = if (events.isEmpty()) "Nu ai nimic în calendar în acest interval." else
+          events.joinToString("; ") { ev ->
+            val sdf = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+            "${sdf.format(java.util.Date(ev.startMillis))} ${ev.title}"
+          }
+        BensonAgentTools.toolResult(true, detail) to false
+      }
+      BensonAgentTools.CALENDAR_FIND_FREE_SLOT -> {
+        val startMs = BensonCalendarExecutor.parseIsoLocal(args.optString("start_iso"))
+        val endMs = BensonCalendarExecutor.parseIsoLocal(args.optString("end_iso"))
+        val durationMin = args.optInt("duration_minutes", -1)
+        if (startMs == null || endMs == null || durationMin <= 0) return BensonAgentTools.toolResult(false, "parametri nevalizi") to false
+        val slots = BensonCalendarExecutor.findFreeSlots(contentResolver, startMs, endMs, durationMin)
+        val sdf = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US)
+        val detail = if (slots.isEmpty()) "Niciun interval liber de $durationMin minute în acest interval." else
+          slots.joinToString("; ") { (s, e) -> "${sdf.format(java.util.Date(s))}–${sdf.format(java.util.Date(e))}" }
+        BensonAgentTools.toolResult(true, detail) to false
+      }
+      BensonAgentTools.CALENDAR_CREATE_EVENT -> {
+        val title = args.optString("title").trim()
+        val startMs = BensonCalendarExecutor.parseIsoLocal(args.optString("start_iso"))
+        val endMs = BensonCalendarExecutor.parseIsoLocal(args.optString("end_iso"))
+        val allDay = args.optBoolean("all_day", false)
+        val confirmed = args.optBoolean("confirmed", false)
+        if (title.isBlank() || startMs == null || endMs == null) return BensonAgentTools.toolResult(false, "lipsesc detalii despre eveniment") to false
+        val r = BensonCalendarExecutor.createEvent(contentResolver, title, startMs, endMs, allDay, confirmed)
+        BensonAgentTools.toolResult(r.ok, r.message) to false
+      }
+      BensonAgentTools.CALENDAR_UPDATE_EVENT -> {
+        val eventId = args.optLong("event_id", -1)
+        if (eventId < 0) return BensonAgentTools.toolResult(false, "lipsește event_id") to false
+        val newTitle = args.optString("new_title").trim().takeIf { it.isNotBlank() }
+        val newStart = args.optString("new_start_iso").trim().takeIf { it.isNotBlank() }?.let { BensonCalendarExecutor.parseIsoLocal(it) }
+        val newEnd = args.optString("new_end_iso").trim().takeIf { it.isNotBlank() }?.let { BensonCalendarExecutor.parseIsoLocal(it) }
+        val confirmed = args.optBoolean("confirmed", false)
+        val r = BensonCalendarExecutor.updateEvent(contentResolver, eventId, newTitle, newStart, newEnd, confirmed)
         BensonAgentTools.toolResult(r.ok, r.message) to false
       }
       BensonAgentTools.OPEN_URL -> {
@@ -4723,6 +4853,21 @@ class BensonForegroundService : Service() {
       val myRun = agentRunId
       var done = false
       var steps = 0
+      // GARD DE VERIFICARE IN COD (19.10.2026) — vezi AgentVerificationGate.kt. callIndex creste o
+      // data per apel de instrument REAL procesat (nu per iteratie a buclei), ca sa ordoneze corect
+      // mai multe instrumente cerute in acelasi raspuns al modelului.
+      var gateState = AgentVerificationGateState()
+      var callIndex = 0
+      // FIX_AGENT_COMPOUND_OPEN_NO_ACTION_1 (19.10.2026, DOVADA PE TELEFON) — vezi
+      // AgentVerificationGate.kt: o comanda compusa ("deschide X si ...") care deschide aplicatia
+      // dar nu apasa nimic inauntru nu poate incheia tura — altfel modelul "calculeaza singur" un
+      // rezultat (dovedit: "27 ori 14 este 378" rostit fara niciun tap_element).
+      val commandIsCompound = COMPOUND_COMMAND_PATTERN.containsMatchIn(normalizeForMatch(command))
+      var openAppSucceeded = false
+      // FIX_AGENT_CLAIMED_NUMBER_NOT_OBSERVED_1 (19.10.2026, S4, DOVADA PE TELEFON) — continutul
+      // ULTIMEI observari reale (observe_screen), ca sa putem verifica ca un numar rostit ca
+      // rezultat final chiar a fost VAZUT, nu doar calculat. Vezi AgentVerificationGate.kt.
+      var lastObservedScreenText: String? = null
       try {
         while (!done && steps < BensonAgentTools.MAX_STEPS) {
           if (myRun != agentRunId) { AudioDiag.log(this, "AGENT_CANCELLED", "run=$myRun"); return@Thread }
@@ -4756,6 +4901,24 @@ class BensonForegroundService : Service() {
             // P0 punctul 4: identificatorul rulării se verifică ÎNAINTE de orice TTS, nu doar
             // înainte de instrumente. Un răspuns sosit după anulare e rezultat INVALID (punctul 3).
             if (text.isNotBlank() && myRun == agentRunId) {
+              // GARD DE VERIFICARE IN COD — un raspuns conversational nu poate incheia tura daca
+              // ultima apasare (tap_element) n-a fost inca urmata de o observare reala a ecranului,
+              // SAU daca o comanda compusa a deschis aplicatia dar n-a apasat inca nimic inauntru.
+              if (!isTurnEndAllowedNow(gateState)) {
+                AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=conversational_end step=$callIndex")
+                messages.put(JSONObject().apply { put("role", "user"); put("content", VERIFICATION_GATE_REJECTION_MESSAGE) })
+                continue
+              }
+              if (isCompoundOpenWithoutActionBlocked(commandIsCompound, openAppSucceeded, gateState.lastActionStep)) {
+                AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=compound_open_conversational_end step=$callIndex")
+                messages.put(JSONObject().apply { put("role", "user"); put("content", COMPOUND_OPEN_REJECTION_MESSAGE) })
+                continue
+              }
+              if (claimedNumberMissingFromLastObservation(commandIsCompound, text, lastObservedScreenText)) {
+                AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=claimed_number_conversational_end step=$callIndex")
+                messages.put(JSONObject().apply { put("role", "user"); put("content", CLAIMED_NUMBER_NOT_OBSERVED_REJECTION_MESSAGE) })
+                continue
+              }
               conversationHistory.add("user", command); conversationHistory.add("assistant", text)
               mainHandler.post { if (myRun == agentRunId) finishBrainCommandSuccess(text, command, "agent_chat") }
               done = true
@@ -4775,12 +4938,63 @@ class BensonForegroundService : Service() {
               })
               continue
             }
+            // GARD DE VERIFICARE IN COD (19.10.2026, "nu doar prin systemPrompt") — "say" nu poate
+            // incheia tura dupa o apasare neverificata; respinge instrumentul (fara sa-l execute,
+            // fara sa vorbeasca) si forteaza o noua observare. Reutilizeaza AgentVerificationGate.kt.
+            if (fname == BensonAgentTools.SAY && !isTurnEndAllowedNow(gateState)) {
+              AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=say step=$callIndex")
+              messages.put(JSONObject().apply {
+                put("role", "tool"); put("tool_call_id", call.optString("id"))
+                put("content", BensonAgentTools.toolResult(false, VERIFICATION_GATE_REJECTION_MESSAGE))
+              })
+              callIndex++
+              continue
+            }
+            if (fname == BensonAgentTools.SAY && isCompoundOpenWithoutActionBlocked(commandIsCompound, openAppSucceeded, gateState.lastActionStep)) {
+              AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=compound_open_say step=$callIndex")
+              messages.put(JSONObject().apply {
+                put("role", "tool"); put("tool_call_id", call.optString("id"))
+                put("content", BensonAgentTools.toolResult(false, COMPOUND_OPEN_REJECTION_MESSAGE))
+              })
+              callIndex++
+              continue
+            }
+            if (fname == BensonAgentTools.SAY &&
+              claimedNumberMissingFromLastObservation(commandIsCompound, fargs.optString("text"), lastObservedScreenText)
+            ) {
+              AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=claimed_number_say step=$callIndex")
+              messages.put(JSONObject().apply {
+                put("role", "tool"); put("tool_call_id", call.optString("id"))
+                put("content", BensonAgentTools.toolResult(false, CLAIMED_NUMBER_NOT_OBSERVED_REJECTION_MESSAGE))
+              })
+              callIndex++
+              continue
+            }
+            // GARD AL TREILEA (19.10.2026, dovada pe telefon) — tap_element niciodata inaintea
+            // primului observe_screen al rularii: un index fara digest real e o apasare ghicita.
+            if (fname == BensonAgentTools.TAP_ELEMENT && !isTapAllowedNow(gateState)) {
+              AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=tap_without_observe step=$callIndex")
+              messages.put(JSONObject().apply {
+                put("role", "tool"); put("tool_call_id", call.optString("id"))
+                put("content", BensonAgentTools.toolResult(false, TAP_WITHOUT_OBSERVE_REJECTION_MESSAGE))
+              })
+              callIndex++
+              continue
+            }
             val t0 = System.currentTimeMillis()
             val (result, finished) = runAgentTool(fname!!, fargs, command, myRun)
             AudioDiag.log(this, "AGENT_TOOL", "step=$steps name=$fname ms=${System.currentTimeMillis() - t0}")
             messages.put(JSONObject().apply {
               put("role", "tool"); put("tool_call_id", call.optString("id")); put("content", result)
             })
+            if (fname == BensonAgentTools.OPEN_APP) {
+              openAppSucceeded = openAppSucceeded || runCatching { JSONObject(result).optBoolean("ok", false) }.getOrDefault(false)
+            }
+            if (fname == BensonAgentTools.OBSERVE_SCREEN) {
+              lastObservedScreenText = runCatching { JSONObject(result).optString("detail").takeIf { it.isNotBlank() } }.getOrNull()
+            }
+            gateState = advanceVerificationGate(gateState, callIndex, agentStepKindFor(fname))
+            callIndex++
             if (finished) done = true
           }
         }
@@ -5486,6 +5700,54 @@ class BensonForegroundService : Service() {
             }
           }, "benson-screen-digest").start()
         }
+        // AKA V1 (20.10.2026, "testeaza fara API platit") — exercita EXACT drumul de productie
+        // (pressButtonByLabel + recordUiControlVerifiedLocked, acelasi cod pe care runAgentToolLocked
+        // il apeleaza pentru PRESS_BUTTON), fara niciun apel OpenAI — zero cost, pentru validarea
+        // locala a ciclului descoperire->operare->verificare->inregistrare, inclusiv dupa un
+        // restart real al serviciului (persistenta pe disc, StaffRegistry). Revert: sterge aceasta
+        // ramura + addAction-ul DEBUG_AKA_PRESS.
+        "com.benson.butler.DEBUG_AKA_PRESS" -> {
+          if (!isDebugInjectArmed(prefs)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val label = intent.getStringExtra("label")
+          if (label.isNullOrBlank()) return
+          val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+          if (svc == null) {
+            AudioDiag.log(context, "AKA_DEBUG_PRESS", "ok=false reason=no_accessibility")
+            return
+          }
+          Thread({
+            val r = kotlinx.coroutines.runBlocking { svc.pressButtonByLabel(label) }
+            AudioDiag.log(
+              context, "AKA_DEBUG_PRESS",
+              "ok=${r.ok} pkg=${r.packageName} strong=${r.strongEffectEvidence} msg=\"${r.message.take(80)}\"",
+            )
+            if (r.ok) recordUiControlVerifiedLocked(r.packageName, label, r.strongEffectEvidence)
+          }, "benson-aka-debug-press").start()
+        }
+        // Dump pur al cunostintelor PERSISTATE pentru un pachet — proba directa de persistenta
+        // (descoperire -> operare -> verificare -> inregistrare -> restart -> regasire), citita
+        // DIN STORAGE, fara sa treaca prin observe_screen/agent. Revert: sterge + DEBUG_AKA_DUMP.
+        "com.benson.butler.DEBUG_AKA_DUMP" -> {
+          if (!isDebugInjectArmed(prefs)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val pkg = intent.getStringExtra("package")
+          if (pkg.isNullOrBlank()) return
+          StaffRegistry.invalidate() // forteaza citirea DE PE DISC, nu din cache-ul din memorie
+          val caps = try { StaffRegistry.capsOf(context, pkg) } catch (_: Exception) { emptyMap() }
+          val uiControls = caps.filter { StaffRegistryCore.isUiControlCapability(it.key) }
+          AudioDiag.log(context, "AKA_DEBUG_DUMP", "pkg=$pkg ui_controls=${uiControls.entries.joinToString(",") { "${it.key}=${it.value}" }}")
+          // Punctul 5 ("LIVE consulta efectiv AKA") — EXACT acelasi contract pur
+          // (StaffRegistryCore.attachKnownUiControls) pe care OBSERVE_SCREEN il aplica in
+          // runAgentToolLocked, exercitat aici pe date REALE, deja persistate pe disc — proba ca
+          // textul pe care l-ar primi modelul contine cunostinta, fara o rulare platita a agentului.
+          val liveWouldSee = StaffRegistryCore.attachKnownUiControls("(digest ecran omis in acest dump)", caps)
+          AudioDiag.log(context, "AKA_DEBUG_LIVE_VIEW", "pkg=$pkg text=\"$liveWouldSee\"")
+        }
         "com.benson.butler.DEBUG_INJECT_WAV" -> {
           if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
@@ -5645,6 +5907,8 @@ class BensonForegroundService : Service() {
         addAction("com.benson.butler.DEBUG_INJECT_TRANSCRIPT") // ZIUA 2026-10-08, E0
         addAction("com.benson.butler.DEBUG_INJECT_WAV") // ZIUA 2026-10-08, V3-VERIFICARE
         addAction("com.benson.butler.DEBUG_SCREEN_DIGEST") // FAZA 3 / SCREEN OBSERVATION
+        addAction("com.benson.butler.DEBUG_AKA_PRESS") // AKA V1, 20.10.2026
+        addAction("com.benson.butler.DEBUG_AKA_DUMP") // AKA V1, 20.10.2026
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         registerReceiver(debugInjectReceiver, filter, Context.RECEIVER_EXPORTED)

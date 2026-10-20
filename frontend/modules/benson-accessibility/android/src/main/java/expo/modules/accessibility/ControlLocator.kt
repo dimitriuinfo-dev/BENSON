@@ -77,6 +77,58 @@ object ControlLocator {
     }
   }
 
+  // SEMANTIC UI RESOLVER (19.10.2026, raspuns la DEVICE_FAIL Calculator repetat — selectie de
+  // INDEX nesigura a modelului). Generic, orice aplicatie — NU index memorat dintr-un digest vechi,
+  // NU pozitii/coordonate hardcodate. Reutilizeaza norm()/flatten() de mai sus, acelasi motor G-1.
+  //
+  // Returneaza TOTI candidatii gasiti la cel mai SIGUR nivel de potrivire care are macar unul — nu
+  // doar primul (ca findControl) — ca apelantul sa poata detecta AMBIGUITATEA explicit (>1
+  // candidat) in loc sa aleaga orbeste. 0 candidati = butonul nu exista acum pe ecran
+  // (UI_NODE_NOT_FOUND); 1 = continua; >1 = AMBIGUU, nu se ghiceste.
+  //
+  // Nivel 1 (cel mai sigur): potrivire EXACTA (dupa normalizare) pe text SAU contentDescription —
+  // cazul tipic pentru cifre/operatori cu eticheta scurta si clara ("7", "×", "=").
+  // Nivel 2 (rezerva, doar daca nivelul 1 nu gaseste nimic): potrivire PARTIALA pe
+  // desc/text/viewId/hint, ca la findControl — pentru butoane cu eticheta descriptiva mai lunga
+  // (ex. "Sterge", cand modelul cere "sterge" sau "clear").
+  fun findButtonCandidates(label: String, root: UiNode): List<UiNode> {
+    val target = norm(label)
+    if (target.isBlank()) return emptyList()
+    val clickable = flatten(root).filter { it.clickable }
+    val exact = clickable.filter { norm(it.text) == target || norm(it.desc) == target }
+    if (exact.isNotEmpty()) return exact
+    val byDesc = clickable.filter { matchesAny(it.desc, listOf(label)) }
+    if (byDesc.isNotEmpty()) return byDesc
+    val byText = clickable.filter { matchesAny(it.text, listOf(label)) }
+    if (byText.isNotEmpty()) return byText
+    val byViewId = clickable.filter { matchesAny(it.viewId, listOf(label)) }
+    if (byViewId.isNotEmpty()) return byViewId
+    return clickable.filter { matchesAny(it.hint, listOf(label)) }
+  }
+
+  // FIX_PRESS_BUTTON_LABEL_MISMATCH_1 (19.10.2026, cerinta explicita a Masterului) — cauza reala
+  // gasita in rularea 5: press_button(label="×") a esuat cu UI_NODE_NOT_FOUND pentru ca eticheta
+  // REALA a butonului, din contentDescription, era cuvantul german "Multiplizieren" — simbolul
+  // vizual si eticheta de Accessibility nu coincid, pe orice limba/aplicatie, nu doar Calculator.
+  //
+  // Solutia e GENERICA si nu adauga nicio lista rigida per limba in cod: cand 0 candidati se
+  // gasesc, apelantul poate oferi agentului lista REALA a etichetelor clickabile vazute acum pe
+  // ecran (resursa Accessibility deja citita, nimic nou). Inteligenta multilingva ramane acolo
+  // unde exista deja — la modelul comun (acelasi folosit pentru tot restul conversatiei) — care
+  // poate recunoaste ca "Multiplizieren" inseamna "×" si poate relua press_button cu eticheta
+  // EXACTA gasita, fara ca BENSON sa codifice vreodata traducerea.
+  fun visibleClickableLabels(root: UiNode, limit: Int = 20): List<String> {
+    val out = LinkedHashSet<String>()
+    for (n in flatten(root)) {
+      if (!n.clickable) continue
+      val label = n.text.ifBlank { n.desc }.trim()
+      if (label.isBlank()) continue
+      out.add(label)
+      if (out.size >= limit) break
+    }
+    return out.toList()
+  }
+
   /** Nearest clickable node at or above `node` within `root` (node itself, or first clickable ancestor). */
   fun clickableTarget(node: UiNode, root: UiNode): UiNode? {
     if (node.clickable) return node

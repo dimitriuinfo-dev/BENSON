@@ -40,6 +40,22 @@ async function ensureCallPhonePermission(): Promise<void> {
   });
 }
 
+// CALENDAR AGENT (19.10.2026) — READ_CALENDAR + WRITE_CALENDAR, cerute o singura data impreuna;
+// scrierea reala ramane limitata la un calendar local de test pana la validare pe dispozitiv
+// (BensonCalendarExecutor.kt), dar permisiunea insasi se cere acum, ca restul sa nu astepte dupa ea.
+async function hasCalendarPermission(): Promise<boolean> {
+  const read = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.READ_CALENDAR);
+  const write = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.WRITE_CALENDAR);
+  return read && write;
+}
+
+async function ensureCalendarPermission(): Promise<void> {
+  await PermissionsAndroid.requestMultiple([
+    PermissionsAndroid.PERMISSIONS.READ_CALENDAR,
+    PermissionsAndroid.PERMISSIONS.WRITE_CALENDAR,
+  ]);
+}
+
 const STEPS: Step[] = [
   {
     id: 'mic',
@@ -122,6 +138,15 @@ const STEPS: Step[] = [
     check: isIgnoringBatteryOptimizations,
     action: requestIgnoreBatteryOptimizations,
     navigatesAway: true,
+  },
+  {
+    id: 'calendar',
+    title: 'Calendar',
+    why: 'Îmi permite să citesc ce ai programat, să-ți găsesc intervale libere și să adaug sau să modific evenimente când îmi ceri.',
+    critical: false,
+    check: hasCalendarPermission,
+    action: ensureCalendarPermission,
+    navigatesAway: false,
   },
   {
     id: 'notif_access',
