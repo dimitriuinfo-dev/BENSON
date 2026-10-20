@@ -58,11 +58,23 @@ internal object StaffRegistryCore {
   // PROPRIE, cu propriul ei nivel KNOWN/REVERIFY/VERIFIED, promovata independent.
   const val CAP_UI_CONTROL_PREFIX = "ui_control:"
 
+  // FIX_AKA_CAP_LABEL_COMMA_1 (20.10.2026, CAUZA REALA gasita pe dispozitiv, nu presupusa): testul
+  // real pe Ceas a aratat "neue benachrichtigungen" aparand ca o capabilitate NUMITA separata,
+  // desi n-a fost niciodata scrisa ca atare. Cauza: eticheta reala a butonului de meniu era
+  // "Weitere Optionen,Neue Benachrichtigungen" (virgula vine chiar din contentDescription-ul
+  // Android, nu de la noi) — `serialize()` desparte capabilitatile unei aplicatii pe ',', deci
+  // cheia continand o virgula se rupea in doua la serializare, iar jumatatea a doua (fara
+  // prefixul aka_fn:) aparea ca o capabilitate NUMITA falsa la deserializare. Acelasi tip de bug
+  // ca FIX_AKA_CAP_KEY_COLON_1 (coliziune cu un delimitator de serializare), de data asta ','
+  // in loc de ':'. Fix la radacina: virgula (si tab-ul, delimitatorul coloanelor StaffMember) nu
+  // au voie sa ajunga NICIODATA intr-o cheie de capabilitate, indiferent de familie.
   private fun normalizeCapLabel(label: String): String =
     java.text.Normalizer.normalize(label, java.text.Normalizer.Form.NFD)
       .replace(Regex("\\p{Mn}+"), "")
       .lowercase()
       .trim()
+      .replace(',', ' ')
+      .replace('\t', ' ')
       .take(40)
 
   /** Cheia specifica, per control/operatie, pentru `caps` — nu un flag generic pe toata aplicatia. */

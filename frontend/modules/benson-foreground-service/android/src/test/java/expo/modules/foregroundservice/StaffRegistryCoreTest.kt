@@ -400,6 +400,20 @@ class StaffRegistryCoreTest {
     assertEquals(CapLevel.VERIFIED, out.caps[navId])
   }
 
+  // FIX_AKA_CAP_LABEL_COMMA_1 (20.10.2026, CAUZA REALA gasita pe dispozitiv real — Ceas OnePlus,
+  // butonul de meniu suplimentar): eticheta REALA era "Weitere Optionen,Neue Benachrichtigungen"
+  // (virgula vine din contentDescription-ul Android insusi) — `serialize()` desparte
+  // capabilitatile pe ',', deci cheia se rupea in doua la scriere, iar jumatatea a doua aparea
+  // ca o capabilitate NUMITA falsa la citire. Acelasi tipar ca bug-ul cu ':', alt delimitator.
+  @Test fun capabilityKeyWithACommaInTheOriginalLabelSurvivesSerializeDeserializeIntact() {
+    val fnId = StaffRegistryCore.akaFunctionCapabilityId("com.example.app:a3f2", "Weitere Optionen,Neue Benachrichtigungen")
+    val list = listOf(member("com.example.app").copy(caps = mapOf(fnId to CapLevel.VERIFIED)))
+    val out = StaffRegistryCore.deserialize(StaffRegistryCore.serialize(list)).single()
+    assertEquals(CapLevel.VERIFIED, out.caps[fnId])
+    // Niciun fragment nu trebuie sa apara ca o capabilitate NUMITA separata, falsa.
+    assertNull(out.caps["neue benachrichtigungen"])
+  }
+
   @Test fun akaFunctionAndNavigationCapabilitiesAreDemotedAfterAppUpdateLikeAnyOther() {
     // Invalidare la schimbare de versiune (M4, deja generic) — proba explicita pentru noile familii.
     val fnId = StaffRegistryCore.akaFunctionCapabilityId("ecranA", "X")

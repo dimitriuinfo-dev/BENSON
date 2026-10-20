@@ -65,6 +65,40 @@ class AkaKnowledgeTest {
     assertTrue(candidates.contains("Radar"))
   }
 
+  // --- Aplicatie imaginara 3b: "WholePageSettings" — FIX_AKA_FULLSCREEN_SCROLLABLE_1, cauza reala
+  // gasita pe dispozitivul real (Setari OnePlus): TOT ecranul e UN SINGUR container derulabil
+  // (dimensiunea exacta a ecranului), cu randurile de meniu in interior — exact ca "WLAN"/
+  // "Bluetooth"/"Flugmodus" vazute real. Regula stricta ar exclude tot; fallback-ul trebuie sa
+  // le pastreze pe toate, pentru ca niciun candidat NU ramane in afara containerului. ---
+
+  private val wholePageSettingsScreen = listOf(
+    el(0, "Setări", clickable = false, scrollable = true, bounds = "0,0,1080,2414"), // containerul intreg
+    el(1, "Căutare", clickable = true, bounds = "0,50,1080,150"),
+    el(2, "Mod avion · Oprit", clickable = true, bounds = "0,150,1080,300"),
+    el(3, "WLAN · Acasă", clickable = true, bounds = "0,300,1080,450"),
+    el(4, "Bluetooth · Conectat", clickable = true, bounds = "0,450,1080,600"),
+  )
+
+  @Test fun wholePageSettingsFallsBackToAllClickablesWhenStrictRuleWouldLeaveNothing() {
+    val candidates = AkaKnowledge.discoverCandidateFunctions(wholePageSettingsScreen).map { it.label }
+    assertTrue(candidates.contains("Căutare"))
+    assertTrue(candidates.contains("Mod avion · Oprit"))
+    assertTrue(candidates.contains("WLAN · Acasă"))
+    assertTrue(candidates.contains("Bluetooth · Conectat"))
+  }
+
+  @Test fun strictRuleAloneWouldHaveFoundNothingOnThisScreen() {
+    // Control, ca sa fie limpede CE anume repara fallback-ul — nu doar "merge", ci ADEVARATA cauza.
+    assertTrue(wholePageSettingsScreen.none { AkaKnowledge.isCandidateFunction(it, wholePageSettingsScreen) })
+  }
+
+  @Test fun fallbackDoesNotTriggerWhenStrictRuleAlreadyFoundSomething() {
+    // Zero regresie: Calculator/Ceas (deja dovedite) au mereu CEVA in afara listei derulabile, deci
+    // fallback-ul nu trebuie sa se activeze si sa adauge randuri de continut acolo.
+    val candidatesNotiFast = AkaKnowledge.discoverCandidateFunctions(notiFastScreen).map { it.label }
+    assertFalse(candidatesNotiFast.contains("Cumparaturi de weekend")) // tot exclus, ca inainte
+  }
+
   // --- Aplicatie imaginara 3: "ConfigPanel" — meniu de setari, randuri clickabile FARA lista derulabila ---
   // (multe aplicatii de setari pun randurile direct intr-un LinearLayout, fara scrollable=true pe
   // un container explicit) — aici fiecare rand E o functie reala (navigheaza spre un sub-ecran),

@@ -61,6 +61,84 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## STAGE 2 — LIVE folosește AKA, un singur orchestrator (20.10.2026, confirmat prin citire de cod)
+
+Confirmat, fără nicio modificare de cod (verificare, nu construcție nouă):
+- Un singur punct de dispatch al instrumentelor: `BensonForegroundService.runAgentToolLocked`
+  (o singură definiție, un singur apel, din `tryAgent`). `aka_query_app`, `aka_explore_function`,
+  `observe_screen` (cu atașarea automată a cunoștinței AKA), `press_button`/`tap_element` — TOATE
+  trec prin acest unic punct.
+- `BensonLiveOrchestrator` (scaffold-ul separat, 5-nivele, D0) rămâne NECONECTAT — zero
+  instanțiere în afara propriului fișier. Nu există un al doilea orchestrator activ.
+- `systemPrompt` instruiește explicit modelul să cheme `aka_query_app` ÎNAINTE de o misiune
+  într-o aplicație nouă/necunoscută, ca să aleagă metoda de operare pe baza a ce e deja cunoscut,
+  nu să ghicească — exact „LIVE utilizează informațiile guvernate de AKA pentru alegerea metodei
+  de operare". O singură inteligență conversațională (`gpt-5-nano`, neschimbat) pentru tot
+  sistemul — nu s-a introdus alta.
+
+## ÎNCHIDERE AKA (20.10.2026) — DEVICE_PASS per capabilitate, dovezi reale, cu limite precise
+
+Teste reale pe OnePlus Nord 4 (telefon conectat, Accessibility reactivat), fără niciun apel
+OpenAI. Două defecte noi găsite și reparate EXACT prin acest test (nu presupuse). Zero setare a
+telefonului și zero dată personală modificată — garantat MECANIC (toate presele refuzate sau
+reușite doar pe control de navigare pur), nu doar prin observație.
+
+**1. Descoperirea funcțiilor accesibile — DEVICE_PASS.**
+Ceas (`com.oneplus.deskclock`, aplicație fără profil predefinit): 5 funcții corecte găsite
+(„Weltzeituhr", „Stoppuhr", „Timer", meniul de opțiuni, statusul alarmelor), rândurile de alarme
+corect excluse. Setări (`com.android.settings`): inițial **0 candidați** (defect real — vezi mai
+jos), după fix: **11-13 funcții reale** găsite corect (WLAN, Bluetooth, Mod avion, Rețea mobilă,
+Confidențialitate, Baterie etc.).
+
+**2. Identificarea controalelor și traseelor de navigare — DEVICE_PASS.**
+„Weltzeituhr" apăsat → tranziție de ecran REALĂ, verificată prin semnătură structurală diferită
+(`93f99fd1`→`78cf16d6`, nu doar „ceva s-a schimbat"), muchie de navigare înregistrată.
+
+**3. Explorarea sigură, fără modificare de setări/date personale — DEVICE_PASS, garantat mecanic.**
+Pe Setări, FIECARE încercare de explorare a fost refuzată automat (etichetă negăsită în
+observarea proaspătă sau ambiguă la apăsarea reală) — **zero apăsare a ajuns efectiv la vreun
+control din Setări**. Singura apăsare reușită a fost „Weltzeituhr" din Ceas — navigare pură,
+fără nicio modificare de stare. Nicio schimbare de ecran nu a fost considerată, prin ea însăși,
+dovadă de operare corectă — fiecare succes a fost confirmat prin semnătura structurală ÎNAINTE/
+DUPĂ, nu prin simpla observație „altceva se vede acum".
+
+**4. Memorarea funcțiilor și traseelor verificate — DEVICE_PASS** (aceeași dovadă ca punctul 2,
+persistată: `1 funcție confirmată, 3 descoperite neconfirmate, 1 traseu confirmat`).
+
+**5. Recuperarea cunoștințelor după repornirea procesului — DEVICE_PASS.**
+`force-stop` real (PID 26671 → proces nou 29750, auto-revigorare) → cunoștința identică,
+regăsită corect din stocarea de pe disc.
+
+**6. Furnizarea/utilizarea de către LIVE — PARȚIAL, distincție explicită cerută:**
+**Demonstrat local**: exact funcția de PRODUCȚIE (`formatAppKnowledgeSummary`/
+`attachKnownUiControls`, aceeași pe care `aka_query_app`/`observe_screen` o folosesc în
+`runAgentToolLocked`) a fost exercitată direct pe date REALE, persistate pe disc, prin harness-ul
+de debug — nu o simulare separată, codul de producție însuși. **NEDEMONSTRAT**: un LLM real,
+plătit, într-o conversație reală, citind acest text și schimbându-și comportamentul pe baza lui.
+Necesită autorizare de buget explicită, neexecutată această rundă.
+
+**Defecte noi găsite și reparate prin acest test (al doilea și al treilea din serie)**:
+- `FIX_AKA_FULLSCREEN_SCROLLABLE_1`: Setările au TOT ecranul într-un singur container derulabil →
+  regula strictă excludea toate rândurile de meniu, raportând fals „zero funcții". Reparat generic:
+  dacă regula strictă ar lăsa zero candidați deși există controale clickabile, se revine la
+  semnalul simplu (clickabil + etichetat) — niciodată „zero funcții" cât timp există butoane.
+- `FIX_AKA_CAP_LABEL_COMMA_1`: o etichetă reală conținând o virgulă („Weitere Optionen,Neue
+  Benachrichtigungen", direct din contentDescription Android) rupea cheia de capabilitate la
+  serializare (aceeași clasă de bug ca `FIX_AKA_CAP_KEY_COLON_1`, alt delimitator). Reparat la
+  normalizarea comună a etichetei (afectează toate cele trei familii de chei deodată).
+
+**Limită reală, precis diagnosticată (nu „ceva nu merge", ci EXACT ce și de ce)**: ecranul
+principal al Setărilor OnePlus are conținut care se actualizează continuu (procent baterie, stare
+rețea) și/sau poziție de derulare care diferă între lansări — două observări succesive, la
+câteva sute de ms distanță, pot vedea seturi diferite de candidați vizibili. Mecanismul de
+explorare (compară DOUĂ observări independente) e fiabil pe ecrane statice (Calculator, Ceas,
+dovedit de mai multe ori) dar NU încă pe ecrane cu conținut live-actualizat sau pe pagini lungi
+unde ținta e în afara zonei vizibile curente — AKA nu derulează încă pentru a căuta o funcție.
+Aceasta e o limită de SCOP, nu un bug corectat — o extensie viitoare (derulare ca parte a
+explorării) ar trebui sa o adreseze, nu un patch grăbit acum.
+
+**Checkpoint**: cele doua fixuri de mai sus, comise după acest test real (nu înainte).
+
 ## AKA DISCOVER/MAP (20.10.2026) — corecție arhitecturală: descoperire reală, nu memorare de etichete
 
 Mandat: AKA nu e memorarea apăsărilor — e cunoașterea autonomă a aplicațiilor. Ciclu complet:

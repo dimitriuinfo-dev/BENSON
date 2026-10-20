@@ -47,18 +47,36 @@ object AkaKnowledge {
     return false
   }
 
+  private fun isClickableNamed(element: ScreenElement): Boolean =
+    element.clickable && element.label.isNotBlank() && !looksLikePersonalData(element.label)
+
   /** Un control clickabil, cu eticheta, care NU e continut geometric intr-un container derulabil,
    * si a carui eticheta nu arata ca date personale (email/telefon). */
   fun isCandidateFunction(element: ScreenElement, allElements: List<ScreenElement>): Boolean {
-    if (!element.clickable || element.label.isBlank()) return false
-    if (looksLikePersonalData(element.label)) return false
+    if (!isClickableNamed(element)) return false
     val scrollables = allElements.filter { it.scrollable && it !== element }
     return scrollables.none { contains(it.bounds, element.bounds) }
   }
 
+  // FIX_AKA_FULLSCREEN_SCROLLABLE_1 (20.10.2026, CAUZA REALA gasita pe dispozitiv, nu presupusa):
+  // testul real pe Setari (com.android.settings) a intors 0 candidati — ecranul intreg e UN
+  // SINGUR container derulabil ("list ... 0,0,1080,2414", exact dimensiunea ecranului), deci
+  // regula stricta ("in afara oricarui derulabil") excludea FIECARE rand de meniu (WLAN,
+  // Bluetooth, Flugmodus etc.), desi acelea sunt clar FUNCTII, nu continut dinamic — spre
+  // deosebire de Calculator/Ceas, unde lista derulabila e o REGIUNE MARGINITA a ecranului, cu
+  // alte controale (tastatura, tab-uri) in afara ei.
+  // Solutie genericA, fara nicio cunostinta despre Setari: regula stricta ramane prima incercare
+  // (corecta pentru Calculator/Ceas, deja dovedita); DOAR daca ar intoarce ZERO candidati, desi
+  // exista controale clickabile cu eticheta pe ecran, ne retragem la semnalul mai simplu
+  // (clickabil + etichetat) — o aplicatie nu poate avea, cu adevarat, zero functii cat timp are
+  // butoane. Mai bine un candidat in plus, rar (un rand real dintr-o lista), decat raportarea
+  // falsa "nicio functie pe acest ecran".
   /** Toate functiile candidate ale ecranului curent, in ordinea observata — generic, orice aplicatie. */
-  fun discoverCandidateFunctions(elements: List<ScreenElement>): List<ScreenElement> =
-    elements.filter { isCandidateFunction(it, elements) }
+  fun discoverCandidateFunctions(elements: List<ScreenElement>): List<ScreenElement> {
+    val strict = elements.filter { isCandidateFunction(it, elements) }
+    if (strict.isNotEmpty()) return strict
+    return elements.filter { isClickableNamed(it) }
+  }
 
   private fun normalizeLabel(s: String): String =
     java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)

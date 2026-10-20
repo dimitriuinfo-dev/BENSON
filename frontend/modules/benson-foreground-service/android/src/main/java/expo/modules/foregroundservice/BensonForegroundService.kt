@@ -5794,6 +5794,12 @@ class BensonForegroundService : Service() {
           // textul pe care l-ar primi modelul contine cunostinta, fara o rulare platita a agentului.
           val liveWouldSee = StaffRegistryCore.attachKnownUiControls("(digest ecran omis in acest dump)", caps)
           AudioDiag.log(context, "AKA_DEBUG_LIVE_VIEW", "pkg=$pkg text=\"$liveWouldSee\"")
+          // Rezumatul AKA pe toata aplicatia (aka_fn/aka_nav incluse) — EXACT ce ar primi LIVE de la
+          // "aka_query_app", citit DIN STORAGE, dovada directa a ciclului DISCOVER->MAP->STORE.
+          val member = try { StaffRegistry.dossier(context, pkg) } catch (_: Exception) { null }
+          if (member != null) {
+            AudioDiag.log(context, "AKA_DEBUG_APP_SUMMARY", "pkg=$pkg text=\"${StaffRegistryCore.formatAppKnowledgeSummary(member)}\"")
+          }
         }
         // AKA DISCOVER/MAP (20.10.2026) — exercita EXACT drumul de productie al inventarierii
         // automate (OBSERVE_SCREEN din runAgentToolLocked), fara niciun apel OpenAI: observa
