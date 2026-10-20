@@ -61,6 +61,78 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## AKA V1 — CONTINUARE, CICLU COMPLET VALIDAT PE DISPOZITIV REAL (20.10.2026)
+
+Mandat: 8 cerinte punctuale pe raportul af27cf7. Niciun apel OpenAI; testat cu harness-ul
+DEBUG_AKA_PRESS/DEBUG_AKA_DUMP (nou, gratuit, executa EXACT codul de productie
+`pressButtonByLabel`+`recordUiControlVerifiedLocked`, fara agentul platit).
+
+**Corectii, punct cu punct**:
+1. **Atribuire** — `ControlResult` are acum `packageName` (citit DIN digest-ul de ÎNAINTE de
+   apasare, in `tapDigestElement`/`pressButtonByLabel`), nu o re-interogare a prim-planului de
+   DUPA verificare. `recordUiControlVerifiedLocked` foloseste STRICT aceasta valoare.
+2. **Dovada specifica, nu un flag pe toata aplicatia** — `CAP_UI_CONTROL_PREFIX` +
+   `uiControlCapabilityId(label)` produc o cheie PER CONTROL ("ui_control:5" != "ui_control:9"),
+   in ACELASI map `caps` al StaffRegistry (niciun registru nou).
+3. **Verificare relevanta, nu o schimbare oarecare** — `ControlResult.strongEffectEvidence` e
+   adevarat STRICT cand semnalul de FOCALIZARE a confirmat efectul; recordarea AKA se face DOAR
+   atunci, chiar daca `ok=true` (raspunsul catre Master ramane neschimbat — standardul pentru
+   cunostinta persistata e mai inalt).
+
+**CAUZA REALA GASITA PE DISPOZITIV, nu presupusa** (exact disciplina cerintei 4): prima rulare
+reala a aratat `REGISTRY_EVENT kind=verified cap=ui_control:5` (scrierea reusea), dar imediat
+dupa un `StaffRegistry.invalidate()` + reload, `capsOf` intorcea GOL. Cauza: `deserialize` impartea
+fiecare intrare pe `':'` presupunand exact 2 bucati — cheile VECHI ("call", "navigate") nu aveau
+niciodata ':' in ele, dar "ui_control:5:VERIFIED" are TREI bucati. Testul round-trip existent nu
+prindea asta (folosea doar chei simple). **Fara acest test real pe dispozitiv, bug-ul ar fi rămas
+ascuns — exact motivul pentru care cerinta 4 a fost pusă explicit.** Fix: impartire pe ULTIMUL
+':' (`FIX_AKA_CAP_KEY_COLON_1`), test nou de regresie (`serializeDeserializeRoundTripSurvivesACapabilityKeyContainingAColon`).
+
+**Ciclul complet, dovedit REAL, cu logcat**:
+- **Aplicatii descoperite**: `com.oneplus.deskclock` (Ceas OnePlus — FARA capabilitati
+  predefinite in `StaffRegistryCore.KNOWN`, exact cerinta punctului 6) si `com.oneplus.calculator`
+  (deja cunoscut, reutilizat pentru partea de persistenta — tot fara risc: cifre, zero date
+  personale/apeluri/mesaje/plati).
+- **Funcții/controale identificate**: ceas — tab-uri de navigare "Weltzeituhr"/"Stoppuhr"/"Timer"
+  (gasite generic, din arborele Accessibility, fara niciun profil predefinit); calculator — butoane
+  cifra "5"/"9" (viewId `digit_5`/`digit_9`, rezolvate semantic, nu pe index).
+- **Efecte verificate**: apasarea „Stoppuhr" → `focused_changed=null` (tab de navigare, fara camp
+  de text) → `classification=none` dar `strong=false` → **corect NEinregistrat** (dovada ca
+  gardul de la punctul 3 functioneaza, nu doar pe hartie). Apasarea „5" si „9" → `focused_changed=true`
+  (`before_focused="" after_focused="...95"`/`"...959"`) → `strong=true` → inregistrat.
+- **Cunoștințe persistate**: `ui_control:5=VERIFIED`, `ui_control:9=VERIFIED` pentru
+  `com.oneplus.calculator`, confirmate prin `DEBUG_AKA_DUMP` DIRECT din `StaffRegistry.capsOf`
+  (citire DE PE DISC, `invalidate()` fortat inainte).
+- **Persistenta peste restart REAL**: `am force-stop com.benson.butler` (proces 23806 -> mort) →
+  procesul s-a auto-revigorat (mecanism deja existent, neschimbat) ca proces NOU (26069, stare
+  statica goala) → `DEBUG_AKA_DUMP` imediat dupa arata ACELEASI doua chei VERIFIED — persistenta
+  reala, pe disc, peste un restart de proces adevarat, nu simulat.
+- **Cunoștințe reutilizate de LIVE**: `OBSERVE_SCREEN` (in `runAgentToolLocked`) ataseaza acum
+  `StaffRegistryCore.formatKnownUiControls(StaffRegistry.capsOf(...))` la raspunsul observarii —
+  ACEEASI functie, testata direct pe datele reale persistate (`DEBUG_AKA_LIVE_VIEW`), a produs:
+  `"Cunoștințe AKA anterioare, deja verificate pentru acest ecran: 5, 9."` **Onest**: dovedit că
+  funcția de formatare produce text corect din date reale — NU dovedit că un agent LLM, într-o
+  conversație reală plătită, a citit și folosit efectiv acest text; asta cere o rulare autorizată
+  cu buget, neexecutată această rundă.
+- **Teste executate pe dispozitiv**: toate prin `DEBUG_AKA_PRESS`/`DEBUG_AKA_DUMP`/`DEBUG_SCREEN_DIGEST`
+  (zero cost OpenAI) — instalare non-distructivă confirmată de 3 ori (`firstInstallTime=2026-08-23`
+  neschimbat), semnătură verificată identică (`fbbc618d...`) de fiecare dată. Niciun apel, mesaj,
+  plată sau modificare de date personale — doar navigare în Ceas și cifre în Calculator.
+
+**Stare la finalul rundei**: Accessibility Service-ul BENSON a devenit neconectat după a treia
+reinstalare (probabil protecția Android pentru „restricted settings" la actualizarea unui APK
+sideload-uit, deja documentată în `SetupWizard.tsx`) — nu am încercat să o reactivez eu (ar fi
+necesitat o acțiune manuală în Setări, care rămâne a Masterului). Un rest inofensiv în istoricul
+Calculatorului ("787892778÷989÷959") a rămas neșters din acest motiv — numere, fără conținut
+personal, fără risc.
+
+**Ce NU e încă dovedit** (onest, per cerința finală a mandatului): consultarea cunoștințelor AKA
+de către un LLM REAL, într-o conversație plătită — doar plumbing-ul (scriere→citire→formatare)
+e dovedit pe date reale. **AKA V1 NU e declarat finalizat.**
+
+Toate testele: 576/576 (benson-accessibility + benson-foreground-service), zero regresii. `tsc`
+nu a fost nevoie (zero fișiere TS/TSX touched această rundă). Cod rămâne necomis.
+
 ## AKA V1 (20.10.2026) — prioritate absolută, wiring minim, cod construit, NU încă DEVICE_PASS
 
 Mandat: AKA (Application Knowledge Agent) e primul agent operațional; nu se mai dezvoltă nimic
