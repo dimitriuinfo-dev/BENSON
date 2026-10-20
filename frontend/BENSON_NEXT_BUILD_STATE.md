@@ -61,6 +61,59 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## AKA DISCOVER/MAP (20.10.2026) — corecție arhitecturală: descoperire reală, nu memorare de etichete
+
+Mandat: AKA nu e memorarea apăsărilor — e cunoașterea autonomă a aplicațiilor. Ciclu complet:
+DISCOVER → UNDERSTAND → MAP → STORE → SERVE LIVE → EXECUTE → VERIFY → LEARN → UPDATE.
+
+**Implementat, commit `dd1ffda` (checkpoint, nu DEVICE_PASS)**:
+- `AkaKnowledge.kt` (nou, pur) — regulă structurală generică: un control clickabil, cu etichetă,
+  aflat în AFARA unei liste derulabile = funcție candidată a ecranului; un rând dintr-o listă
+  derulabilă = conținut, nu funcție. `ScreenSignature` = amprentă STRUCTURALĂ a unui ecran (doar
+  funcțiile candidate + câmpurile editabile, normalizat), stabilă peste conținut dinamic (ora unui
+  ceas, istoricul unui calculator), diferită între ecrane structural diferite. Testat pe 3
+  aplicații SINTETICE (NotiFast/SkyNow/ConfigPanel) — deliberat fără nicio legătură cu
+  Calculator/Ceas/Calendar/WhatsApp, dovada cerută explicit de generalizare.
+- `BensonAccessibilityService.akaDiscoverScreen()` (observare pură, fără efecte externe) și
+  `akaExploreByPressing()` (explorare ACTIVĂ dar STRICT sigură — refuză mecanic orice control
+  clasificat cu risc de `ButtonSafetyClassifier` sau orice câmp editabil; operarea reală a unei
+  funcții cu risc rămâne pe `press_button`/`tap_element`, sub Confirmation Gate-ul existent,
+  neschimbat). Observă înainte și după, ca tranziția de ecran să fie VERIFICATĂ, nu presupusă.
+- `StaffRegistryCore`: familii noi `aka_fn:<semnătură_ecran>:<etichetă>` și
+  `aka_nav:<sursă>:<etichetă>:<destinație>`, în ACELAȘI map `caps` (niciun registru nou) — separă
+  explicit KNOWN (descoperit, neconfirmat) de VERIFIED (confirmat prin apăsare reală) — un singur
+  buton funcțional NU promovează întreaga aplicație. `formatAppKnowledgeSummary(member)` — LIVE
+  poate întreba ce se cunoaște despre o aplicație ÎNTREAGĂ (nu doar ecranul curent), cu gap-urile
+  spuse onest ("nu a fost explorată").
+- Tool-uri noi, în ACELAȘI `runAgentToolLocked` (nu un orchestrator nou): `aka_explore_function`
+  (mapare sigură de trasee) și `aka_query_app` (interogare pură, fără deschidere). `observe_screen`
+  inventariază AUTOMAT funcțiile candidate ale ecranului curent — fără listă închisă de aplicații.
+- Guvernanță: `demoteAfterUpdate` (deja generic) retrogradează `aka_fn`/`aka_nav` la update de
+  aplicație, exact ca orice altă capabilitate; `markDiscovered` nu retrogradează NICIODATĂ o
+  dovadă mai bună deja existentă.
+
+**Ce poate face efectiv AKA acum**: pe ecranul curent al ORICĂREI aplicații (cunoscute sau nu),
+descoperă automat funcțiile candidate (fără cod specific per aplicație), poate explora SIGUR
+pentru a mapa unde duc, persistă dovada specifică per control/ecran, și poate răspunde la
+„ce cunoști despre aplicația X" înainte de a o deschide.
+
+**Ce rămâne limitat, onest**: (a) „metodele de operare" reprezentate explicit în cunoștința AKA
+sunt doar Accessibility (apăsare/explorare) — Calendar demonstrează deja o metodă alternativă
+(Content Provider, CalendarContract) ca EXECUTOR separat, dar nu e încă modelată ca o „metodă"
+alternativă în structura de cunoștințe AKA însăși; (b) eticheta unei funcții candidate ar putea,
+teoretic, într-un layout neobișnuit (ex. un grid de contacte favorite, neclickabil-în-listă),
+conține date personale — nu există încă un filtru explicit pentru acest caz, dincolo de
+redactarea deja existentă a câmpurilor de parolă; (c) consultarea reală de către un LLM plătit,
+într-o conversație, rămâne nedovedită pe dispozitiv (fără buget, fără telefon conectat la finalul
+rundei).
+
+**Teste**: 604/604 (benson-accessibility + benson-foreground-service), inclusiv 9 noi pe fixturi
+sintetice (generalizare) + teste explicite de persistență/invalidare/recuperare pentru cheile cu
+mai multe ':' (exact tiparul care a cauzat FIX_AKA_CAP_KEY_COLON_1 — verificat, nu presupus).
+`gradlew :app:assembleRelease` BUILD SUCCESSFUL. Zero apel OpenAI, zero reinstalare, zero
+modificare de date personale/apeluri/mesaje/plăți. Telefonul s-a deconectat spre finalul rundei
+(`adb devices` fără rezultat) — dezvoltarea a continuat conform mandatului, fără a depinde de el.
+
 ## AKA P0 — CONTINUARE 2 (20.10.2026): checkpoint comis, contract complet testat, test pregătit
 
 Răspuns la cele 6 cerințe ale rundei următoare raportului 5137b43.
