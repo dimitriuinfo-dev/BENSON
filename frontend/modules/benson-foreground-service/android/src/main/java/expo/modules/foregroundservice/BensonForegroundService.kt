@@ -5027,6 +5027,19 @@ class BensonForegroundService : Service() {
     }
   }
 
+  // FIX_LIVE_CONVERSATION_DEFAULT_OPEN_1 (20.10.2026, defect gasit prin test vocal real pe
+  // telefon) — "Pot căuta lămpi într-un magazin ca Amazon Shopping sau în browser, dacă
+  // dorești." (o ofertă, nu o întrebare cu "?") a închis sesiunea pe calea text-simplu (modelul
+  // n-a folosit instrumentul "say"), fiindcă euristica veche cerea strict semnul "?". Corectat:
+  // implicit sesiunea RĂMÂNE deschisă (acelaşi principiu ca la "say" — "dacă nu eşti sigur că ai
+  // terminat, presupune că NU ai terminat"), închisă doar la o formulă de încheiere explicită,
+  // generică — nicio aplicaţie/domeniu numit (doctrina "fără reguli rigide" ramane neatinsa,
+  // acolo era despre potrivirea aplicaţie-intenţie, nu despre marcaje de încheiere a dialogului;
+  // acelaşi tipar ca UNIVERSAL_ACTION_STOP, deja o listă explicită de cuvinte de control).
+  private val CONVERSATION_CLOSING_PATTERN = Regex(
+    """\b(la revedere|cu drag|numai bine|o zi buna|o seara buna|noapte buna)\b"""
+  )
+
   private fun tryAgent(command: String): Boolean {
     if (!LLM_AGENT) return false
     if (JS_VOICE_HANDOFF) return false
@@ -5145,10 +5158,10 @@ class BensonForegroundService : Service() {
               conversationHistory.add("user", command); conversationHistory.add("assistant", text)
               // FIX_LIVE_CONVERSATION_CONTINUES_1 — modelul e instruit (systemPrompt) să folosească
               // instrumentul `say` cu `expects_reply` de fiecare dată; acest ramus text-simplu e
-              // doar plasa de siguranță pentru răspunsul rar fără niciun tool_call — un semn de
-              // punctuație (nu o regulă despre conținut/aplicații) decide dacă ține sesiunea
-              // deschisă, consecvent cu doctrina "fără reguli rigide pe cuvinte".
-              val expectsReply = text.trimEnd().endsWith("?")
+              // doar plasa de siguranță pentru răspunsul rar fără niciun tool_call. Vezi
+              // FIX_LIVE_CONVERSATION_DEFAULT_OPEN_1: implicit ramane deschisa, inchisa doar la o
+              // formula explicita de incheiere.
+              val expectsReply = !CONVERSATION_CLOSING_PATTERN.containsMatchIn(normalizeForMatch(text))
               mainHandler.post {
                 if (myRun == agentRunId) {
                   if (expectsReply) {
