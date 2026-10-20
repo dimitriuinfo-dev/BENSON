@@ -64,11 +64,33 @@ fun isSafeToRetry(
   return failure == expo.modules.accessibility.InteractionFailureReason.UI_ACTION_REJECTED
 }
 
-// "Solicita AKA reidentificarea functiilor cand interfata s-a modificat" — semnalul GENERIC:
-// esecul UI_NODE_NOT_FOUND pe un control pentru care AKA avea deja o dovada VERIFIED inseamna ca
-// acea dovada tocmai s-a aratat GRESITA, pe loc, prin incercare reala — nu o presupunere.
+// FIX_SURVIVOR_REIDENTIFY_FOREIGN_APP_1 (20.10.2026, cerinta explicita a Masterului dupa auditul
+// rundei anterioare) — CAUZA REALA a unui defect ne-inca-dovedit-pe-dispozitiv dar prins prin
+// citirea codului: versiunea veche lua decizia direct pe `failure` brut, deci un UI_NODE_NOT_FOUND
+// cauzat de o APLICATIE STRAINA preluand ecranul (o notificare, exact cazul deja dovedit real in
+// runda Calculator/S4) ar fi retrogradat GRESIT o cunostinta AKA inca VALABILA — ecranul/aplicatia
+// nu erau cele asteptate, deci dovada "controlul nu exista" nu e despre acel control, ci despre
+// faptul ca nu ne mai uitam la aplicatia corecta. Reparat: functia consuma acum ORIGINEA deja
+// clasificata (care verifica deja `foreignAppForeground` INAINTEA oricarei interpretari a
+// `failure`), nu rederiva propria conditie — o singura sursa de adevar, nu doua reguli care ar
+// putea diverge.
 fun needsReidentification(
-  failure: expo.modules.accessibility.InteractionFailureReason?,
+  origin: SurvivorFaultOrigin,
   hadPriorVerifiedKnowledge: Boolean,
-): Boolean =
-  failure == expo.modules.accessibility.InteractionFailureReason.UI_NODE_NOT_FOUND && hadPriorVerifiedKnowledge
+): Boolean = origin == SurvivorFaultOrigin.AKA && hadPriorVerifiedKnowledge
+
+// FIX_SURVIVOR_UNUSED_IN_RUNTIME_1 (20.10.2026) — `isSafeToRetry` exista, era testat, dar NU era
+// chemat de nicaieri in afara propriului test (verificat prin grep, cerinta explicita a
+// Masterului: "existenta in fisiere si teste unitare nu reprezinta integrare in runtime"). Aceasta
+// functie wrapper e EXACT ce ajunge acum sa fie chemat din `runAgentToolLocked` (BensonForegroundService.kt)
+// la fiecare esec de press_button/tap_element — parametrii fixati reflecta cazul concret de acolo:
+// evaluam DOAR daca o REINCERCARE OARBA, cu ACEEASI eticheta, ar fi sigura CHIAR ACUM (nu daca a
+// reusit deja o data — acela e un gard SEPARAT, cel de duplicare, care foloseste r.ok direct).
+// Punctul 2+3 din ordin: UNKNOWN si VERIFICATION_FAILED NU sunt "sigur de reincercat" DOAR pentru
+// ca lipseste dovada clara de succes — un rezultat incert poate sa fi produs deja efectul.
+fun isAutomaticRetryUnsafe(failure: expo.modules.accessibility.InteractionFailureReason?): Boolean =
+  !isSafeToRetry(
+    failure,
+    alreadySucceededThisMission = false,
+    safety = expo.modules.accessibility.ButtonSafetyClassifier.Verdict.FREE,
+  )

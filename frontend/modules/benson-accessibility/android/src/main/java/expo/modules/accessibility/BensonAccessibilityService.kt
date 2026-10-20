@@ -3588,6 +3588,12 @@ class BensonAccessibilityService : AccessibilityService() {
         // ar fi sigura. Niciun text existent nu se schimba — doar se EXPUNE, in plus, ce era deja
         // clasificat intern.
         val failureReason: InteractionFailureReason? = null,
+        // FIX_SURVIVOR_REIDENTIFY_FOREIGN_APP_1 (20.10.2026) — distinge EXPLICIT cazul "o alta
+        // aplicatie a preluat ecranul" de "controlul chiar nu mai exista in aplicatia asteptata".
+        // Ambele produc azi acelasi `failureReason` (UI_NODE_NOT_FOUND), dar raspunderea e
+        // complet diferita — apelantul (SURVIVOR) nu are voie sa retrogradeze o cunostinta AKA
+        // validă doar pentru ca o notificare a intrerupt observarea.
+        val foreignAppDetected: Boolean = false,
     )
 
     // FAZA 3 / SCREEN OBSERVATION — singurul punct public prin care ecranul activ devine un
@@ -3854,6 +3860,7 @@ class BensonAccessibilityService : AccessibilityService() {
                     false,
                     "Altă aplicație a preluat ecranul între timp (probabil o notificare). Deschide din nou aplicația țintă înainte să continui.",
                     failureReason = InteractionFailureReason.UI_NODE_NOT_FOUND,
+                    foreignAppDetected = true,
                 )
             }
             Log.i("BENSON_AUDIO", "AGENT_TAP index=$index ok=false reason=stale_index seen=\"${seenEl.label.take(30)}\" now=\"${el.label.take(30)}\" classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
@@ -3978,6 +3985,7 @@ class BensonAccessibilityService : AccessibilityService() {
                 false,
                 "Altă aplicație a preluat ecranul între timp (probabil o notificare). Deschide din nou aplicația țintă înainte să continui.",
                 failureReason = InteractionFailureReason.UI_NODE_NOT_FOUND,
+                foreignAppDetected = true,
             )
         }
         val refs = mutableListOf<AccessibilityNodeInfo>()
@@ -4007,7 +4015,14 @@ class BensonAccessibilityService : AccessibilityService() {
                 " Butoane vizibile acum pe ecran: ${visibleLabels.joinToString(", ")}. Dacă unul dintre " +
                     "acestea înseamnă același lucru (poate în altă limbă sau alt simbol), cheamă din nou " +
                     "«press_button» cu eticheta EXACTĂ de acolo."
-            return@withContext ControlResult(false, "UI_NODE_NOT_FOUND: nu găsesc niciun buton \"${label.take(40)}\" pe ecranul curent.$hint", failureReason = InteractionFailureReason.UI_NODE_NOT_FOUND)
+            // FIX_SURVIVOR_MISSING_PACKAGENAME_1 (20.10.2026, CAUZA REALA gasita pe dispozitiv
+            // real, nu presupusa): aceasta ramura nu seta `packageName`, deci
+            // recordSurvivorReidentificationLocked (BensonForegroundService.kt) se intorcea
+            // TACUT la garda "packageName.isBlank()" — niciodata nu retrograda nimic, in NICIUN
+            // caz, nici macar cel genuin (acelasi pachet, control real negasit). Dovedit: o
+            // apasare pe "5" pe ecranul Convertor (fara tastatura) nu a produs REGISTRY_EVENT
+            // kind=needs_reverify, desi ui_control:5 era VERIFIED.
+            return@withContext ControlResult(false, "UI_NODE_NOT_FOUND: nu găsesc niciun buton \"${label.take(40)}\" pe ecranul curent.$hint", packageName = pkg, failureReason = InteractionFailureReason.UI_NODE_NOT_FOUND)
         }
         if (candidates.size > 1) {
             // Punctul 3 din ordin: NU se ghiceste intre candidati ambigui.
@@ -4025,20 +4040,20 @@ class BensonAccessibilityService : AccessibilityService() {
         if (ButtonSafetyClassifier.classify(targetLabel, target.desc, pkg) == ButtonSafetyClassifier.Verdict.REFUSE) {
             Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=refused classification=${InteractionFailureReason.UI_ACTION_REJECTED}")
             for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
-            return@withContext ControlResult(false, "Nu apăs acel buton: ține de plată sau cumpărare.", failureReason = InteractionFailureReason.UI_ACTION_REJECTED)
+            return@withContext ControlResult(false, "Nu apăs acel buton: ține de plată sau cumpărare.", packageName = pkg, failureReason = InteractionFailureReason.UI_ACTION_REJECTED)
         }
         val node = target.ref as? AccessibilityNodeInfo
         val beforeFocused = beforeDigest.elements.filter { it.focused }.joinToString("|") { it.label }
         val beforeAll = beforeDigest.elements.joinToString("|") { it.label }
         val result = if (node == null) {
             Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=node_not_accessible classification=${InteractionFailureReason.UI_NODE_NOT_FOUND}")
-            ControlResult(false, "Butonul \"${label.take(40)}\" nu mai e accesibil.", failureReason = InteractionFailureReason.UI_NODE_NOT_FOUND)
+            ControlResult(false, "Butonul \"${label.take(40)}\" nu mai e accesibil.", packageName = pkg, failureReason = InteractionFailureReason.UI_NODE_NOT_FOUND)
         } else {
             val clicked = clickNodeOrAncestor(node)
             Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" clicked=$clicked viewId=${target.viewId}")
             if (!clicked) {
                 Log.i("BENSON_AUDIO", "AGENT_PRESS label=\"${label.take(40)}\" ok=false reason=click_not_accepted classification=${InteractionFailureReason.UI_ACTION_REJECTED}")
-                ControlResult(false, "N-am putut apăsa \"${label.take(40)}\".", failureReason = InteractionFailureReason.UI_ACTION_REJECTED)
+                ControlResult(false, "N-am putut apăsa \"${label.take(40)}\".", packageName = pkg, failureReason = InteractionFailureReason.UI_ACTION_REJECTED)
             } else {
                 delay(1800)
                 // Acelasi clasificator SURVIVOR ca tapDigestElement — focalizare prioritara,

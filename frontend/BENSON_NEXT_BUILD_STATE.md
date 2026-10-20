@@ -61,6 +61,67 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## STAGE 3 — SURVIVOR, ÎNCHIDERE ȘI VALIDARE (20.10.2026) — DEVICE_PASS pe mecanismele centrale
+
+Răspuns la 6 corecții cerute explicit, ÎNAINTE de orice test pe telefon — fiecare a prins ceva real:
+
+**1. „classifyFaultOrigin/isSafeToRetry nu erau folosite in motor" — confirmat, corectat.**
+Verificat prin grep: ZERO apeluri in afara propriilor teste. Acum cablate real:
+`classifyFaultOrigin` decide ce se întâmplă cu o cunoștință AKA la eșec; `isSafeToRetry` (prin
+wrapper-ul `isAutomaticRetryUnsafe`) populează un câmp NOU, `retry_unsafe`, în JSON-ul pe care
+`runAgentToolLocked` îl întoarce — citit MECANIC de bucla agentului, nu doar oferit ca indiciu
+modelului.
+
+**2+3. Rezultat incert ≠ sigur de reîncercat.** `isAutomaticRetryUnsafe` întoarce `true` pentru
+VERIFICATION_FAILED, UNKNOWN și UI_NODE_NOT_FOUND — DOAR UI_ACTION_REJECTED (nimic nu s-a
+întâmplat încă) rămâne sigur. Gard nou în bucla agentului: o acțiune marcată `retry_unsafe` e
+adăugată la `executedActions` EXACT ca un succes — o repetare identică e refuzată, indiferent
+dacă prima încercare a „reușit" sau doar „nu s-a putut exclude efectul".
+
+**4. „Nu retrograda pentru o observație expirată" — bug real găsit prin auditul cerut, înainte
+de orice test.** Versiunea anterioară decidea retrogradarea direct din `failure`, ignorând daca
+aplicația/ecranul erau cele așteptate. Reparat: `needsReidentification` consumă acum ORIGINEA deja
+clasificată (`classifyFaultOrigin`, care verifică `foreignAppForeground` ÎNAINTEA oricărei
+interpretări) — o aplicație străină în prim-plan produce EXTERNAL_APP, niciodată AKA, deci nicio
+cunoștință VERIFIED nu se retrogradeaza pentru o întrerupere externă.
+
+**5. „Distinge progres raportat de reluare efectivă" — corectat onest.** Comentariile care
+sugerau „recuperare" au fost corectate explicit: `missionProgress` e STRICT raportare — Masterul
+află ce s-a realizat, dar misiunea NU se reia singură; continuarea cere o comandă nouă.
+
+**6. Testat automat, inclusiv eșecuri simulate și rezultate incerte** — 634/634 (16 teste noi:
+origine, reîncercare, reidentificare, inclusiv scenariul exact „aplicație străină + cunoștință
+VERIFICATĂ" și „retry_unsafe pentru VERIFICATION_FAILED/UNKNOWN/NOT_FOUND").
+
+**SESIUNE DE VALIDARE PE DISPOZITIV REAL (OnePlus Nord 4), o singură instalare planificată +
+UNA suplimentară, justificată de un bug real găsit chiar prin acest test** (nu pentru ajustări
+minore — pentru o reparație funcțională dovedită necesară pe loc):
+
+Instrument nou, gratuit: `DEBUG_SURVIVOR_PRESS` — cheamă `runAgentToolLocked` DIRECT (aceeași
+funcție privată pe care bucla plătită a agentului o folosește), deci traversează EFECTIV logica
+nouă, nu doar executorul de nivel jos. Zero apel OpenAI.
+
+- **TEST A (aplicație străină nu retrogradează)**: Calculator → Setări (fără observare explicită
+  a Setărilor, ca `lastServedDigest` să rămână Calculator) → `press_button("5")` →
+  `foreign_app_foreground` detectat corect, `retry_unsafe:true`, **NICIUN** `REGISTRY_EVENT
+  kind=needs_reverify` — `ui_control:5` a rămas VERIFIED. **DEVICE_PASS.**
+- **TEST B (reidentificare genuină)** — PRIMA rulare a eșuat: niciun `needs_reverify` nici aici,
+  deși contextul era corect (același pachet, control genuin absent pe ecranul Convertor). Cauza
+  reală, găsită imediat: ramura `UI_NODE_NOT_FOUND` din `pressButtonByLabel` nu seta niciodată
+  `packageName` pe `ControlResult` — garda `packageName.isBlank()` ieșea tăcut, de fiecare dată,
+  indiferent de origine. Reparat (`FIX_SURVIVOR_MISSING_PACKAGENAME_1`, + aceleași trei ramuri
+  similare reparate pentru consecvență), reinstalat, RETESTAT: `REGISTRY_EVENT
+  kind=needs_reverify cap=ui_control:5` a apărut corect, `ui_control:5` → REVERIFY, `ui_control:9`
+  și `ui_control:umrechner` (alte controale) rămase NEATINSE. **DEVICE_PASS.**
+
+**Onest, ce rămâne neverificat pe dispozitiv**: blocarea efectivă, de către BUCLA agentului, a
+unei a DOUA cereri identice după un `retry_unsafe` — semnalul însuși e dovedit corect (JSON-ul
+real conține `retry_unsafe:true` la momentul potrivit), dar exercitarea buclei complete cere o
+rulare reală a agentului (apel OpenAI), neautorizată această rundă. Mecanismul de bază
+(`ExecutionIdempotencyKey`/`isDuplicateExecution`) era deja testat dinainte (D0).
+
+**Checkpoint**: comis după validare, tag DEVICE_PASS pe capacitățile confirmate mai sus.
+
 ## STAGE 3 — SURVIVOR (20.10.2026) — construit peste infrastructura existentă, checkpoint NU DEVICE_PASS
 
 **Audit întâi, cerut explicit** — ce exista deja, nu s-a dublat nimic:

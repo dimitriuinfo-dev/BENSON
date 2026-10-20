@@ -340,6 +340,15 @@ object BensonAgentTools {
   /** Rezultatul unui instrument, in forma pe care o primeste agentul inapoi. */
   // `cap` ridicat doar pentru explain_command: registrul de comenzi nu incape in 900 de
   // caractere, iar trunchierea lui ar face BENSON sa nu-si mai cunoasca propriile comenzi.
-  fun toolResult(ok: Boolean, detail: String, cap: Int = 900): String =
-    """{"ok":$ok,"detail":${org.json.JSONObject.quote(detail.take(cap))}}"""
+  // SURVIVOR (20.10.2026, etapa 3, punctele 2+3 ale ordinului) — `retryUnsafe=true` marcheaza
+  // ca un rezultat INCERT sau deja-posibil-efectuat NU e sigur de reincercat orbeste (vezi
+  // SurvivorDiagnosis.isAutomaticRetryUnsafe) — campul ajunge si la model (text, context), si la
+  // bucla agentului (JSON, citit direct ca sa blocheze mecanic o repetare identica — nu doar un
+  // indiciu pe care modelul ar putea sa-l ignore).
+  fun toolResult(ok: Boolean, detail: String, cap: Int = 900, retryUnsafe: Boolean = false): String =
+    if (retryUnsafe) {
+      """{"ok":$ok,"detail":${org.json.JSONObject.quote(detail.take(cap))},"retry_unsafe":true}"""
+    } else {
+      """{"ok":$ok,"detail":${org.json.JSONObject.quote(detail.take(cap))}}"""
+    }
 }

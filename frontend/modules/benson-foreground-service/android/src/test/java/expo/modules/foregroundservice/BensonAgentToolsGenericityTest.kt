@@ -67,4 +67,19 @@ class BensonAgentToolsGenericityTest {
     // determinista existenta — proba ca testul de mai sus nu e un fals negativ universal.
     assertTrue(WaCallVideoMatcher.classify("video cu Hannah") != null)
   }
+
+  // --- toolResult retry_unsafe — SURVIVOR etapa 3, punctul 6: "verifica prin teste automate,
+  // inclusiv rezultate incerte" — campul pe care bucla agentului il citeste MECANIC (nu doar ca
+  // indiciu pentru model) ca sa blocheze o repetare a unei actiuni cu rezultat incert. ---
+
+  @Test fun toolResultOmitsRetryUnsafeFieldByDefault() {
+    val json = BensonAgentTools.toolResult(true, "ok")
+    assertFalse(json.contains("retry_unsafe"))
+  }
+
+  @Test fun toolResultIncludesRetryUnsafeWhenMarked() {
+    val json = BensonAgentTools.toolResult(false, "rezultat incert", retryUnsafe = true)
+    assertTrue(json.contains("\"retry_unsafe\":true"))
+    assertTrue(json.contains("\"ok\":false"))
+  }
 }

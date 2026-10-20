@@ -73,20 +73,54 @@ class SurvivorDiagnosisTest {
     assertFalse(isSafeToRetry(InteractionFailureReason.UNKNOWN, false, ButtonSafetyClassifier.Verdict.FREE))
   }
 
-  // --- needsReidentification ---
+  // --- needsReidentification — FIX_SURVIVOR_REIDENTIFY_FOREIGN_APP_1: consuma ORIGINEA deja
+  // clasificata (nu failure-ul brut), ca sa respecte prioritatea aplicatie-straina/permisiune
+  // fara sa dubleze acea logica. ---
 
-  @Test fun elementNotFoundWithPriorVerifiedKnowledgeSignalsReidentification() {
-    assertTrue(needsReidentification(InteractionFailureReason.UI_NODE_NOT_FOUND, hadPriorVerifiedKnowledge = true))
+  @Test fun akaOriginWithPriorVerifiedKnowledgeSignalsReidentification() {
+    assertTrue(needsReidentification(SurvivorFaultOrigin.AKA, hadPriorVerifiedKnowledge = true))
   }
 
-  @Test fun elementNotFoundWithoutPriorVerifiedKnowledgeIsJustAnOrdinaryDiscoveryMiss() {
+  @Test fun akaOriginWithoutPriorVerifiedKnowledgeIsJustAnOrdinaryDiscoveryMiss() {
     // Nimic de reidentificat - nu exista nicio dovada veche care sa fi devenit falsa.
-    assertFalse(needsReidentification(InteractionFailureReason.UI_NODE_NOT_FOUND, hadPriorVerifiedKnowledge = false))
+    assertFalse(needsReidentification(SurvivorFaultOrigin.AKA, hadPriorVerifiedKnowledge = false))
   }
 
-  @Test fun otherFailureReasonsNeverTriggerReidentificationEvenWithPriorKnowledge() {
-    assertFalse(needsReidentification(InteractionFailureReason.VERIFICATION_FAILED, hadPriorVerifiedKnowledge = true))
-    assertFalse(needsReidentification(InteractionFailureReason.UI_ACTION_REJECTED, hadPriorVerifiedKnowledge = true))
-    assertFalse(needsReidentification(null, hadPriorVerifiedKnowledge = true))
+  @Test fun otherOriginsNeverTriggerReidentificationEvenWithPriorKnowledge() {
+    assertFalse(needsReidentification(SurvivorFaultOrigin.EXECUTOR, hadPriorVerifiedKnowledge = true))
+    assertFalse(needsReidentification(SurvivorFaultOrigin.PERMISSION, hadPriorVerifiedKnowledge = true))
+    assertFalse(needsReidentification(SurvivorFaultOrigin.UNKNOWN, hadPriorVerifiedKnowledge = true))
+  }
+
+  // FIX_SURVIVOR_REIDENTIFY_FOREIGN_APP_1 — cerinta explicita a Masterului, testata direct: un
+  // UI_NODE_NOT_FOUND cauzat de o aplicatie STRAINA in prim-plan NU are voie sa retrogradeze o
+  // cunostinta AKA VERIFIED — proba ca `classifyFaultOrigin` (acum chemat in motor, nu doar
+  // testat izolat) schimba efectiv decizia finala, nu doar exista in paralel cu ea.
+  @Test fun foreignAppForegroundNeverTriggersReidentificationEvenWithUiNodeNotFoundAndPriorKnowledge() {
+    val origin = classifyFaultOrigin(InteractionFailureReason.UI_NODE_NOT_FOUND, accessibilityAvailable = true, foreignAppForeground = true)
+    assertEquals(SurvivorFaultOrigin.EXTERNAL_APP, origin)
+    assertFalse(needsReidentification(origin, hadPriorVerifiedKnowledge = true))
+  }
+
+  @Test fun genuineUiNodeNotFoundOnTheRightAppStillTriggersReidentification() {
+    // Control pozitiv: fara aplicatie straina, acelasi esec TREBUIE sa declanseze reidentificarea.
+    val origin = classifyFaultOrigin(InteractionFailureReason.UI_NODE_NOT_FOUND, accessibilityAvailable = true, foreignAppForeground = false)
+    assertEquals(SurvivorFaultOrigin.AKA, origin)
+    assertTrue(needsReidentification(origin, hadPriorVerifiedKnowledge = true))
+  }
+
+  // --- isAutomaticRetryUnsafe — FIX_SURVIVOR_UNUSED_IN_RUNTIME_1: wrapper-ul EFECTIV chemat din
+  // runAgentToolLocked la fiecare esec de press_button/tap_element (nu doar testat izolat). ---
+
+  @Test fun rejectedActionIsSafeToAutomaticallyRetryNothingHappenedYet() {
+    assertFalse(isAutomaticRetryUnsafe(InteractionFailureReason.UI_ACTION_REJECTED))
+  }
+
+  @Test fun uncertainOrPossiblyAppliedOutcomesAreNeverSafeToAutomaticallyRetry() {
+    // Punctele 2+3 ale ordinului: un rezultat INCERT poate sa fi produs deja efectul.
+    assertTrue(isAutomaticRetryUnsafe(InteractionFailureReason.VERIFICATION_FAILED))
+    assertTrue(isAutomaticRetryUnsafe(InteractionFailureReason.UNKNOWN))
+    assertTrue(isAutomaticRetryUnsafe(InteractionFailureReason.UI_NODE_NOT_FOUND))
+    assertTrue(isAutomaticRetryUnsafe(null))
   }
 }

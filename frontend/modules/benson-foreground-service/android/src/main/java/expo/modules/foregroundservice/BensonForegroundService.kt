@@ -4594,12 +4594,26 @@ class BensonForegroundService : Service() {
   // retrogradeaza la REVERIFY (StaffRegistryCore.downgradeToReverify), nu ramane sa afirme fals
   // catre o misiune viitoare ca acel control "sigur exista". Reutilizeaza SurvivorDiagnosis.kt
   // (pur, testat) pentru decizie — aici doar citirea/scrierea Context-dependenta.
-  private fun recordSurvivorReidentificationLocked(packageName: String, label: String, failure: expo.modules.accessibility.InteractionFailureReason?) {
+  // FIX_SURVIVOR_REIDENTIFY_FOREIGN_APP_1 (20.10.2026) — foloseste `classifyFaultOrigin` (acum
+  // efectiv chemat in motor, nu doar testat izolat) ca SINGURA sursa a deciziei "a cui e vina" —
+  // o aplicatie straina in prim-plan produce origine EXTERNAL_APP, NICIODATA AKA, indiferent de
+  // `failureReason` brut, deci o cunostinta VERIFIED valida nu se retrogradeaza pentru o
+  // observare pur si simplu INTRERUPTA de o notificare. Doar PRESS_BUTTON apeleaza aceasta functie
+  // (nu TAP_ELEMENT) — un index "stale" e o staleness AȘTEPTATĂ intre o observare si o apasare, nu
+  // dovada ca eticheta insasi nu mai exista nicaieri; `press_button` cauta in TOT arborele curent,
+  // deci UI_NODE_NOT_FOUND de acolo e dovada mult mai tare.
+  private fun recordSurvivorReidentificationLocked(
+    packageName: String,
+    label: String,
+    failure: expo.modules.accessibility.InteractionFailureReason?,
+    foreignAppDetected: Boolean,
+  ) {
     if (packageName.isBlank() || label.isBlank()) return
     try {
       val capId = StaffRegistryCore.uiControlCapabilityId(label)
       val hadVerified = StaffRegistry.capsOf(applicationContext, packageName)[capId] == CapLevel.VERIFIED
-      if (!needsReidentification(failure, hadVerified)) return
+      val origin = classifyFaultOrigin(failure, accessibilityAvailable = true, foreignAppForeground = foreignAppDetected)
+      if (!needsReidentification(origin, hadVerified)) return
       StaffRegistry.markNeedsReverification(applicationContext, packageName, capId)
     } catch (_: Exception) {
     }
@@ -4701,8 +4715,10 @@ class BensonForegroundService : Service() {
         if (idx < 0) return BensonAgentTools.toolResult(false, "lipsește indexul elementului") to false
         val r = kotlinx.coroutines.runBlocking { svc.tapDigestElement(idx, label) }
         if (r.ok) recordUiControlVerifiedLocked(r.packageName, label, r.strongEffectEvidence)
-        else recordSurvivorReidentificationLocked(r.packageName, label, r.failureReason)
-        BensonAgentTools.toolResult(r.ok, r.message) to false
+        // Punctul 4 (ordinul 20.10.2026): NU se cheama recordSurvivorReidentificationLocked aici —
+        // un index "stale" e staleness AȘTEPTATĂ (ecranul s-a schimbat intre observare si apasare),
+        // nu dovada ca eticheta insasi a disparut — vezi comentariul de la functia respectiva.
+        BensonAgentTools.toolResult(r.ok, r.message, retryUnsafe = !r.ok && isAutomaticRetryUnsafe(r.failureReason)) to false
       }
       // SEMANTIC UI RESOLVER (19.10.2026, raspuns la DEVICE_FAIL Calculator repetat de 4 ori) —
       // nicio logica noua aici: doar cablarea apelului catre pressButtonByLabel (benson-accessibility,
@@ -4714,8 +4730,8 @@ class BensonForegroundService : Service() {
         if (svc == null) return BensonAgentTools.toolResult(false, "accesibilitatea nu e disponibilă") to false
         val r = kotlinx.coroutines.runBlocking { svc.pressButtonByLabel(label) }
         if (r.ok) recordUiControlVerifiedLocked(r.packageName, label, r.strongEffectEvidence)
-        else recordSurvivorReidentificationLocked(r.packageName, label, r.failureReason)
-        BensonAgentTools.toolResult(r.ok, r.message) to false
+        else recordSurvivorReidentificationLocked(r.packageName, label, r.failureReason, r.foreignAppDetected)
+        BensonAgentTools.toolResult(r.ok, r.message, retryUnsafe = !r.ok && isAutomaticRetryUnsafe(r.failureReason)) to false
       }
       // CALENDAR AGENT (19.10.2026) — API oficial Android (CalendarContract), nu Accessibility;
       // toata decizia (conflict/duplicat/interval liber) traieste in CalendarEventMath.kt, pura.
@@ -4941,11 +4957,15 @@ class BensonForegroundService : Service() {
       // poate crede gresit ca prima incercare a esuat (ex. un timeout de retea) si sa ceara din
       // nou exact acelasi apel, ceea ce ar duplica un efect real.
       val executedActions = mutableSetOf<ExecutionIdempotencyKey>()
-      // SURVIVOR (20.10.2026, etapa 3) — "recupera misiunile intrerupte atunci cand e posibil":
-      // un traseu SCURT, STRICT al ACESTEI rulari (nu istoricul global ActionHistory, partajat
-      // intre comenzi diferite — amestecarea lor ar insemna sa afirmam ca am "realizat" ceva dintr-o
+      // FIX_SURVIVOR_PROGRESS_NOT_RECOVERY_1 (20.10.2026, corectie explicita a Masterului) —
+      // ATENTIE la ce NU face asta: e strict RAPORTARE de progres, NU recuperare efectiva a
+      // misiunii. Nimic de aici re-ia automat pasii ramasi — rularea tot se opreste, iar
+      // continuarea cere o comanda NOUA, explicita, a Masterului. `missionProgress` e un traseu
+      // SCURT, STRICT al ACESTEI rulari (nu istoricul global ActionHistory, partajat intre comenzi
+      // diferite — amestecarea lor ar insemna sa afirmam fals ca am "realizat" ceva dintr-o
       // misiune anterioara, fara legatura). Cand rularea se opreste la MAX_STEPS fara sa termine,
-      // mesajul onest de esec spune CE s-a reusit pana atunci, nu doar "n-am reusit".
+      // mesajul onest de esec spune CE s-a reusit pana atunci — ca Masterul sa poata CONTINUA el,
+      // cu o comanda noua, informat — nu ca sistemul ar relua ceva singur.
       val missionProgress = mutableListOf<String>()
       try {
         while (!done && steps < BensonAgentTools.MAX_STEPS) {
@@ -5071,7 +5091,7 @@ class BensonForegroundService : Service() {
               AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=duplicate_action step=$callIndex name=$fname")
               messages.put(JSONObject().apply {
                 put("role", "tool"); put("tool_call_id", call.optString("id"))
-                put("content", BensonAgentTools.toolResult(false, "Ai mai făcut exact această acțiune o dată, cu succes, în această sarcină — nu o repet, ca să nu dublez efectul. Dacă nu a mers, spune-mi clar ce lipsește."))
+                put("content", BensonAgentTools.toolResult(false, "Ai mai cerut exact această acțiune o dată în această sarcină, iar efectul ei nu e sigur de exclus — nu o repet, ca să nu dublez un efect real. Dacă ai nevoie de altceva, spune-mi clar ce lipsește sau ce s-a schimbat."))
               })
               callIndex++
               continue
@@ -5089,12 +5109,19 @@ class BensonForegroundService : Service() {
             if (fname == BensonAgentTools.OBSERVE_SCREEN) {
               lastObservedScreenText = runCatching { JSONObject(result).optString("detail").takeIf { it.isNotBlank() } }.getOrNull()
             }
-            if (idempotencyKey != null && toolOk) {
+            // SURVIVOR, punctele 2+3 (ordinul 20.10.2026) — "nu permite repetarea automata...
+            // doar pentru ca lipseste confirmarea succesului": un rezultat INCERT (retry_unsafe,
+            // citit mecanic din JSON, nu doar oferit ca indiciu modelului) se blocheaza de
+            // repetare EXACT ca un succes — poate sa fi produs deja efectul.
+            val retryUnsafe = runCatching { JSONObject(result).optBoolean("retry_unsafe", false) }.getOrDefault(false)
+            if (idempotencyKey != null && (toolOk || retryUnsafe)) {
               executedActions.add(idempotencyKey)
-              // Doar eticheta/numele (generic, orice instrument) — nu textul complet al
-              // raspunsului, ca sa nu dubleze o afirmatie deja verificata separat.
-              val subject = fargs.optString("label").ifBlank { fargs.optString("name") }.ifBlank { fargs.optString("title") }
-              missionProgress.add(if (subject.isBlank()) fname else "$fname($subject)")
+              if (toolOk) {
+                // Doar eticheta/numele (generic, orice instrument) — nu textul complet al
+                // raspunsului, ca sa nu dubleze o afirmatie deja verificata separat.
+                val subject = fargs.optString("label").ifBlank { fargs.optString("name") }.ifBlank { fargs.optString("title") }
+                missionProgress.add(if (subject.isBlank()) fname else "$fname($subject)")
+              }
             }
             gateState = advanceVerificationGate(gateState, callIndex, agentStepKindFor(fname))
             callIndex++
@@ -5115,9 +5142,10 @@ class BensonForegroundService : Service() {
             AudioDiag.log(this, "AGENT_SPEECH_SUPPRESSED", "run=$myRun reason=cancelled")
             return@post
           }
-          // SURVIVOR (20.10.2026, etapa 3) — "recupera misiunile intrerupte": un esec onest nu
-          // trebuie sa fie si un esec OARB — daca s-a realizat ceva verificat inainte de blocaj,
-          // Masterul afla CE, ca sa poata continua de acolo, nu de la zero.
+          // SURVIVOR (20.10.2026, etapa 3) — RAPORTARE de progres, NU recuperare automata (vezi
+          // comentariul de la `missionProgress`): un esec onest nu trebuie sa fie si un esec
+          // OARB — daca s-a realizat ceva verificat inainte de blocaj, Masterul afla CE, dar
+          // misiunea NU se reia singura — Masterul decide explicit urmatorul pas.
           val msg = if (missionProgress.isEmpty()) {
             "Nu am reușit să duc asta la capăt, Master. Spuneți-mi altfel, vă rog."
           } else {
@@ -5864,6 +5892,25 @@ class BensonForegroundService : Service() {
             AudioDiag.log(context, "AKA_DEBUG_APP_SUMMARY", "pkg=$pkg text=\"${StaffRegistryCore.formatAppKnowledgeSummary(member)}\"")
           }
         }
+        // SURVIVOR etapa 3 (20.10.2026) — exercita EXACT drumul de productie, nu doar executorul
+        // de nivel jos: cheama `runAgentToolLocked` direct (aceeasi functie PRIVATA pe care
+        // bucla platita a agentului o cheama), deci traverseaza SI logica noua (clasificarea
+        // originii, decizia de reincercare, campul retry_unsafe, retrogradarea AKA) — fara niciun
+        // apel OpenAI (JSON-ul brut al cererii trece direct, fara retea). Revert: sterge aceasta
+        // ramura + addAction DEBUG_SURVIVOR_PRESS.
+        "com.benson.butler.DEBUG_SURVIVOR_PRESS" -> {
+          if (!isDebugInjectArmed(prefs)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val label = intent.getStringExtra("label")
+          if (label.isNullOrBlank()) return
+          Thread({
+            val args = JSONObject().put("label", label)
+            val (result, _) = runAgentToolLocked(BensonAgentTools.PRESS_BUTTON, args, "debug_survivor")
+            AudioDiag.log(context, "SURVIVOR_DEBUG_PRESS", "label=\"${label.take(40)}\" result=$result")
+          }, "benson-survivor-debug-press").start()
+        }
         // AKA DISCOVER/MAP (20.10.2026) — exercita EXACT drumul de productie al inventarierii
         // automate (OBSERVE_SCREEN din runAgentToolLocked), fara niciun apel OpenAI: observa
         // ecranul, descopera functiile candidate, le inregistreaza ca KNOWN daca sunt noi. Revert:
@@ -6090,6 +6137,7 @@ class BensonForegroundService : Service() {
         addAction("com.benson.butler.DEBUG_SCREEN_DIGEST") // FAZA 3 / SCREEN OBSERVATION
         addAction("com.benson.butler.DEBUG_AKA_PRESS") // AKA V1, 20.10.2026
         addAction("com.benson.butler.DEBUG_AKA_DUMP") // AKA V1, 20.10.2026
+        addAction("com.benson.butler.DEBUG_SURVIVOR_PRESS") // SURVIVOR etapa 3, 20.10.2026
         addAction("com.benson.butler.DEBUG_AKA_DISCOVER") // AKA DISCOVER/MAP, 20.10.2026
         addAction("com.benson.butler.DEBUG_AKA_EXPLORE") // AKA DISCOVER/MAP, 20.10.2026
       }
