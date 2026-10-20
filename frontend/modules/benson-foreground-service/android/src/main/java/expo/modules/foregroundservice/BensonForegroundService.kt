@@ -5671,7 +5671,14 @@ class BensonForegroundService : Service() {
   // vs ack is still decided by the ~700ms-equivalent empty-transcript check in
   // handleNativeCommandFlow) and for the post-response FOLLOW_UP_WINDOW_MS re-listen (same call
   // site, same rule — this function IS that re-listen).
-  private val CMD_START_TIMEOUT_MS = 5_000L
+  // FIX_BUBBLE_8S_RULE_1 (20.10.2026, "REGULA DEFINITIVĂ A BULEI") — "bula rămâne deschisă 8
+  // secunde după ultima replică; cronometrul începe după TTS, nu în timpul vorbirii; orice
+  // intervenție vocală îl anulează": acesta e exact CMD_START_TIMEOUT_MS — fereastra în care
+  // CaptureEngine așteaptă, cu mic-ul deja deschis (după ack/TTS), ca utilizatorul să ÎNCEAPĂ să
+  // vorbească. Odată ce vorbirea chiar începe, acest timeout nu mai contează deloc — capturarea
+  // trece pe VAD (CMD_VAD_SILENCE_MS/CMD_MAX_MS, neatinse), deci "o captură STT activă" nu e
+  // niciodată întreruptă de regula asta. Revert: 5_000L (valoarea dinaintea ordinului).
+  private val CMD_START_TIMEOUT_MS = 8_000L
   private val CMD_MAX_MS = 10_000L
   private val CMD_VAD_SILENCE_MS = 800L
 
@@ -6233,6 +6240,58 @@ class BensonForegroundService : Service() {
         // automate (OBSERVE_SCREEN din runAgentToolLocked), fara niciun apel OpenAI: observa
         // ecranul, descopera functiile candidate, le inregistreaza ca KNOWN daca sunt noi. Revert:
         // sterge aceasta ramura + addAction DEBUG_AKA_DISCOVER.
+        // AUDIT SHOPPING (20.10.2026, "arată ce a fost executat prin mecanismele existente, nu
+        // printr-un script care ocolește LIVE/AKA/EXECUTOR") — generalizarea lui
+        // DEBUG_SURVIVOR_PRESS la ORICE instrument al agentului: cheamă EXACT aceeași funcție
+        // PRIVATĂ (runAgentToolLocked) pe care bucla plătită a agentului o cheamă, cu argumentele
+        // date ca JSON brut — fără niciun apel OpenAI, fără cod de execuție nou. Acoperă
+        // open_app/search_in_app/observe_screen/tap_element/press_button deopotrivă, pentru
+        // explorare și testare manuală prin ADB. Revert: șterge această ramură + addAction.
+        "com.benson.butler.DEBUG_AGENT_TOOL" -> {
+          if (!isDebugInjectArmed(prefs)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val toolName = intent.getStringExtra("name")
+          val argsJson = intent.getStringExtra("args") ?: "{}"
+          if (toolName.isNullOrBlank()) return
+          Thread({
+            val args = runCatching { JSONObject(argsJson) }.getOrDefault(JSONObject())
+            val t0 = System.currentTimeMillis()
+            val (result, finished) = runAgentToolLocked(toolName, args, "debug_shopping_audit")
+            AudioDiag.log(
+              context, "DEBUG_AGENT_TOOL",
+              "name=$toolName args=$args ms=${System.currentTimeMillis() - t0} finished=$finished result=$result",
+            )
+          }, "benson-debug-agent-tool").start()
+        }
+        // AUDIT AKA (20.10.2026, "folosește date reale din Package Manager/StaffRegistry, nu
+        // aproximări") — dump compact al ÎNTREGULUI registru (LEGEA PERSONALULUI, un singur
+        // inventar), citit DIN STORAGE, zero cod nou de enumerare (StaffRegistry.load, deja
+        // existent). O linie per aplicație; caps se arată doar ca NUMĂR pe nivel (KNOWN/REVERIFY/
+        // VERIFIED), nu lista completă, ca să nu inunde logcat-ul pe un telefon cu sute de
+        // aplicații. Revert: șterge această ramură + addAction DEBUG_STAFF_DUMP_ALL.
+        "com.benson.butler.DEBUG_STAFF_DUMP_ALL" -> {
+          if (!isDebugInjectArmed(prefs)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          Thread({
+            StaffRegistry.invalidate()
+            val all = StaffRegistry.load(context)
+            AudioDiag.log(context, "STAFF_DUMP_ALL", "count=${all.size} archived=${all.count { it.archived }}")
+            for (m in all) {
+              val known = m.caps.values.count { it == CapLevel.KNOWN }
+              val reverify = m.caps.values.count { it == CapLevel.REVERIFY }
+              val verified = m.caps.values.count { it == CapLevel.VERIFIED }
+              AudioDiag.log(
+                context, "STAFF_MEMBER",
+                "pkg=${m.packageName} name=\"${m.displayName}\" cat=${m.category} archived=${m.archived} " +
+                  "known=$known reverify=$reverify verified=$verified",
+              )
+            }
+          }, "benson-staff-dump-all").start()
+        }
         "com.benson.butler.DEBUG_AKA_DISCOVER" -> {
           if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
@@ -6456,6 +6515,8 @@ class BensonForegroundService : Service() {
         addAction("com.benson.butler.DEBUG_AKA_PRESS") // AKA V1, 20.10.2026
         addAction("com.benson.butler.DEBUG_AKA_DUMP") // AKA V1, 20.10.2026
         addAction("com.benson.butler.DEBUG_SURVIVOR_PRESS") // SURVIVOR etapa 3, 20.10.2026
+        addAction("com.benson.butler.DEBUG_AGENT_TOOL") // AUDIT SHOPPING, 20.10.2026
+        addAction("com.benson.butler.DEBUG_STAFF_DUMP_ALL") // AUDIT AKA, 20.10.2026
         addAction("com.benson.butler.DEBUG_AKA_DISCOVER") // AKA DISCOVER/MAP, 20.10.2026
         addAction("com.benson.butler.DEBUG_AKA_EXPLORE") // AKA DISCOVER/MAP, 20.10.2026
       }
