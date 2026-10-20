@@ -61,6 +61,69 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## AKA V1 (20.10.2026) — prioritate absolută, wiring minim, cod construit, NU încă DEVICE_PASS
+
+Mandat: AKA (Application Knowledge Agent) e primul agent operațional; nu se mai dezvoltă nimic
+altceva (Calendar inclus) până nu e integrat și validat pe dispozitiv. Un singur orchestrator
+(`runAgentToolLocked`), nu scaffold-ul `BensonLiveOrchestrator`.
+
+**Analiza care a decis ce se construiește**: `ApplicationCapabilityRegistry.kt` (modelul AKA cu 5
+niveluri, D0, pur) și `StaffRegistry.markVerified` (puntea reală, Context-dependentă, deja scrisă
+și PERSISTATĂ pe disc din runda LEGEA PERSONALULUI, 14.10.2026) existau amândouă — dar
+`markVerified` nu era chemat de NICIUNDE în codul live (verificat prin grep). Cunoștința AKA
+exista doar ca 4 aplicații SEMĂNATE manual în `SEEDED_VERIFIED` (Waze/WhatsApp/YouTube/Calculator);
+nimic din ce face agentul la runtime o alimenta sau o extindea. Acesta era gap-ul real, nu o
+lipsă de cod — exact genul de lucru pe care mandatul îl cere ("folosește codul existent").
+
+**Construit, minim, generic**:
+- `StaffRegistryCore.CAP_UI_CONTROL` (nou, const generic) — "BENSON a observat ȘI a operat
+  efectiv interfața acestei aplicații prin Accessibility, cu efectul verificat". Spre deosebire de
+  `CAP_CALCULATE`/`CAP_MESSAGE`/etc (operații NUMITE, hardcodate per aplicație), aceasta se
+  promovează pentru ORICE pachet — inclusiv unul complet necunoscut tabelului `KNOWN` — exact
+  cerința de generalizare (punctul 9 al criteriului de finalizare). Risc `NONE` (siguranța reală
+  rămâne la `ButtonSafetyClassifier`, la momentul fiecărei apăsări, neschimbat).
+- `BensonForegroundService.recordUiControlVerifiedLocked(svc)` (nou) — apelat DOAR când
+  `press_button`/`tap_element` întorc `ok=true` (deja verificat SURVIVOR prin
+  `classifyInteractionOutcome` — doctrina 9, nimic nou aici), pentru pachetul curent din prim-plan
+  (`svc.currentForegroundPackageLive()`). Cablat direct în `runAgentToolLocked` — confirmă punctul
+  5 al verificărilor obligatorii: integrarea folosește EFECTIV acel motor, nu scaffold-ul separat.
+- Invalidarea e deja generică și deja vie (`demoteAfterUpdate`, aplicat la fiecare
+  `PACKAGE_REPLACED` prin `StaffRegistry.bootstrapAndReconcile`, existent dinainte) — `CAP_UI_CONTROL`
+  trece prin ACEEAȘI regulă, fără cod special (test nou: `uiControlCapabilityIsAlsoDemotedAfterAnAppUpdateLikeAnyOther`).
+- `ControlLocator.visibleClickableLabels` (runda precedentă) e DEJA integrat în rezolvarea
+  semantică (`pressButtonByLabel`) — cerința explicită a punctului 3 era deja satisfăcută, confirmat
+  aici, nu redus la un nou fișier paralel.
+- Descoperire fără efecte externe (punctul 4): `observe_screen` e deja strict read-only, fără nicio
+  acțiune — structural neschimbat, confirmat prin citire de cod, nu redus/reconstruit.
+
+**Deliberat NEFĂCUT, ca să nu creeze un al doilea inventar**: nu am conectat modelul de 5 niveluri
+din `ApplicationCapabilityRegistry.kt` (încă neconectat la `StaffRegistryCore.initialCaps`) — ar
+fi însemnat DOUĂ sisteme de cunoștințe paralele, exact interzis. Puntea reală, deja vie pe telefon
+(`StaffRegistry`, 3 niveluri `KNOWN/REVERIFY/VERIFIED`), e singura extinsă.
+
+**Calendar — conservat, neatins**: `BensonCalendarExecutor.kt`/`CalendarEventMath.kt` NU au fost
+modificate această rundă. Sunt deja, prin construcție, adaptoare EXECUTOR accesibile prin același
+`runAgentToolLocked` (CALENDAR_READ_DAY/CALENDAR_CREATE_EVENT/etc. sunt deja tool-uri dispatch-uite
+prin același motor unic) — contractul "AKA → LIVE → EXECUTOR" cerut e deja respectat structural,
+fără nicio schimbare necesară. Dezvoltarea de funcționalități noi de calendar rămâne în pauză până
+la finalizarea AKA V1, conform mandatului.
+
+**BUILD_PASS vs UNIT_TEST_PASS vs DEVICE_PASS (punctul 6)**:
+- **BUILD_PASS**: `gradlew :app:assembleRelease` → BUILD SUCCESSFUL (manifest, toate modulele).
+- **UNIT_TEST_PASS**: 571/571 (benson-accessibility + benson-foreground-service), zero regresii,
+  inclusiv cele 3 teste noi pentru `CAP_UI_CONTROL` (risc NONE, promovare pe aplicație necunoscută,
+  retrogradare după update — toate pure, JUnit, fără dispozitiv).
+- **DEVICE_PASS**: NU. Nicio rulare reală — wiring-ul (`recordUiControlVerifiedLocked`) nu a fost
+  încă exercitat pe telefon; prima dovadă va fi un `REGISTRY_EVENT kind=verified cap=ui_control`
+  real în logcat, pe o aplicație NEsemănată în `SEEDED_VERIFIED`, după o apăsare reușită.
+
+**Verificările obligatorii (punctul 5), stare**: cod necomis protejat (nimic șters, vezi
+`git status` — toate fișierele din rundele anterioare rămân `M`/`??`); un singur orchestrator
+confirmat prin locul wiring-ului; `press_button` fără regresii (571/571); niciun test nu modifică
+date personale, nu inițiază apeluri, nu trimite mesaje (toate pure, pe structuri în memorie);
+calendarul NU a fost testat această rundă (nicio verificare de izolare/sincronizare încă
+necesară); zero apel OpenAI, buget rămâne închis.
+
 ## FIX_PRESS_BUTTON_LABEL_MISMATCH_1 (19.10.2026) — generic, fara liste per limba
 
 Mandat: rezolva generic diferenta dintre SEMNIFICATIA unei actiuni si DENUMIREA reala a
