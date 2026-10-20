@@ -316,4 +316,135 @@ class StaffRegistryCoreTest {
     val caps = mapOf(StaffRegistryCore.CAP_CALL to CapLevel.VERIFIED)
     assertEquals("ecran", StaffRegistryCore.attachKnownUiControls("ecran", caps))
   }
+
+  // --- AKA — cunoasterea FUNCTIILOR si a NAVIGATIEI (20.10.2026, corectie arhitecturala: "AKA nu
+  // e memorarea apasarilor, e cunoasterea autonoma a aplicatiilor"). Semnaturi de ecran FICTIVE
+  // ("ecranA"/"ecranB"), deliberat fara nicio aplicatie reala in nume — proba ca mecanismul e
+  // generic, nu legat de Calculator/Ceas/Calendar/WhatsApp. ---
+
+  @Test fun akaFunctionCapabilityIdIsScopedToOneScreenNotTheWholeApp() {
+    val idA = StaffRegistryCore.akaFunctionCapabilityId("ecranA", "Setări")
+    val idB = StaffRegistryCore.akaFunctionCapabilityId("ecranB", "Setări")
+    assertTrue(idA != idB) // ACEEASI eticheta, ecrane DIFERITE -> dovezi SEPARATE
+  }
+
+  @Test fun formatKnownFunctionsSeparatesDiscoveredFromVerified() {
+    // Punctul 2 explicit: nu confunda "am vazut-o" cu "am apasat-o si a mers".
+    val sig = "ecranA"
+    val caps = mapOf(
+      StaffRegistryCore.akaFunctionCapabilityId(sig, "Wi-Fi") to CapLevel.VERIFIED,
+      StaffRegistryCore.akaFunctionCapabilityId(sig, "Bluetooth") to CapLevel.KNOWN,
+    )
+    val text = StaffRegistryCore.formatKnownFunctions(caps, sig)!!
+    // Cheia normalizeaza eticheta (acelasi tratament ca ui_control:, deja stabilit) - verificam
+    // forma normalizata, nu originalul cu majuscule.
+    assertTrue(text.contains("confirmate prin apăsare reală") && text.contains("wi-fi"))
+    assertTrue(text.contains("descoperite, neconfirmate") && text.contains("bluetooth"))
+  }
+
+  @Test fun formatKnownFunctionsIsScopedToTheRequestedScreenOnly() {
+    val caps = mapOf(StaffRegistryCore.akaFunctionCapabilityId("ecranA", "X") to CapLevel.VERIFIED)
+    assertNull(StaffRegistryCore.formatKnownFunctions(caps, "ecranB"))
+  }
+
+  @Test fun formatNavigationOptionsListsOnlyVerifiedEdgesFromTheGivenScreen() {
+    val caps = mapOf(
+      StaffRegistryCore.akaNavigationCapabilityId("ecranA", "Setări", "ecranB") to CapLevel.VERIFIED,
+      StaffRegistryCore.akaNavigationCapabilityId("ecranA", "Ajutor", "ecranC") to CapLevel.KNOWN, // neconfirmat
+    )
+    val text = StaffRegistryCore.formatNavigationOptions(caps, "ecranA")!!
+    assertTrue(text.contains("setari")) // normalizat: fara diacritice, minuscule
+    assertFalse(text.contains("ajutor")) // KNOWN, nu VERIFIED - nu se afirma ca traseu confirmat
+  }
+
+  @Test fun formatNavigationOptionsDoesNotLeakEdgesFromAnotherScreen() {
+    val caps = mapOf(StaffRegistryCore.akaNavigationCapabilityId("ecranX", "A", "ecranY") to CapLevel.VERIFIED)
+    assertNull(StaffRegistryCore.formatNavigationOptions(caps, "ecranA"))
+  }
+
+  @Test fun akaFunctionAndNavigationCapabilitiesCarryNoRisk() {
+    assertEquals(CapRisk.NONE, StaffRegistryCore.riskOf(StaffRegistryCore.akaFunctionCapabilityId("ecranA", "X")))
+    assertEquals(CapRisk.NONE, StaffRegistryCore.riskOf(StaffRegistryCore.akaNavigationCapabilityId("ecranA", "X", "ecranB")))
+  }
+
+  @Test fun attachKnownUiControlsIncludesFunctionAndNavigationKnowledgeWhenSignatureGiven() {
+    val sig = "ecranA"
+    val caps = mapOf(
+      StaffRegistryCore.akaFunctionCapabilityId(sig, "Wi-Fi") to CapLevel.VERIFIED,
+      StaffRegistryCore.akaNavigationCapabilityId(sig, "Wi-Fi", "ecranB") to CapLevel.VERIFIED,
+    )
+    val result = StaffRegistryCore.attachKnownUiControls("digest original", caps, sig)
+    assertTrue(result.startsWith("digest original\n"))
+    assertTrue(result.contains("wi-fi"))
+    assertTrue(result.contains("Trasee de navigare"))
+  }
+
+  @Test fun attachKnownUiControlsWithNoSignatureKeepsOldBehaviorUnchanged() {
+    // Zero regresie: apelul fara `screenSignature` (folosit de orice cod vechi) se comporta
+    // IDENTIC cu inainte de aceasta extensie.
+    val caps = mapOf(StaffRegistryCore.akaFunctionCapabilityId("ecranA", "X") to CapLevel.VERIFIED)
+    assertEquals("text", StaffRegistryCore.attachKnownUiControls("text", caps))
+  }
+
+  // --- Persistenta/invalidare/recuperare pentru aka_fn/aka_nav (ordin 20.10.2026, criteriul 9:
+  // "teste de persistenta, invalidare, recuperare si regresie") — cheile aka_fn/aka_nav au MAI
+  // MULTE ':' decat ui_control (semnatura de ecran insasi contine un ':') — exact tipul de cheie
+  // care a cauzat FIX_AKA_CAP_KEY_COLON_1; testat explicit aici, nu doar presupus reparat. ---
+
+  @Test fun serializeDeserializeRoundTripSurvivesFunctionAndNavigationKeysWithManyColons() {
+    val fnId = StaffRegistryCore.akaFunctionCapabilityId("com.example.app:a3f2", "wi-fi")
+    val navId = StaffRegistryCore.akaNavigationCapabilityId("com.example.app:a3f2", "wi-fi", "com.example.app:b891")
+    val list = listOf(member("com.example.app").copy(caps = mapOf(fnId to CapLevel.VERIFIED, navId to CapLevel.VERIFIED)))
+    val out = StaffRegistryCore.deserialize(StaffRegistryCore.serialize(list)).single()
+    assertEquals(CapLevel.VERIFIED, out.caps[fnId])
+    assertEquals(CapLevel.VERIFIED, out.caps[navId])
+  }
+
+  @Test fun akaFunctionAndNavigationCapabilitiesAreDemotedAfterAppUpdateLikeAnyOther() {
+    // Invalidare la schimbare de versiune (M4, deja generic) — proba explicita pentru noile familii.
+    val fnId = StaffRegistryCore.akaFunctionCapabilityId("ecranA", "X")
+    val navId = StaffRegistryCore.akaNavigationCapabilityId("ecranA", "X", "ecranB")
+    val after = StaffRegistryCore.demoteAfterUpdate(mapOf(fnId to CapLevel.VERIFIED, navId to CapLevel.VERIFIED))
+    assertEquals(CapLevel.REVERIFY, after[fnId])
+    assertEquals(CapLevel.REVERIFY, after[navId])
+  }
+
+  @Test fun akaKnowledgeSurvivesReconcileWhenAppVersionIsUnchanged() {
+    // Recuperare: un restart/reconciliere cu ACEEASI versiune nu trebuie sa stearga nimic.
+    val fnId = StaffRegistryCore.akaFunctionCapabilityId("ecranA", "X")
+    val old = listOf(member("com.example.app").copy(caps = mapOf(fnId to CapLevel.VERIFIED)))
+    val fresh = listOf(member("com.example.app")) // aceeasi versiune (default "1.0"/1L din helper member())
+    val out = StaffRegistryCore.reconcile(old, fresh)
+    assertEquals(CapLevel.VERIFIED, out.single().caps[fnId])
+  }
+
+  // --- formatAppKnowledgeSummary — "LIVE solicita informatii despre o aplicatie... identifica
+  // lipsurile" (sectiunea "Colaborarea cu LIVE", 20.10.2026) ---
+
+  @Test fun appKnowledgeSummaryReportsNoKnowledgeHonestlyWhenNeverExplored() {
+    val text = StaffRegistryCore.formatAppKnowledgeSummary(member("com.example.unexplored", name = "AplicatieNeexplorata"))
+    assertTrue(text.contains("nu a fost explorată"))
+  }
+
+  @Test fun appKnowledgeSummaryAggregatesAcrossScreensButOnlyForThisPackage() {
+    val pkg = "com.example.app"
+    val caps = mapOf(
+      StaffRegistryCore.akaFunctionCapabilityId("$pkg:screen1", "a") to CapLevel.VERIFIED,
+      StaffRegistryCore.akaFunctionCapabilityId("$pkg:screen2", "b") to CapLevel.KNOWN,
+      StaffRegistryCore.akaNavigationCapabilityId("$pkg:screen1", "a", "$pkg:screen2") to CapLevel.VERIFIED,
+      // Dovada de pe UN ALT pachet, cu o semnatura care contine ACELASI nume de pachet ca substring
+      // accidental — nu trebuie sa se scurga in rezumatul lui `pkg`.
+      StaffRegistryCore.akaFunctionCapabilityId("com.example.appOTHER:screen1", "c") to CapLevel.VERIFIED,
+    )
+    val text = StaffRegistryCore.formatAppKnowledgeSummary(member(pkg, name = "App").copy(caps = caps))
+    assertTrue(text.contains("1 funcții de interfață confirmate"))
+    assertTrue(text.contains("1 descoperite"))
+    assertTrue(text.contains("1 trasee de navigare confirmate"))
+  }
+
+  @Test fun appKnowledgeSummaryIncludesNamedCapabilitiesSeparatelyFromDiscoveredOnes() {
+    val caps = mapOf(StaffRegistryCore.CAP_CALCULATE to CapLevel.VERIFIED)
+    val text = StaffRegistryCore.formatAppKnowledgeSummary(member("com.oneplus.calculator", name = "Calculator").copy(caps = caps))
+    assertTrue(text.contains("funcții numite") && text.contains(StaffRegistryCore.CAP_CALCULATE))
+  }
 }

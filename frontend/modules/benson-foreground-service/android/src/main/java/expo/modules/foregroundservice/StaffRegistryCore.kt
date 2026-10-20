@@ -88,9 +88,102 @@ internal object StaffRegistryCore {
   // aici ca sa fie testabila JUnit fara Context. Cand nu exista nicio cunostinta verificata,
   // textul observarii ramane EXACT neschimbat (zero regresie pe ecranele/aplicatiile fara istoric
   // AKA — inclusiv Calculator/WhatsApp/Waze, deja dovedite, care nu trebuie sa vada text nou).
-  fun attachKnownUiControls(screenText: String, caps: Map<String, CapLevel>): String {
-    val known = formatKnownUiControls(caps) ?: return screenText
-    return screenText + "\n" + known
+  // AKA — CUNOASTEREA FUNCTIILOR SI A NAVIGATIEI, nu doar a etichetelor de buton (corectie
+  // arhitecturala, 20.10.2026: "AKA nu e memorarea apasarilor, e cunoasterea autonoma a
+  // aplicatiilor"). Doua familii noi de chei, in ACELASI map `caps` (niciun registru nou):
+  //   aka_fn:<semnatura_ecran>:<eticheta>  — "acest ecran are o functie candidata numita X".
+  //     KNOWN    = descoperita prin observare (clickabila, in afara unei liste derulabile —
+  //                AkaKnowledge.discoverCandidateFunctions, benson-accessibility, pur).
+  //     VERIFIED = EXECUTOR a apasat-o si SURVIVOR a confirmat o tranzitie reala de ecran.
+  //   aka_nav:<semnatura_sursa>:<eticheta>:<semnatura_destinatie> — harta de navigare (punctul 4
+  //     al ordinului): "apasarea X de pe ecranul sursa duce la ecranul destinatie", VERIFIED
+  //     doar dupa o tranzitie REALA, observata inainte si dupa apasare.
+  // Semnatura vine din AkaKnowledge.ScreenSignature — aici doar cheile si formatarea.
+  const val CAP_AKA_FUNCTION_PREFIX = "aka_fn:"
+  const val CAP_AKA_NAV_PREFIX = "aka_nav:"
+
+  fun akaFunctionCapabilityId(screenSignature: String, label: String): String =
+    CAP_AKA_FUNCTION_PREFIX + screenSignature + ":" + normalizeCapLabel(label)
+
+  fun akaNavigationCapabilityId(fromSignature: String, label: String, toSignature: String): String =
+    CAP_AKA_NAV_PREFIX + fromSignature + ":" + normalizeCapLabel(label) + ":" + toSignature
+
+  fun isAkaFunctionCapability(capabilityId: String): Boolean = capabilityId.startsWith(CAP_AKA_FUNCTION_PREFIX)
+  fun isAkaNavigationCapability(capabilityId: String): Boolean = capabilityId.startsWith(CAP_AKA_NAV_PREFIX)
+
+  // Functiile candidate/verificate ale ECRANULUI CURENT (nu ale aplicatiei intregi, punctul 2:
+  // "nu confunda memorarea unei etichete cu intelegerea functiilor") — separa explicit ce e
+  // DOAR DESCOPERIT (KNOWN) de ce e CONFIRMAT printr-o apasare reala, verificata (VERIFIED).
+  fun formatKnownFunctions(caps: Map<String, CapLevel>, screenSignature: String): String? {
+    val prefix = CAP_AKA_FUNCTION_PREFIX + screenSignature + ":"
+    val verified = caps.entries.filter { it.key.startsWith(prefix) && it.value == CapLevel.VERIFIED }
+      .map { it.key.removePrefix(prefix) }.filter { it.isNotBlank() }
+    val discovered = caps.entries.filter { it.key.startsWith(prefix) && it.value == CapLevel.KNOWN }
+      .map { it.key.removePrefix(prefix) }.filter { it.isNotBlank() }
+    if (verified.isEmpty() && discovered.isEmpty()) return null
+    val parts = mutableListOf<String>()
+    if (verified.isNotEmpty()) parts.add("funcții confirmate prin apăsare reală: ${verified.joinToString(", ")}")
+    if (discovered.isNotEmpty()) parts.add("funcții descoperite, neconfirmate încă: ${discovered.joinToString(", ")}")
+    return "Cunoștințe AKA pentru acest ecran — ${parts.joinToString("; ")}."
+  }
+
+  // Harta de navigare cunoscuta DIN acest ecran — "daca apesi X, ajungi la un ecran deja cunoscut".
+  fun formatNavigationOptions(caps: Map<String, CapLevel>, fromSignature: String): String? {
+    val prefix = CAP_AKA_NAV_PREFIX + fromSignature + ":"
+    val edges = caps.entries.filter { it.key.startsWith(prefix) && it.value == CapLevel.VERIFIED }
+      .mapNotNull { e ->
+        val remainder = e.key.removePrefix(prefix)
+        val label = remainder.substringBefore(':')
+        if (label.isBlank() || label == remainder) null else label
+      }.distinct()
+    if (edges.isEmpty()) return null
+    return "Trasee de navigare deja confirmate de pe acest ecran: ${edges.joinToString(", ")}."
+  }
+
+  // CONTRACTUL COMPLET prin care LIVE primeste cunostintele AKA (testat JUnit, fara Context —
+  // exact compunerea pe care runAgentToolLocked o aplica inainte sa trimita textul catre model).
+  // `screenSignature` opțional (null = comportamentul vechi, doar ui_control:*, zero regresie).
+  fun attachKnownUiControls(screenText: String, caps: Map<String, CapLevel>, screenSignature: String? = null): String {
+    val lines = mutableListOf<String>()
+    formatKnownUiControls(caps)?.let { lines.add(it) }
+    if (screenSignature != null) {
+      formatKnownFunctions(caps, screenSignature)?.let { lines.add(it) }
+      formatNavigationOptions(caps, screenSignature)?.let { lines.add(it) }
+    }
+    if (lines.isEmpty()) return screenText
+    return screenText + "\n" + lines.joinToString("\n")
+  }
+
+  // AKA — "LIVE solicită informații despre o aplicație... identifică lipsurile" (ordin 20.10.2026,
+  // sectiunea "Colaborarea cu LIVE"). Rezumat pur, pe TOATĂ aplicația (nu doar ecranul curent) —
+  // cheile aka_fn/aka_nav sunt filtrate explicit pe acest pachet (semnatura de ecran incepe cu
+  // packageName), ca sa nu apara dovezi de pe alt pachet. Cand nu exista NICIO cunostinta, spune
+  // explicit ca aplicatia n-a fost inca explorata — identificarea lipsei e la fel de importanta
+  // ca raportarea cunostintei.
+  fun formatAppKnowledgeSummary(member: StaffMember): String {
+    val caps = member.caps
+    val named = caps.filterKeys { !isUiControlCapability(it) && !isAkaFunctionCapability(it) && !isAkaNavigationCapability(it) }
+    val fnForThisApp = caps.filterKeys { isAkaFunctionCapability(it) && it.removePrefix(CAP_AKA_FUNCTION_PREFIX).startsWith("${member.packageName}:") }
+    val navForThisApp = caps.filterKeys { isAkaNavigationCapability(it) && it.removePrefix(CAP_AKA_NAV_PREFIX).startsWith("${member.packageName}:") }
+    val ui = caps.filterKeys { isUiControlCapability(it) }
+
+    val namedText = if (named.isEmpty()) null else
+      "funcții numite: " + named.entries.joinToString(", ") { "${it.key} (${it.value.name.lowercase()})" }
+    val fnVerified = fnForThisApp.values.count { it == CapLevel.VERIFIED }
+    val fnKnown = fnForThisApp.values.count { it == CapLevel.KNOWN }
+    val fnText = if (fnForThisApp.isEmpty()) null else
+      "$fnVerified funcții de interfață confirmate prin apăsare, $fnKnown descoperite dar neconfirmate încă"
+    val navVerified = navForThisApp.values.count { it == CapLevel.VERIFIED }
+    val navText = if (navVerified == 0) null else "$navVerified trasee de navigare confirmate"
+    val uiVerified = ui.values.count { it == CapLevel.VERIFIED }
+    val uiText = if (uiVerified == 0) null else "$uiVerified controale individuale confirmate"
+
+    val parts = listOfNotNull(namedText, fnText, navText, uiText)
+    return if (parts.isEmpty()) {
+      "„${member.displayName}” nu are încă nicio cunoștință AKA — nu a fost explorată."
+    } else {
+      "„${member.displayName}”: ${parts.joinToString("; ")}."
+    }
   }
 
   const val MAX_VERSION_HISTORY = 10
@@ -141,7 +234,11 @@ internal object StaffRegistryCore {
   // ButtonSafetyClassifier la momentul actiunii (plata/cumparare refuzate acolo); aceasta
   // capabilitate doar inregistreaza dovada, deci risc NONE.
   fun riskOf(capabilityId: String): CapRisk =
-    if (isUiControlCapability(capabilityId)) CapRisk.NONE else (RISK[capabilityId] ?: CapRisk.CONFIRM)
+    if (isUiControlCapability(capabilityId) || isAkaFunctionCapability(capabilityId) || isAkaNavigationCapability(capabilityId)) {
+      CapRisk.NONE
+    } else {
+      RISK[capabilityId] ?: CapRisk.CONFIRM
+    }
 
   fun isRefused(packageName: String, category: String): Boolean {
     val p = packageName.lowercase()

@@ -4073,6 +4073,120 @@ class BensonAccessibilityService : AccessibilityService() {
         result
     }
 
+    // AKA — DISCOVER/MAP (20.10.2026, corectie arhitecturala explicita: "AKA nu e memorarea
+    // apasarilor, e cunoasterea autonoma a aplicatiilor"). Strict EXECUTOR mecanic — NU scrie
+    // nimic in StaffRegistry (modulul asta nu-l poate vedea, dependinta e intr-un singur sens:
+    // benson-foreground-service -> benson-accessibility); apelantul (runAgentToolLocked) decide
+    // ce sa persiste, exact ca la press_button/recordUiControlVerifiedLocked.
+    data class AkaCandidate(
+        val label: String,
+        val role: String,
+        val safety: ButtonSafetyClassifier.Verdict,
+        val editable: Boolean,
+    )
+
+    data class AkaDiscoveryResult(
+        val ok: Boolean,
+        val message: String,
+        val packageName: String = "",
+        val screenSignature: String = "",
+        val candidates: List<AkaCandidate> = emptyList(),
+        val pressedLabel: String? = null,
+        val toSignature: String? = null,
+        val transitionVerified: Boolean = false,
+    )
+
+    // Punctul 1+3 ale ordinului: inventariaza ecranul curent, FARA nicio lista inchisa de
+    // aplicatii acceptate si FARA nicio apasare — "explorarea fara efecte externe e permisa".
+    // Reutilizeaza AkaKnowledge.discoverCandidateFunctions (pur, benson-accessibility) — aceeasi
+    // regula structurala (clickabil, in afara unei liste derulabile) pentru ORICE aplicatie.
+    fun akaDiscoverScreen(): AkaDiscoveryResult {
+        if (isAbortActive()) return AkaDiscoveryResult(false, "aborted")
+        val root = rootInActiveWindow ?: return AkaDiscoveryResult(false, "Nu găsesc ecranul curent.")
+        val pkg = root.packageName?.toString().orEmpty()
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        return try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            val epoch = screenEpoch.incrementAndGet()
+            val digest = ScreenDigestBuilder.build(tree, pkg, epoch).also { lastServedDigest = it }
+            val signature = AkaKnowledge.ScreenSignature.compute(pkg, digest.elements)
+            val candidates = AkaKnowledge.discoverCandidateFunctions(digest.elements).map {
+                AkaCandidate(it.label, it.role.name, it.safety, it.editable)
+            }
+            AkaDiscoveryResult(true, "Am descoperit ${candidates.size} funcții candidate pe acest ecran.", pkg, signature, candidates)
+        } catch (_: Exception) {
+            AkaDiscoveryResult(false, "Nu pot citi ecranul.")
+        } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    // Punctul 3+4 ale ordinului: EXPLORARE ACTIVA, dar STRICT SIGURA — apasa un candidat descoperit
+    // DOAR daca ButtonSafetyClassifier il clasifica FREE (nimic ce cere confirmare sau e refuzat)
+    // si nu e camp editabil (exploarea nu scrie NICIODATA text). O functie cu risc ramane doar
+    // "descoperita", niciodata "explorata" aici — operarea ei reala trece prin press_button/
+    // tap_element, sub Confirmation Gate-ul EXISTENT, neschimbat. Observa INAINTE si DUPA, ca
+    // tranzitia de ecran sa fie VERIFICATA, nu presupusa (acelasi principiu SURVIVOR).
+    suspend fun akaExploreByPressing(label: String): AkaDiscoveryResult = withContext(Dispatchers.Default) {
+        if (isAbortActive()) return@withContext AkaDiscoveryResult(false, "aborted")
+        val before = akaDiscoverScreen()
+        if (!before.ok) return@withContext before
+        val candidate = before.candidates.firstOrNull { it.label.equals(label, ignoreCase = true) }
+            ?: return@withContext AkaDiscoveryResult(
+                false, "Nu există o funcție candidată „${label.take(40)}” pe acest ecran.",
+                before.packageName, before.screenSignature, before.candidates,
+            )
+        if (candidate.safety != ButtonSafetyClassifier.Verdict.FREE) {
+            return@withContext AkaDiscoveryResult(
+                false, "Explorarea NU apasă „${label.take(40)}” — necesită autorizare (risc: ${candidate.safety.name.lowercase()}).",
+                before.packageName, before.screenSignature, before.candidates,
+            )
+        }
+        if (candidate.editable) {
+            return@withContext AkaDiscoveryResult(
+                false, "„${label.take(40)}” e un câmp editabil — explorarea nu scrie nimic.",
+                before.packageName, before.screenSignature, before.candidates,
+            )
+        }
+        val root = rootInActiveWindow
+            ?: return@withContext AkaDiscoveryResult(false, "Nu găsesc ecranul curent.")
+        val refs = mutableListOf<AccessibilityNodeInfo>()
+        try {
+            val tree = snapshotTree(root, refs, intArrayOf(0))
+            // Acelasi motor G-1 ca press_button — nicio cale de apasare noua, paralela.
+            val found = ControlLocator.findButtonCandidates(label, tree)
+            if (found.size != 1) {
+                return@withContext AkaDiscoveryResult(
+                    false, "AMBIGUU sau negăsit la apăsarea reală — explorare oprită.",
+                    before.packageName, before.screenSignature, before.candidates,
+                )
+            }
+            val node = found.single().ref as? AccessibilityNodeInfo
+                ?: return@withContext AkaDiscoveryResult(false, "Elementul nu mai e accesibil.", before.packageName, before.screenSignature, before.candidates)
+            val clicked = clickNodeOrAncestor(node)
+            if (!clicked) {
+                return@withContext AkaDiscoveryResult(false, "N-am putut apăsa „${label.take(40)}”.", before.packageName, before.screenSignature, before.candidates)
+            }
+            delay(1200)
+            val after = akaDiscoverScreen()
+            val transitionVerified = after.ok && after.screenSignature != before.screenSignature
+            AkaDiscoveryResult(
+                ok = true,
+                message = if (transitionVerified) "„${label.take(40)}” duce la un ecran nou, verificat." else "„${label.take(40)}” apăsat, dar ecranul nu s-a schimbat structural.",
+                packageName = before.packageName,
+                screenSignature = before.screenSignature,
+                candidates = before.candidates,
+                pressedLabel = label,
+                toSignature = if (transitionVerified) after.screenSignature else null,
+                transitionVerified = transitionVerified,
+            )
+        } catch (_: Exception) {
+            AkaDiscoveryResult(false, "Eroare la explorare.")
+        } finally {
+            for (r in refs) if (r !== root) try { r.recycle() } catch (_: Exception) {}
+        }
+    }
+
     fun firstResultLabel(query: String): String? {
         val root = rootInActiveWindow ?: return null
         val refs = mutableListOf<AccessibilityNodeInfo>()

@@ -191,5 +191,23 @@ internal object StaffRegistry {
     AudioDiag.log(ctx, "REGISTRY_EVENT", "kind=verified cap=$capabilityId")
   }
 
+  // AKA — INVENTARIERE AUTOMATA (20.10.2026, punctul 1 al ordinului: "AKA inventariaza automat
+  // aplicatiile vizibile... fara lista inchisa"). Inregistreaza o functie candidata DESCOPERITA
+  // (vazuta, clickabila, inca neapasata) — DOAR daca nu exista deja NICIO dovada pentru acea
+  // cheie. Nu retrogradeaza NICIODATA un VERIFIED/REVERIFY existent inapoi la KNOWN — descoperirea
+  // repetata a aceleiasi functii nu sterge o dovada mai buna, deja castigata.
+  fun markDiscovered(ctx: Context, packageName: String, capabilityId: String) {
+    val list = load(ctx)
+    val idx = list.indexOfFirst { it.packageName == packageName }
+    if (idx < 0) return
+    val m = list[idx]
+    if (m.caps.containsKey(capabilityId)) return
+    val updated = list.toMutableList()
+    val newCaps = LinkedHashMap(m.caps)
+    newCaps[capabilityId] = CapLevel.KNOWN
+    updated[idx] = m.copy(caps = newCaps)
+    save(ctx, updated)
+  }
+
   fun invalidate() { cache = null }
 }

@@ -71,9 +71,23 @@ object BensonAgentTools {
   const val CALENDAR_CREATE_EVENT = "calendar_create_event"
   const val CALENDAR_UPDATE_EVENT = "calendar_update_event"
 
+  // AKA — DISCOVER/MAP (20.10.2026, corectie arhitecturala: "AKA nu e memorarea apasarilor, e
+  // cunoasterea autonoma a aplicatiilor"). `observe_screen` descopera si inregistreaza AUTOMAT
+  // functiile candidate ale ecranului curent (fara nicio apasare) — nu e nevoie de alt instrument
+  // pentru simpla descoperire. Acesta e pentru EXPLORAREA ACTIVA, SIGURA: apasa o functie
+  // candidata DOAR ca sa afli unde duce (mapare de navigatie), niciodata pentru scopul final al
+  // unei misiuni cu risc — acelea raman pe `press_button`/`tap_element`, sub Confirmation Gate.
+  const val AKA_EXPLORE_FUNCTION = "aka_explore_function"
+
+  // AKA — "LIVE solicită informații despre o aplicație sau o funcție... identifică lipsurile"
+  // (20.10.2026, sectiunea "Colaborarea cu LIVE"). Interogare pura a cunostintelor DEJA stranse
+  // despre o aplicatie (orice aplicatie, prin acelasi resolver de nume ca open_app) — fara sa
+  // deschida nimic, fara nicio apasare. Daca nu exista nimic, spune onest ca nu e explorata.
+  const val AKA_QUERY_APP = "aka_query_app"
+
   val NAMES = listOf(
     EXPLAIN_COMMAND, OPEN_APP, OPEN_URL, PLAY_STREAM, SEARCH_IN_APP, OBSERVE_SCREEN, TAP_ELEMENT, PRESS_BUTTON, VERIFY_PLAYING,
-    CALENDAR_READ_DAY, CALENDAR_FIND_FREE_SLOT, CALENDAR_CREATE_EVENT, CALENDAR_UPDATE_EVENT, SAY,
+    CALENDAR_READ_DAY, CALENDAR_FIND_FREE_SLOT, CALENDAR_CREATE_EVENT, CALENDAR_UPDATE_EVENT, AKA_EXPLORE_FUNCTION, AKA_QUERY_APP, SAY,
   )
 
   // Plafon de pasi: mandatul cere explicit "Limiteaza numarul de pasi si reincercari. Nu lasa
@@ -145,7 +159,13 @@ object BensonAgentTools {
       "parameters":{"type":"object","properties":{"title":{"type":"string"},"start_iso":{"type":"string"},"end_iso":{"type":"string"},"all_day":{"type":"boolean"},"confirmed":{"type":"boolean"}},"required":["title","start_iso","end_iso","all_day","confirmed"],"additionalProperties":false}}},
      {"type":"function","function":{"name":"$CALENDAR_UPDATE_EVENT",
       "description":"Modifică un eveniment existent (event_id din calendar_read_day). Lasă un câmp gol ca să nu-l schimbi. Același protocol în doi pași ca la creare: confirmed=false propune, confirmed=true scrie, DOAR după «da» explicit al Masterului. Un CONFLICT cu noua oră se refuză mereu.",
-      "parameters":{"type":"object","properties":{"event_id":{"type":"integer"},"new_title":{"type":"string"},"new_start_iso":{"type":"string"},"new_end_iso":{"type":"string"},"confirmed":{"type":"boolean"}},"required":["event_id","new_title","new_start_iso","new_end_iso","confirmed"],"additionalProperties":false}}}
+      "parameters":{"type":"object","properties":{"event_id":{"type":"integer"},"new_title":{"type":"string"},"new_start_iso":{"type":"string"},"new_end_iso":{"type":"string"},"confirmed":{"type":"boolean"}},"required":["event_id","new_title","new_start_iso","new_end_iso","confirmed"],"additionalProperties":false}}},
+     {"type":"function","function":{"name":"$AKA_EXPLORE_FUNCTION",
+      "description":"Apasă SIGUR o funcție candidată (din «observe_screen», lista «Cunoștințe AKA») DOAR ca să afli unde duce — pentru a MAPA calea către o funcție cerută într-o aplicație necunoscută, nu pentru scopul final al misiunii. Refuză automat orice control cu risc (plată, trimitere, ștergere) sau câmp editabil — acelea rămân pe «press_button»/«tap_element», după confirmare. Întoarce ecranul la care duce, verificat.",
+      "parameters":{"type":"object","properties":{"label":{"type":"string"}},"required":["label"],"additionalProperties":false}}},
+     {"type":"function","function":{"name":"$AKA_QUERY_APP",
+      "description":"Întreabă AKA ce cunoaște deja despre o aplicație (orice aplicație instalată, după nume) — funcții, controale, trasee de navigare deja confirmate, FĂRĂ să deschidă nimic. Folosește-l când Masterul întreabă «știi să faci X în Y» sau înainte de o misiune într-o aplicație necunoscută, ca să nu reexplorezi ce e deja cunoscut. Dacă nu există nicio cunoștință, îți spune onest că aplicația n-a fost încă explorată.",
+      "parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}}}
     ]
   """.trimIndent()
 
@@ -280,6 +300,19 @@ object BensonAgentTools {
       "BENSON verifică adresa înainte de a porni ceva; dacă nu servește audio, îți spune și poți " +
       "încerca altă adresă. NU inventa adrese — dacă nu ești sigur de fluxul oficial, spune-i " +
       "Masterului că nu-l cunoști și propune să cauți pagina postului.\n" +
+      // AKA — DISCOVER/MAP (20.10.2026, corectie arhitecturala) — intr-o aplicatie NECUNOSCUTA,
+      // nu ghici orbeste. «observe_screen» iti arata deja functiile candidate descoperite pe acest
+      // ecran si orice cunostinta AKA anterioara (functii confirmate, trasee de navigare).
+      "Dacă Masterul întreabă «știi să faci X în Y» sau înainte de o misiune într-o aplicație pe " +
+      "care n-ai mai operat-o: cheamă «aka_query_app» ÎNTÂI, ca să afli ce e deja cunoscut, înainte " +
+      "să deschizi aplicația. Dacă răspunde că nu e explorată, continuă normal cu observe_screen.\n" +
+      "Într-o aplicație pe care n-o cunoști: cheamă «observe_screen», citește funcțiile candidate " +
+      "listate. Dacă Masterul cere o funcție care NU e vizibilă direct (ex. «activează Wi-Fi» pe un " +
+      "ecran principal fără acel control): folosește «aka_explore_function» pe candidați plauzibili " +
+      "(după etichetă) ca să MAPEZI calea — nu pentru scopul final, doar pentru a găsi ecranul " +
+      "potrivit. Odată găsit ecranul corect, folosește «press_button»/«tap_element» pentru " +
+      "ACȚIUNEA reală cerută de Master, nu «aka_explore_function» (acela refuză orice control cu " +
+      "risc — e doar pentru a găsi traseul, nu pentru operare).\n" +
       // CALENDAR AGENT (19.10.2026, prioritate explicita) — interpretarea datei/orei ramane la
       // tine (acelasi model care intelege orice limba), executorul primeste deja ISO local.
       "Pentru calendar: calculează TU data/ora exactă din ce spune Masterul, în orice limbă " +

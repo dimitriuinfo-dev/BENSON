@@ -4651,13 +4651,26 @@ class BensonForegroundService : Service() {
         val d = svc?.observeScreen()
         if (d == null) BensonAgentTools.toolResult(false, "nu pot citi ecranul") to false
         else {
+          // AKA — INVENTARIERE AUTOMATA (20.10.2026, punctul 1: "fara lista inchisa de aplicatii
+          // acceptate") — ORICE observe_screen descopera functiile candidate ale ecranului curent
+          // (AkaKnowledge.discoverCandidateFunctions, pur, benson-accessibility — acelasi digest
+          // deja citit, fara o a doua parcurgere a arborelui Accessibility) si le inregistreaza ca
+          // KNOWN daca sunt noi. Nu retrogradeaza niciodata o dovada VERIFIED existenta.
+          val signature = expo.modules.accessibility.AkaKnowledge.ScreenSignature.compute(d.packageName, d.elements)
+          val candidates = expo.modules.accessibility.AkaKnowledge.discoverCandidateFunctions(d.elements)
+          for (c in candidates) {
+            try {
+              StaffRegistry.markDiscovered(applicationContext, d.packageName, StaffRegistryCore.akaFunctionCapabilityId(signature, c.label))
+            } catch (_: Exception) {}
+          }
           // AKA punctul 5 ("LIVE consulta efectiv cunostintele AKA") — observe_screen e singurul
           // punct unde agentul primeste DEJA cunostinte persistate din rulari anterioare (nu doar
           // ce vede acum), citite din ACELASI StaffRegistry, nicio sursa noua. Compunerea textuala
           // insasi e `StaffRegistryCore.attachKnownUiControls` (pura, testata JUnit separat —
-          // "contractul complet", 20.10.2026) — aici doar citirea Context-dependenta a datelor.
+          // "contractul complet", 20.10.2026) — aici doar citirea Context-dependenta a datelor,
+          // DUPA inventarierea de mai sus, ca descoperirile noi sa apara imediat.
           val caps = try { StaffRegistry.capsOf(applicationContext, d.packageName) } catch (_: Exception) { emptyMap() }
-          val detail = StaffRegistryCore.attachKnownUiControls(d.render(), caps)
+          val detail = StaffRegistryCore.attachKnownUiControls(d.render(), caps, signature)
           BensonAgentTools.toolResult(true, detail) to false
         }
       }
@@ -4732,6 +4745,40 @@ class BensonForegroundService : Service() {
         val confirmed = args.optBoolean("confirmed", false)
         val r = BensonCalendarExecutor.updateEvent(contentResolver, eventId, newTitle, newStart, newEnd, confirmed)
         BensonAgentTools.toolResult(r.ok, r.message) to false
+      }
+      // AKA — DISCOVER/MAP (20.10.2026) — explorare ACTIVA dar SIGURA: akaExploreByPressing
+      // refuza mecanic orice control cu risc sau camp editabil (BensonAccessibilityService.kt);
+      // aici doar inregistram tranzitia VERIFICATA (functie confirmata + muchie de navigatie),
+      // exact ca recordUiControlVerifiedLocked — nicio logica de decizie noua aici.
+      BensonAgentTools.AKA_EXPLORE_FUNCTION -> {
+        val label = args.optString("label").trim()
+        if (label.isBlank()) return BensonAgentTools.toolResult(false, "lipsește eticheta funcției") to false
+        if (svc == null) return BensonAgentTools.toolResult(false, "accesibilitatea nu e disponibilă") to false
+        val r = kotlinx.coroutines.runBlocking { svc.akaExploreByPressing(label) }
+        if (r.ok && r.transitionVerified) {
+          val pressed = r.pressedLabel
+          val toSig = r.toSignature
+          if (pressed != null && toSig != null) {
+            try {
+              StaffRegistry.markVerified(applicationContext, r.packageName, StaffRegistryCore.akaFunctionCapabilityId(r.screenSignature, pressed))
+              StaffRegistry.markVerified(applicationContext, r.packageName, StaffRegistryCore.akaNavigationCapabilityId(r.screenSignature, pressed, toSig))
+              AudioDiag.log(this, "AKA_RECORD", "pkg=${r.packageName} nav=${r.screenSignature}->$toSig")
+            } catch (_: Exception) {}
+          }
+        }
+        BensonAgentTools.toolResult(r.ok, r.message) to false
+      }
+      // AKA — "LIVE solicită informații despre o aplicație, identifică lipsurile" (20.10.2026) —
+      // interogare PURA a cunostintelor DEJA stranse, acelasi resolver de nume ca open_app
+      // (findLaunchablePackage), zero deschidere, zero apasare.
+      BensonAgentTools.AKA_QUERY_APP -> {
+        val name = args.optString("name").trim()
+        if (name.isBlank()) return BensonAgentTools.toolResult(false, "lipsește numele aplicației") to false
+        val pkg = findLaunchablePackage(normalizeForMatch(name))
+          ?: return BensonAgentTools.toolResult(false, "nu găsesc o aplicație numită „$name”") to false
+        val member = try { StaffRegistry.dossier(applicationContext, pkg) } catch (_: Exception) { null }
+          ?: return BensonAgentTools.toolResult(false, "aplicația „$name” nu e încă în registru") to false
+        BensonAgentTools.toolResult(true, StaffRegistryCore.formatAppKnowledgeSummary(member)) to false
       }
       BensonAgentTools.OPEN_URL -> {
         val url = args.optString("url").trim()
@@ -5748,6 +5795,71 @@ class BensonForegroundService : Service() {
           val liveWouldSee = StaffRegistryCore.attachKnownUiControls("(digest ecran omis in acest dump)", caps)
           AudioDiag.log(context, "AKA_DEBUG_LIVE_VIEW", "pkg=$pkg text=\"$liveWouldSee\"")
         }
+        // AKA DISCOVER/MAP (20.10.2026) — exercita EXACT drumul de productie al inventarierii
+        // automate (OBSERVE_SCREEN din runAgentToolLocked), fara niciun apel OpenAI: observa
+        // ecranul, descopera functiile candidate, le inregistreaza ca KNOWN daca sunt noi. Revert:
+        // sterge aceasta ramura + addAction DEBUG_AKA_DISCOVER.
+        "com.benson.butler.DEBUG_AKA_DISCOVER" -> {
+          if (!isDebugInjectArmed(prefs)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+          if (svc == null) {
+            AudioDiag.log(context, "AKA_DEBUG_DISCOVER", "ok=false reason=no_accessibility")
+            return
+          }
+          Thread({
+            val r = svc.akaDiscoverScreen()
+            if (r.ok) {
+              for (c in r.candidates) {
+                try {
+                  StaffRegistry.markDiscovered(context, r.packageName, StaffRegistryCore.akaFunctionCapabilityId(r.screenSignature, c.label))
+                } catch (_: Exception) {}
+              }
+            }
+            AudioDiag.log(
+              context, "AKA_DEBUG_DISCOVER",
+              "ok=${r.ok} pkg=${r.packageName} sig=${r.screenSignature} candidates=${r.candidates.size} " +
+                "labels=\"${r.candidates.joinToString(",") { it.label }.take(200)}\"",
+            )
+          }, "benson-aka-debug-discover").start()
+        }
+        // AKA DISCOVER/MAP (20.10.2026) — exercita EXACT drumul de productie al explorarii active
+        // (AKA_EXPLORE_FUNCTION), fara niciun apel OpenAI — apasa DOAR controale clasificate FREE,
+        // niciodata campuri editabile sau cu risc (vezi akaExploreByPressing). Revert: sterge +
+        // addAction DEBUG_AKA_EXPLORE.
+        "com.benson.butler.DEBUG_AKA_EXPLORE" -> {
+          if (!isDebugInjectArmed(prefs)) {
+            AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
+            return
+          }
+          val label = intent.getStringExtra("label")
+          if (label.isNullOrBlank()) return
+          val svc = expo.modules.accessibility.BensonAccessibilityService.instance
+          if (svc == null) {
+            AudioDiag.log(context, "AKA_DEBUG_EXPLORE", "ok=false reason=no_accessibility")
+            return
+          }
+          Thread({
+            val r = kotlinx.coroutines.runBlocking { svc.akaExploreByPressing(label) }
+            if (r.ok && r.transitionVerified) {
+              val pressed = r.pressedLabel
+              val toSig = r.toSignature
+              if (pressed != null && toSig != null) {
+                try {
+                  StaffRegistry.markVerified(context, r.packageName, StaffRegistryCore.akaFunctionCapabilityId(r.screenSignature, pressed))
+                  StaffRegistry.markVerified(context, r.packageName, StaffRegistryCore.akaNavigationCapabilityId(r.screenSignature, pressed, toSig))
+                } catch (_: Exception) {}
+              }
+            }
+            AudioDiag.log(
+              context, "AKA_DEBUG_EXPLORE",
+              "ok=${r.ok} pkg=${r.packageName} from=${r.screenSignature} to=${r.toSignature} " +
+                "verified=${r.transitionVerified} msg=\"${r.message.take(100)}\"",
+            )
+          }, "benson-aka-debug-explore").start()
+        }
         "com.benson.butler.DEBUG_INJECT_WAV" -> {
           if (!isDebugInjectArmed(prefs)) {
             AudioDiag.log(context, "DEBUG_INJECT", "action=rejected reason=disabled")
@@ -5909,6 +6021,8 @@ class BensonForegroundService : Service() {
         addAction("com.benson.butler.DEBUG_SCREEN_DIGEST") // FAZA 3 / SCREEN OBSERVATION
         addAction("com.benson.butler.DEBUG_AKA_PRESS") // AKA V1, 20.10.2026
         addAction("com.benson.butler.DEBUG_AKA_DUMP") // AKA V1, 20.10.2026
+        addAction("com.benson.butler.DEBUG_AKA_DISCOVER") // AKA DISCOVER/MAP, 20.10.2026
+        addAction("com.benson.butler.DEBUG_AKA_EXPLORE") // AKA DISCOVER/MAP, 20.10.2026
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         registerReceiver(debugInjectReceiver, filter, Context.RECEIVER_EXPORTED)
