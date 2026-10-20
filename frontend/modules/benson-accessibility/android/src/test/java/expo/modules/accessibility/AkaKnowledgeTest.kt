@@ -93,6 +93,27 @@ class AkaKnowledgeTest {
     assertTrue(AkaKnowledge.discoverCandidateFunctions(root).isEmpty())
   }
 
+  // --- Guvernanta (20.10.2026): "nu confunda informatiile despre utilizarea aplicatiilor cu
+  // datele personale continute in ele" — o eticheta gen email/telefon, intalnita INTAMPLATOR
+  // intr-un control clickabil din afara unei liste (ex. un grid de contacte favorite), nu e o
+  // FUNCTIE a aplicatiei si nu trebuie inregistrata ca atare. ---
+
+  @Test fun emailLookingLabelIsNeverACandidateFunction() {
+    val root = listOf(el(0, "ion.popescu@exemplu.ro", clickable = true, bounds = "0,0,500,100"))
+    assertTrue(AkaKnowledge.discoverCandidateFunctions(root).isEmpty())
+  }
+
+  @Test fun phoneNumberLookingLabelIsNeverACandidateFunction() {
+    val root = listOf(el(0, "+40 721 234 567", clickable = true, bounds = "0,0,500,100"))
+    assertTrue(AkaKnowledge.discoverCandidateFunctions(root).isEmpty())
+  }
+
+  @Test fun ordinaryMenuLabelsAreNotMistakenForPersonalData() {
+    // Control negativ — o eticheta normala de meniu nu trebuie exclusa de garda de mai sus.
+    val root = listOf(el(0, "Setări", clickable = true, bounds = "0,0,500,100"))
+    assertEquals(1, AkaKnowledge.discoverCandidateFunctions(root).size)
+  }
+
   // --- ScreenSignature — amprenta STRUCTURALA, nu de continut ---
 
   @Test fun sameStructureProducesTheSameSignatureEvenWhenDynamicContentDiffers() {

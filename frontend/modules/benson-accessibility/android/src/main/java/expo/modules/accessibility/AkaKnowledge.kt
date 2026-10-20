@@ -32,9 +32,26 @@ object AkaKnowledge {
     return o[0] <= i[0] && o[1] <= i[1] && o[2] >= i[2] && o[3] >= i[3]
   }
 
-  /** Un control clickabil, cu eticheta, care NU e continut geometric intr-un container derulabil. */
+  // GUVERNANTA (20.10.2026, cerinta explicita: "nu confunda informatiile despre utilizarea
+  // aplicatiilor cu datele personale continute in ele") — o eticheta care arata ca un email sau
+  // un numar de telefon nu e o FUNCTIE a aplicatiei (meniu/tab/buton), e CONTINUT personal aflat
+  // intamplator intr-un loc neobisnuit (ex. un grid de contacte favorite, neclickabil-in-lista).
+  // Generic, fara nicio cunoastere despre vreo aplicatie anume.
+  private val EMAIL_PATTERN = Regex("""[^\s@]+@[^\s@]+\.[^\s@]+""")
+  private val PHONE_PATTERN = Regex("""^[+(]?[\d][\d\s().-]{6,}\d$""")
+
+  private fun looksLikePersonalData(label: String): Boolean {
+    val trimmed = label.trim()
+    if (EMAIL_PATTERN.containsMatchIn(trimmed)) return true
+    if (PHONE_PATTERN.matches(trimmed)) return true
+    return false
+  }
+
+  /** Un control clickabil, cu eticheta, care NU e continut geometric intr-un container derulabil,
+   * si a carui eticheta nu arata ca date personale (email/telefon). */
   fun isCandidateFunction(element: ScreenElement, allElements: List<ScreenElement>): Boolean {
     if (!element.clickable || element.label.isBlank()) return false
+    if (looksLikePersonalData(element.label)) return false
     val scrollables = allElements.filter { it.scrollable && it !== element }
     return scrollables.none { contains(it.bounds, element.bounds) }
   }
