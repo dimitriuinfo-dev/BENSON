@@ -179,7 +179,10 @@ internal object StaffRegistryCore {
   // ("lampi"/"Spotify"/"Amazon" nu apar NICAIERI aici). Judecata insasi (se potriveste cererea cu
   // acest domeniu?) ramane STRICT la LIVE (modelul comun) — codul doar garanteaza ca FAPTUL ajunge
   // la el, de fiecare data, automat, inainte sa actioneze.
-  private val NAMED_CAPABILITY_DOMAIN: Map<String, String> = mapOf(
+  // AKA UNIVERSAL (20.10.2026) — vizibilitate lărgită (din `private`) ca ApplicationCapabilityRegistry
+  // să reutilizeze EXACT această hartă pentru câmpul semantic al contractului comun, fără o a doua
+  // taxonomie de domenii. Conținutul rămâne neschimbat.
+  val NAMED_CAPABILITY_DOMAIN: Map<String, String> = mapOf(
     CAP_NAVIGATE to "navigație și hărți",
     CAP_MEDIA_SEARCH to "căutare de muzică, piese sau conținut media",
     CAP_MEDIA_CONTROL to "control media (redare/pauză/volum)",

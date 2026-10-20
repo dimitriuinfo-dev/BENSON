@@ -85,6 +85,14 @@ object BensonAgentTools {
   // deschida nimic, fara nicio apasare. Daca nu exista nimic, spune onest ca nu e explorata.
   const val AKA_QUERY_APP = "aka_query_app"
 
+  // AKA UNIVERSAL (20.10.2026, "CONTRACTUL COMUN DE CUNOAȘTERE") — interogare prin OPERAȚIE, nu
+  // prin aplicație: "cine poate rezolva asta", nu "ce știu despre X". Reutilizează EXACT
+  // StaffRegistryCapabilityLookup/ApplicationCapabilityRegistry (deja scrise, D0, pur, testate) —
+  // acum cablate la StaffRegistry REAL, nu doar la o listă falsă de test. Întoarce DOAR o
+  // capabilitate operațională (DEVICE_VERIFIED/RUNTIME_VERIFIED) — o capabilitate doar cunoscută
+  // teoretic NU se confundă cu una dovedită; dacă nu există nicio dovadă, spune onest.
+  const val AKA_CAPABILITY_QUERY = "aka_capability_query"
+
   // TRAVEL AGENT (20.10.2026, "mandatul anterior" — WORKSTREAM C) — integrat in ACELASI motor de
   // instrumente, nu un orchestrator nou. Calea DETERMINISTA ("du-mă la X", deja DEVICE_PASS, tag
   // DEVICE_PASS_SURVIVOR_WAZE_NAV_2026-10-19) ramane neatinsa si e in continuare calea principala
@@ -107,7 +115,7 @@ object BensonAgentTools {
   val NAMES = listOf(
     EXPLAIN_COMMAND, OPEN_APP, OPEN_URL, PLAY_STREAM, SEARCH_IN_APP, OBSERVE_SCREEN, TAP_ELEMENT, PRESS_BUTTON, VERIFY_PLAYING,
     CALENDAR_READ_DAY, CALENDAR_FIND_FREE_SLOT, CALENDAR_CREATE_EVENT, CALENDAR_UPDATE_EVENT, AKA_EXPLORE_FUNCTION, AKA_QUERY_APP,
-    TRAVEL_NAVIGATE, MOBILITY_FIND_APP, SAY,
+    AKA_CAPABILITY_QUERY, TRAVEL_NAVIGATE, MOBILITY_FIND_APP, SAY,
   )
 
   // Plafon de pasi: mandatul cere explicit "Limiteaza numarul de pasi si reincercari. Nu lasa
@@ -186,6 +194,9 @@ object BensonAgentTools {
      {"type":"function","function":{"name":"$AKA_QUERY_APP",
       "description":"Întreabă AKA ce cunoaște deja despre o aplicație (orice aplicație instalată, după nume) — funcții, controale, trasee de navigare deja confirmate, FĂRĂ să deschidă nimic. Folosește-l când Masterul întreabă «știi să faci X în Y» sau înainte de o misiune într-o aplicație necunoscută, ca să nu reexplorezi ce e deja cunoscut. Dacă nu există nicio cunoștință, îți spune onest că aplicația n-a fost încă explorată.",
       "parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}}},
+     {"type":"function","function":{"name":"$AKA_CAPABILITY_QUERY",
+      "description":"Întreabă AKA «cine poate face X», pe TOATE aplicațiile instalate deodată, nu pe una singură — ex. navigate, call, message, video_call, media_search, media_control, calculate, search_products, web_search. Folosește-l când nu știi încă CE aplicație e potrivită pentru o intenție, înainte de open_app. Întoarce doar o aplicație cu dovadă REALĂ pe acest telefon (niciodată doar teoretică) — dacă nu există nicio dovadă încă, spune onest că nu e verificată și continuă cu observe_screen/aka_query_app pentru a o descoperi.",
+      "parameters":{"type":"object","properties":{"operation":{"type":"string"}},"required":["operation"],"additionalProperties":false}}},
      {"type":"function","function":{"name":"$TRAVEL_NAVIGATE",
       "description":"Pornește navigația reală spre o destinație, ca parte a unei misiuni COMPUSE (ex. «navighează spre X și...»). Pentru o comandă SIMPLĂ de navigație («du-mă la X»), NU folosi acest instrument — aceea e deja gestionată separat, înainte să ajungă la tine. confirmed=false (implicit): NU pornește nimic, doar spune cu ce aplicație ai naviga și întreabă. confirmed=true: pornește efectiv, DOAR după «da» explicit al Masterului într-o comandă ulterioară.",
       "parameters":{"type":"object","properties":{"destination":{"type":"string"},"confirmed":{"type":"boolean"}},"required":["destination","confirmed"],"additionalProperties":false}}},

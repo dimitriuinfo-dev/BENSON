@@ -139,4 +139,13 @@ class BensonAgentToolsGenericityTest {
     // Siguranta #5 din ordin: interzis explicit pentru actiuni sensibile.
     assertTrue(prompt.contains("plăți".lowercase()) || prompt.contains("plati"))
   }
+
+  // --- aka_capability_query (20.10.2026, AKA UNIVERSAL) — interogare pe operatie, peste tot
+  // registrul, nu pe o singura aplicatie numita. ---
+
+  @Test fun akaCapabilityQueryToolIsRegisteredAndDispatchable() {
+    assertTrue(BensonAgentTools.NAMES.contains(BensonAgentTools.AKA_CAPABILITY_QUERY))
+    val json = BensonAgentTools.toolsJson()
+    assertTrue(json.contains("\"operation\""))
+  }
 }

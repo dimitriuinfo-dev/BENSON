@@ -98,4 +98,43 @@ class ApplicationCapabilityRegistryTest {
     val records = capabilityRecordsFromStaffMember(member)
     assertTrue(records.none { isSafeToStateAsOperational(it) })
   }
+
+  // --- AKA UNIVERSAL (20.10.2026, "CONTRACTUL COMUN DE CUNOAȘTERE") — campurile noi, aditive ---
+
+  @Test fun meaningComesFromTheSameNamedDomainMapUsedBySemanticCompatibilityCheck() {
+    // O singura sursa — nu o a doua taxonomie: namedCapabilityDomainHints (LIVE+AKA) si
+    // meaningForOperation (contractul comun) trebuie sa citeasca EXACT acelasi text.
+    val hint = StaffRegistryCore.namedCapabilityDomainHints(mapOf(StaffRegistryCore.CAP_SEARCH_PRODUCTS to CapLevel.VERIFIED))
+    assertTrue(hint!!.contains(meaningForOperation(StaffRegistryCore.CAP_SEARCH_PRODUCTS)!!))
+  }
+
+  @Test fun genericUiControlOperationsHaveNoMeaning() {
+    assertNull(meaningForOperation(StaffRegistryCore.uiControlCapabilityId("5")))
+  }
+
+  @Test fun navigateUsesDeepLinkAccessMethodEverythingElseAccessibility() {
+    assertEquals(AccessMethod.DEEP_LINK, accessMethodForOperation(StaffRegistryCore.CAP_NAVIGATE))
+    assertEquals(AccessMethod.ACCESSIBILITY, accessMethodForOperation(StaffRegistryCore.CAP_CALL))
+    assertEquals(AccessMethod.ACCESSIBILITY, accessMethodForOperation(StaffRegistryCore.uiControlCapabilityId("9")))
+  }
+
+  @Test fun capabilityRecordsCarryConsumerAgentsForNamedOperations() {
+    val caps = StaffRegistryCore.initialCaps("com.whatsapp")
+    val member = StaffMember(
+      packageName = "com.whatsapp", displayName = "WhatsApp", category = "", launcher = true,
+      firstInstallTime = 0L, lastUpdateTime = 0L, versionName = "9.9.9", versionCode = 1L, caps = caps,
+    )
+    val records = capabilityRecordsFromStaffMember(member)
+    val callRecord = records.first { it.operation == StaffRegistryCore.CAP_CALL }
+    assertEquals(listOf("COMMUNICATIONS"), callRecord.consumerAgents)
+    assertEquals("9.9.9", callRecord.appVersion)
+  }
+
+  @Test fun riskDefaultsFromRequiresConfirmationWhenNotSetExplicitly() {
+    val r = CapabilityRecord(
+      appPackage = "com.example", operation = "x", state = CapabilityVerificationState.DECLARED,
+      requiresConfirmation = true,
+    )
+    assertEquals(RiskLevel.CONFIRM_REQUIRED, r.risk)
+  }
 }

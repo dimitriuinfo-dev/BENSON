@@ -4982,6 +4982,29 @@ class BensonForegroundService : Service() {
           ?: return BensonAgentTools.toolResult(false, "aplicația „$name” nu e încă în registru") to false
         BensonAgentTools.toolResult(true, StaffRegistryCore.formatAppKnowledgeSummary(member)) to false
       }
+      // AKA UNIVERSAL (20.10.2026) — PRIMA cablare reala a lantului StaffRegistryCapabilityLookup/
+      // ApplicationCapabilityRegistry (D0, 19.10.2026, pur, testat, NEATINS pana acum de niciun
+      // apelant real — gaura exacta identificata in audit). "cine poate face X", peste TOT
+      // registrul, nu o singura aplicatie — isSafeToStateAsOperational garanteaza ca raspunsul nu
+      // confunda o cunostinta teoretica cu una dovedita pe acest telefon.
+      BensonAgentTools.AKA_CAPABILITY_QUERY -> {
+        val operation = args.optString("operation").trim()
+        if (operation.isBlank()) return BensonAgentTools.toolResult(false, "lipsește operația căutată") to false
+        val lookup = StaffRegistryCapabilityLookup(staffProvider = { StaffRegistry.load(applicationContext) })
+        val best = lookup.selectCapability(operation)
+        if (best == null) {
+          BensonAgentTools.toolResult(
+            false,
+            "Nicio aplicație nu are încă o dovadă reală, verificată pe acest telefon, pentru „$operation”. Pot explora o aplicație candidată dacă îmi spui care.",
+          ) to false
+        } else {
+          val member = try { StaffRegistry.dossier(applicationContext, best.appPackage) } catch (_: Exception) { null }
+          val label = member?.displayName ?: best.appPackage
+          val meaningNote = best.meaning?.let { " ($it)" } ?: ""
+          AudioDiag.log(this, "AKA_CAPABILITY_QUERY", "operation=$operation pkg=${best.appPackage} state=${best.state}")
+          BensonAgentTools.toolResult(true, "„$label”$meaningNote poate face asta — verificat real pe acest telefon.") to false
+        }
+      }
       // TRAVEL AGENT (20.10.2026) — DOAR pentru misiuni COMPUSE; comanda simpla de navigatie
       // ramane pe calea deterministica existenta, neatinsa. Reutilizeaza EXACT acelasi
       // capability-lookup (AKA) si acelasi mecanism de lansare+verificare SURVIVOR.
