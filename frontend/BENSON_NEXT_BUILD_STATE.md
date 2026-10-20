@@ -61,6 +61,52 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## STAGE 3 — SURVIVOR (20.10.2026) — construit peste infrastructura existentă, checkpoint NU DEVICE_PASS
+
+**Audit întâi, cerut explicit** — ce exista deja, nu s-a dublat nimic:
+- `InteractionVerification.kt` — deja auto-etichetat „SURVIVOR/EXECUTOR" în propriul header;
+  observarea efectului real (`InteractionEvidence`/`classifyInteractionOutcome`) rămâne NESCHIMBATĂ.
+- `AgentVerificationGate.kt` — gărzile de SECVENȚĂ (acțiune→observare obligatorie) rămân neatinse.
+- `BensonAgentContracts.kt` (D0) — `ExecutionOutcome`, `ExecutionIdempotencyKey`/
+  `isDuplicateExecution`: deja pure, deja testate, dar NECABLATE până acum în drumul real —
+  SURVIVOR le cablează, nu le redefinește.
+- `NavigationMissionTrace.kt` — deja numit „SURVIVOR V0" în header, izolat (Waze); confirmă
+  tiparul deja acceptat (Mission/MissionStep/ExecutionOutcome), nu contrazis de ce s-a construit.
+
+**Construit, nou, exact cele 8 cerințe**:
+1. **Observă rezultatul real** — deja existent (`InteractionEvidence`), reutilizat, nu dublat.
+2. **Detectează acțiuni eșuate/blocate** — deja existent, reutilizat.
+3. **Identifică originea** (AKA/EXECUTOR/PERMISIUNE/APLICAȚIE EXTERNĂ) — NOU:
+   `SurvivorDiagnosis.classifyFaultOrigin`, pur, din semnalele deja produse (fără sursă nouă de date).
+4. **Reîncearcă doar operații sigure** — NOU: `isSafeToRetry` — niciodată pentru o acțiune deja
+   reușită o dată (previne duplicarea), niciodată pentru un control CONFIRM/REFUSE, niciodată
+   pentru UI_NODE_NOT_FOUND (cere reidentificare întâi) sau VERIFICATION_FAILED (ceva s-a întâmplat
+   deja, posibil ireversibil) sau UNKNOWN (nicio dovadă de ghicit).
+5. **Cere AKA reidentificare la schimbarea interfeței** — NOU: `needsReidentification` +
+   `StaffRegistryCore.downgradeToReverify`/`StaffRegistry.markNeedsReverification` — cablat în
+   `press_button`/`tap_element`: un eșec UI_NODE_NOT_FOUND pe un control deja VERIFIED îl
+   retrogradează la REVERIFY, din dovadă reală, nu bănuială.
+6. **Recuperează misiuni întrerupte** — NOU, scopat corect: `missionProgress` (traseu STRICT al
+   rulării curente, NU `ActionHistory`-ul global, partajat între comenzi diferite — amestecarea
+   lor ar fi afirmat fals că o misiune nouă „a realizat" ceva dintr-o conversație anterioară).
+   Mesajul de eșec onest la epuizarea pașilor spune acum CE s-a reușit, nu doar „n-am reușit".
+7. **Previne repetarea apelurilor/mesajelor/plăților** — NOU: gard al patrulea în bucla agentului,
+   reutilizând `ExecutionIdempotencyKey`/`isDuplicateExecution` (D0) — o acțiune identică
+   (instrument + parametri identici) deja reușită o dată în aceeași rulare e refuzată a doua oară.
+8. **Raportează corect succes/eșec/incertitudine** — deja existent (UNKNOWN distinct de
+   VERIFICATION_FAILED), neschimbat.
+
+**SURVIVOR nu conduce misiuni, nu înlocuiește LIVE** — confirmat prin construcție: niciuna din
+funcțiile de mai sus decide CE misiune se face, doar CE se întâmplă cu un pas deja eșuat.
+
+**Teste**: `SurvivorDiagnosisTest.kt` (13 teste noi, pure), `downgradeToReverify` (3 teste noi).
+628/628 teste totale (benson-accessibility + benson-foreground-service), zero regresii.
+`gradlew :app:assembleRelease` BUILD SUCCESSFUL.
+
+**NU declarat DEVICE_PASS** (cerut explicit: nu pe baza unui build sau a testelor unitare) — nimic
+din SURVIVOR etapa 3 a fost exercitat pe dispozitiv real încă. Verificare pe dispozitiv rămâne
+pasul următor, separat.
+
 ## STAGE 2 — LIVE folosește AKA, un singur orchestrator (20.10.2026, confirmat prin citire de cod)
 
 Confirmat, fără nicio modificare de cod (verificare, nu construcție nouă):

@@ -461,4 +461,27 @@ class StaffRegistryCoreTest {
     val text = StaffRegistryCore.formatAppKnowledgeSummary(member("com.oneplus.calculator", name = "Calculator").copy(caps = caps))
     assertTrue(text.contains("funcții numite") && text.contains(StaffRegistryCore.CAP_CALCULATE))
   }
+
+  // --- downgradeToReverify — SURVIVOR etapa 3: "solicita AKA reidentificarea functiilor cand
+  // interfata s-a modificat", declansat de o dovada REALA de esec, nu de o presupunere. ---
+
+  @Test fun downgradeToReverifyLowersAVerifiedCapabilityButNothingElse() {
+    val id = StaffRegistryCore.uiControlCapabilityId("5")
+    val other = StaffRegistryCore.uiControlCapabilityId("9")
+    val caps = mapOf(id to CapLevel.VERIFIED, other to CapLevel.VERIFIED)
+    val after = StaffRegistryCore.downgradeToReverify(caps, id)
+    assertEquals(CapLevel.REVERIFY, after[id])
+    assertEquals(CapLevel.VERIFIED, after[other]) // alta dovada, neatinsa
+  }
+
+  @Test fun downgradeToReverifyDoesNothingToACapabilityThatWasOnlyKnownNotVerified() {
+    // Nu era o certitudine oricum - nimic de "stricat".
+    val id = StaffRegistryCore.uiControlCapabilityId("5")
+    val caps = mapOf(id to CapLevel.KNOWN)
+    assertEquals(caps, StaffRegistryCore.downgradeToReverify(caps, id))
+  }
+
+  @Test fun downgradeToReverifyIsANoOpWhenTheCapabilityDoesNotExistAtAll() {
+    assertEquals(emptyMap<String, CapLevel>(), StaffRegistryCore.downgradeToReverify(emptyMap(), "ui_control:necunoscut"))
+  }
 }

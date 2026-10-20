@@ -209,5 +209,19 @@ internal object StaffRegistry {
     save(ctx, updated)
   }
 
+  // SURVIVOR (20.10.2026, etapa 3) — vezi StaffRegistryCore.downgradeToReverify: retrogradare
+  // declansata de o DOVADA REALA de esec (nu de banuiala), simetric cu markVerified.
+  fun markNeedsReverification(ctx: Context, packageName: String, capabilityId: String) {
+    val list = load(ctx)
+    val idx = list.indexOfFirst { it.packageName == packageName }
+    if (idx < 0) return
+    val m = list[idx]
+    if (m.caps[capabilityId] != CapLevel.VERIFIED) return
+    val updated = list.toMutableList()
+    updated[idx] = m.copy(caps = StaffRegistryCore.downgradeToReverify(m.caps, capabilityId))
+    save(ctx, updated)
+    AudioDiag.log(ctx, "REGISTRY_EVENT", "kind=needs_reverify cap=$capabilityId")
+  }
+
   fun invalidate() { cache = null }
 }

@@ -276,6 +276,18 @@ internal object StaffRegistryCore {
     return out
   }
 
+  // SURVIVOR (20.10.2026, etapa 3) — "solicita AKA reidentificarea functiilor cand interfata s-a
+  // modificat": retrogradeaza o cunostinta VERIFIED la REVERIFY cand EXECUTORUL tocmai a esuat
+  // sa gaseasca acel control (UI_NODE_NOT_FOUND), DOVADA REALA ca interfata nu mai e cum se
+  // credea — nu o presupunere. Doar VERIFIED se retrogradeaza; KNOWN ramane KNOWN (nu era oricum
+  // o certitudine), iar o cheie absenta ramane absenta (nimic de retrogradat).
+  fun downgradeToReverify(caps: Map<String, CapLevel>, capabilityId: String): Map<String, CapLevel> {
+    if (caps[capabilityId] != CapLevel.VERIFIED) return caps
+    val out = LinkedHashMap(caps)
+    out[capabilityId] = CapLevel.REVERIFY
+    return out
+  }
+
   // M3 — diferenta fata de starea salvata. "Plecat" NU sterge fisa; o arhiveaza (vezi reconcile).
   fun diff(old: List<StaffMember>, fresh: List<StaffMember>): List<StaffEvent> {
     val oldByPkg = old.filter { !it.archived }.associateBy { it.packageName }

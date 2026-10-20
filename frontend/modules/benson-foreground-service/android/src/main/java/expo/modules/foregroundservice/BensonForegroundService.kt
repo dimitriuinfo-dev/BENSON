@@ -4588,6 +4588,23 @@ class BensonForegroundService : Service() {
   // Punctul 3 (verificare relevanta, nu o schimbare oarecare): se persisteaza STRICT cand
   // strongEvidence e adevarat (semnalul de focalizare, nu doar "ceva s-a schimbat pe ecran
   // undeva") — mai conservator decat raspunsul dat Masterului, deliberat.
+  // SURVIVOR (20.10.2026, etapa 3) — "solicita AKA reidentificarea functiilor cand interfata s-a
+  // modificat": cand EXECUTORUL tocmai a esuat sa gaseasca un control pentru care exista deja o
+  // dovada VERIFIED, aceea tocmai s-a aratat GRESITA, pe loc, prin incercare reala — se
+  // retrogradeaza la REVERIFY (StaffRegistryCore.downgradeToReverify), nu ramane sa afirme fals
+  // catre o misiune viitoare ca acel control "sigur exista". Reutilizeaza SurvivorDiagnosis.kt
+  // (pur, testat) pentru decizie — aici doar citirea/scrierea Context-dependenta.
+  private fun recordSurvivorReidentificationLocked(packageName: String, label: String, failure: expo.modules.accessibility.InteractionFailureReason?) {
+    if (packageName.isBlank() || label.isBlank()) return
+    try {
+      val capId = StaffRegistryCore.uiControlCapabilityId(label)
+      val hadVerified = StaffRegistry.capsOf(applicationContext, packageName)[capId] == CapLevel.VERIFIED
+      if (!needsReidentification(failure, hadVerified)) return
+      StaffRegistry.markNeedsReverification(applicationContext, packageName, capId)
+    } catch (_: Exception) {
+    }
+  }
+
   private fun recordUiControlVerifiedLocked(packageName: String, label: String, strongEvidence: Boolean) {
     if (!strongEvidence || packageName.isBlank() || label.isBlank()) return
     try {
@@ -4684,6 +4701,7 @@ class BensonForegroundService : Service() {
         if (idx < 0) return BensonAgentTools.toolResult(false, "lipsește indexul elementului") to false
         val r = kotlinx.coroutines.runBlocking { svc.tapDigestElement(idx, label) }
         if (r.ok) recordUiControlVerifiedLocked(r.packageName, label, r.strongEffectEvidence)
+        else recordSurvivorReidentificationLocked(r.packageName, label, r.failureReason)
         BensonAgentTools.toolResult(r.ok, r.message) to false
       }
       // SEMANTIC UI RESOLVER (19.10.2026, raspuns la DEVICE_FAIL Calculator repetat de 4 ori) —
@@ -4696,6 +4714,7 @@ class BensonForegroundService : Service() {
         if (svc == null) return BensonAgentTools.toolResult(false, "accesibilitatea nu e disponibilă") to false
         val r = kotlinx.coroutines.runBlocking { svc.pressButtonByLabel(label) }
         if (r.ok) recordUiControlVerifiedLocked(r.packageName, label, r.strongEffectEvidence)
+        else recordSurvivorReidentificationLocked(r.packageName, label, r.failureReason)
         BensonAgentTools.toolResult(r.ok, r.message) to false
       }
       // CALENDAR AGENT (19.10.2026) — API oficial Android (CalendarContract), nu Accessibility;
@@ -4915,6 +4934,19 @@ class BensonForegroundService : Service() {
       // ULTIMEI observari reale (observe_screen), ca sa putem verifica ca un numar rostit ca
       // rezultat final chiar a fost VAZUT, nu doar calculat. Vezi AgentVerificationGate.kt.
       var lastObservedScreenText: String? = null
+      // SURVIVOR (20.10.2026, etapa 3) — "preveni repetarea apelurilor/mesajelor/platilor":
+      // reutilizeaza ExecutionIdempotencyKey/isDuplicateExecution (D0, BensonAgentContracts.kt,
+      // deja pur/testat) ca sa refuze o actiune IDENTICA (acelasi instrument, aceiasi parametri)
+      // cerinduta a doua oara in ACEEASI rulare, dupa ce a raportat DEJA succes o data — modelul
+      // poate crede gresit ca prima incercare a esuat (ex. un timeout de retea) si sa ceara din
+      // nou exact acelasi apel, ceea ce ar duplica un efect real.
+      val executedActions = mutableSetOf<ExecutionIdempotencyKey>()
+      // SURVIVOR (20.10.2026, etapa 3) — "recupera misiunile intrerupte atunci cand e posibil":
+      // un traseu SCURT, STRICT al ACESTEI rulari (nu istoricul global ActionHistory, partajat
+      // intre comenzi diferite — amestecarea lor ar insemna sa afirmam ca am "realizat" ceva dintr-o
+      // misiune anterioara, fara legatura). Cand rularea se opreste la MAX_STEPS fara sa termine,
+      // mesajul onest de esec spune CE s-a reusit pana atunci, nu doar "n-am reusit".
+      val missionProgress = mutableListOf<String>()
       try {
         while (!done && steps < BensonAgentTools.MAX_STEPS) {
           if (myRun != agentRunId) { AudioDiag.log(this, "AGENT_CANCELLED", "run=$myRun"); return@Thread }
@@ -5028,17 +5060,41 @@ class BensonForegroundService : Service() {
               callIndex++
               continue
             }
+            // SURVIVOR — GARD AL PATRULEA: o actiune (ACTION, nu observare) IDENTICA (acelasi
+            // instrument + aceiasi parametri) care a reusit DEJA o data in aceasta rulare nu se
+            // repeta. Doar actiunile cu efect potential extern conteaza — observarea nu are nevoie
+            // de aceasta garda (poate fi chemata oricat de des, e read-only).
+            val idempotencyKey = if (agentStepKindFor(fname) == AgentStepKind.ACTION) {
+              ExecutionIdempotencyKey(myRun.toString(), "$fname:${fargs}")
+            } else null
+            if (idempotencyKey != null && isDuplicateExecution(executedActions, idempotencyKey.missionId, idempotencyKey.stepId)) {
+              AudioDiag.log(this, "AGENT_VERIFY_GATE", "blocked=duplicate_action step=$callIndex name=$fname")
+              messages.put(JSONObject().apply {
+                put("role", "tool"); put("tool_call_id", call.optString("id"))
+                put("content", BensonAgentTools.toolResult(false, "Ai mai făcut exact această acțiune o dată, cu succes, în această sarcină — nu o repet, ca să nu dublez efectul. Dacă nu a mers, spune-mi clar ce lipsește."))
+              })
+              callIndex++
+              continue
+            }
             val t0 = System.currentTimeMillis()
             val (result, finished) = runAgentTool(fname!!, fargs, command, myRun)
             AudioDiag.log(this, "AGENT_TOOL", "step=$steps name=$fname ms=${System.currentTimeMillis() - t0}")
             messages.put(JSONObject().apply {
               put("role", "tool"); put("tool_call_id", call.optString("id")); put("content", result)
             })
+            val toolOk = runCatching { JSONObject(result).optBoolean("ok", false) }.getOrDefault(false)
             if (fname == BensonAgentTools.OPEN_APP) {
-              openAppSucceeded = openAppSucceeded || runCatching { JSONObject(result).optBoolean("ok", false) }.getOrDefault(false)
+              openAppSucceeded = openAppSucceeded || toolOk
             }
             if (fname == BensonAgentTools.OBSERVE_SCREEN) {
               lastObservedScreenText = runCatching { JSONObject(result).optString("detail").takeIf { it.isNotBlank() } }.getOrNull()
+            }
+            if (idempotencyKey != null && toolOk) {
+              executedActions.add(idempotencyKey)
+              // Doar eticheta/numele (generic, orice instrument) — nu textul complet al
+              // raspunsului, ca sa nu dubleze o afirmatie deja verificata separat.
+              val subject = fargs.optString("label").ifBlank { fargs.optString("name") }.ifBlank { fargs.optString("title") }
+              missionProgress.add(if (subject.isBlank()) fname else "$fname($subject)")
             }
             gateState = advanceVerificationGate(gateState, callIndex, agentStepKindFor(fname))
             callIndex++
@@ -5059,7 +5115,14 @@ class BensonForegroundService : Service() {
             AudioDiag.log(this, "AGENT_SPEECH_SUPPRESSED", "run=$myRun reason=cancelled")
             return@post
           }
-          val msg = "Nu am reușit să duc asta la capăt, Master. Spuneți-mi altfel, vă rog."
+          // SURVIVOR (20.10.2026, etapa 3) — "recupera misiunile intrerupte": un esec onest nu
+          // trebuie sa fie si un esec OARB — daca s-a realizat ceva verificat inainte de blocaj,
+          // Masterul afla CE, ca sa poata continua de acolo, nu de la zero.
+          val msg = if (missionProgress.isEmpty()) {
+            "Nu am reușit să duc asta la capăt, Master. Spuneți-mi altfel, vă rog."
+          } else {
+            "Nu am reușit să duc asta la capăt, Master. Am apucat să fac: ${missionProgress.joinToString(", ")}. Spuneți-mi cum continuăm."
+          }
           updateBubbleNative(msg, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
           speakNativeFallbackThenCapture(msg)
         }
