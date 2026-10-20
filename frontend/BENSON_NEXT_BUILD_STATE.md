@@ -61,6 +61,58 @@ finală incoerentă precum `89.979()`.
 `BensonAccessibilityService.kt` (modificat, fișier deja COMIS anterior — deci diff normal, dar
 rămâne NECOMIS acum, alături de restul lucrului nevalidat Calculator, până la o nouă dovadă reală).
 
+## AKA P0 — CONTINUARE 2 (20.10.2026): checkpoint comis, contract complet testat, test pregătit
+
+Răspuns la cele 6 cerințe ale rundei următoare raportului 5137b43.
+
+**1. Checkpoint de dezvoltare** — comis și împins: `a2364d9` ("CHECKPOINT DE DEZVOLTARE (nu
+DEVICE_PASS)"), 33 fișiere, tot ce era necomis pe acest fir (press_button/G-1, cele 4 gărzi
+SURVIVOR, LEGEA PERSONALULUI/StaffRegistry, Calendar Agent, AKA V1) — compilează curat
+(`assembleRelease` verde) și trece 581/581 teste. Explicit NU etichetat DEVICE_PASS; `frontend/CLAUDE.md`
+și `BensonCommandRegistry.kt` (necomise dinainte, nelegate de acest fir) au rămas neatinse.
+
+**2. Accessibility — BLOCAJ REAL, cere acțiunea Masterului.** Verificat non-distructiv
+(`settings get secure accessibility_enabled` → `0`; `dumpsys accessibility` → `Bound services: {}`).
+Nu am reinstalat nimic ca să repar asta. Cauza cea mai probabilă: Android dezactivează automat un
+serviciu de Accesibilitate al unei aplicații sideload-uite la fiecare actualizare a APK-ului — exact
+ce am făcut de 3 ori rândul trecut. **Ce trebuie activat manual, exact**:
+  1. Setări → Accesibilitate (Accessibility) → Servicii descărcate / instalate → **BENSON**.
+  2. Activează comutatorul → confirmă în dialogul de avertizare.
+  3. **Dacă butonul e gri**, mai întâi: Setări → Aplicații → BENSON → (⋮, trei puncte, dreapta sus)
+     → „Permite setări restricționate" → apoi pasul 1-2 din nou.
+Până la reactivare, `press_button`/`tap_element`/`observe_screen` nu pot fi testate pe dispozitiv
+(confirmat: ultima tentativă de `DEBUG_SCREEN_DIGEST` a răspuns `ok=false reason=no_accessibility_or_root`).
+
+**3. Contractul complet LIVE↔AKA, verificat local** — `StaffRegistryCore.attachKnownUiControls(screenText, caps)`
+(nou, pur) extrage EXACT compunerea pe care `runAgentToolLocked` o aplică (nu doar formatarea
+izolată de runda trecută): digest-ul original + linia AKA, DOAR când există ceva VERIFIED. 4 teste
+noi: adaugă linia corect; **text identic, zero schimbare, când nu există istoric** (zero regresie
+pe Calculator/WhatsApp/Waze, deja dovedite); ignoră `REVERIFY` (nu afirmă „deja verificat" pentru
+ceva ce așteaptă reconfirmare); nu listează capabilități NUMITE (CAP_CALL) ca și cum ar fi
+controale. `runAgentToolLocked`/`DEBUG_AKA_DUMP` apelează acum ACEEAȘI funcție (nu o duplicau).
+
+**4. Control ≠ înțelegerea funcției, confirmat explicit** — 2 teste noi: verificarea unui
+`ui_control:*` nu promovează NICIODATĂ, implicit, o capabilitate NUMITĂ (`CAP_CALCULATE` etc.);
+`attachKnownUiControls` nu listează niciodată o capabilitate numită ca și cum ar fi un control.
+Cele două niveluri rămân separate, în ACELAȘI registru, fără promovare încrucișată automată — nu
+a fost nevoie de cod nou pentru asta, doar de dovada explicită că separarea e reală, nu presupusă.
+
+**5. Testul real pregătit, NEEXECUTAT — autorizare de buget necesară**:
+  - **Comandă**: „Benson, deschide Calculatorul și apasă 5" (scurtă, o singură acțiune, deja
+    cunoscută agentului — niciun calcul nou, niciun risc).
+  - **Pași expectați**: `open_app` → `observe_screen` (ar trebui să conțină acum, dacă
+    Accessibility e activă și cunoștința e încă persistată, linia „Cunoștințe AKA anterioare...
+    5, 9.") → `press_button("5")` → `say`.
+  - **Ce dovedește**: capturat din logcat-ul REAL al cererii HTTP către model (sau din
+    `AGENT_TOOL`/conținutul trimis), că textul `observe_screen` chiar conținea linia AKA — proba
+    că LIVE a PRIMIT cunoștința (nu doar că funcția pură o produce izolat, cum e dovedit acum).
+  - **Cost estimat**: sub 0,02 USD (4 pași, payload mic, `gpt-5-nano`). **Plafon strict**: 0,03 USD,
+    o singură rulare, fără reîncercare automată.
+  - **NU se execută fără autorizare explicită de buget.** Precondiție: Accessibility reactivat
+    manual (punctul 2) înainte de această rulare.
+
+**6.** Niciun alt agent (Calendar/Waze/Shopping) nu a fost pornit sau dezvoltat în continuare.
+
 ## AKA V1 — CONTINUARE, CICLU COMPLET VALIDAT PE DISPOZITIV REAL (20.10.2026)
 
 Mandat: 8 cerinte punctuale pe raportul af27cf7. Niciun apel OpenAI; testat cu harness-ul
