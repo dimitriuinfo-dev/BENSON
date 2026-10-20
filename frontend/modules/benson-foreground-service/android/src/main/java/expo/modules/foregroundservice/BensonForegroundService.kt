@@ -307,10 +307,20 @@ class BensonForegroundService : Service() {
   // (confirmare/disambiguare) setează unul dintre ele ÎNAINTE de a fi rostită și îl golește abia
   // după răspuns, deci "niciunul setat" la finalul unui TTS înseamnă sigur raport final, nu
   // întrebare încă nerezolvată.
+  // FIX_LIVE_CONVERSATION_CONTINUES_1 (20.10.2026, mandat "BENSON OPENAI VOICE CHATBOT") — CAUZA
+  // DOVEDITĂ a plângerii "nu pot conversa natural": finishBrainCommandSuccess (apelat de calea
+  // conversaţională fără tool ŞI de instrumentul `say`) închidea sesiunea necondiţionat după
+  // FIECARE replică a agentului ("not_opened reason=final_answer_benson_stays_silent"), chiar şi
+  // când agentul tocmai PUSESE o întrebare de clarificare — Masterul trebuia să repete "Benson"
+  // ca să răspundă la propria întrebare a lui BENSON. `agentAwaitingReply` e exact ca un
+  // `pendingXxx` determinist (acelaşi tipar): setat ÎNAINTE de a rosti o întrebare/invitaţie la
+  // continuare, citit aici ca să ţină sesiunea deschisă, golit la următorul răspuns al agentului.
+  @Volatile private var agentAwaitingReply = false
+
   private fun hasAnyPendingNativeState(): Boolean =
     pendingWaDisambiguation != null || pendingWaAction != null || pendingAppSearch != null ||
       pendingControlAction != null || pendingYoutubePlay != null || pendingAppOpen != null ||
-      pendingNav != null || pendingResultChoice != null
+      pendingNav != null || pendingResultChoice != null || agentAwaitingReply
 
   private fun closeSession(reason: String) {
     if (sessionOpenUntil == 0L) return
@@ -2200,6 +2210,7 @@ class BensonForegroundService : Service() {
     pendingWaAction = null
     pendingWaDisambiguation = null
     pendingControlAction = null
+    agentAwaitingReply = false
     try { nativeTts?.stop() } catch (_: Exception) {}
     ttsSpeakingSince = 0L
     ttsLastDoneAt = System.currentTimeMillis()
@@ -2317,9 +2328,11 @@ class BensonForegroundService : Service() {
         val enc = try { java.net.URLEncoder.encode(pending.dest, "UTF-8") } catch (_: Exception) { pending.dest }
         // Aceleasi URI-uri dovedite pe dispozitiv (wazeTool.ts): Waze intai, google.navigation ca
         // rezerva.
-        val uris = if (pending.pkg == "com.waze") {
-          listOf("waze://?q=$enc&navigate=yes", "google.navigation:q=$enc")
-        } else listOf("google.navigation:q=$enc", "waze://?q=$enc&navigate=yes")
+        // TRAVEL AGENT (20.10.2026) — EXTRAS in navigationLaunchUris (NavigationMissionTrace.kt),
+        // reutilizat acum si de instrumentul agent travel_navigate; literalul de aici a fost
+        // inlocuit cu apelul functiei pure, fara nicio schimbare de comportament (aceleasi URI-uri,
+        // aceeasi ordine — vezi NavigationLaunchUrisTest.kt pentru proba de regresie).
+        val uris = navigationLaunchUris(pending.pkg, enc)
         var ok = false
         var succeededIndex = -1
         for ((idx, u) in uris.withIndex()) {
@@ -4664,13 +4677,43 @@ class BensonForegroundService : Service() {
           is ExecutionOutcome.Failed -> BensonAgentTools.toolResult(false, "am pornit $app, dar nu a ajuns pe ecran") to false
           // Success, sau imposibil de verificat (accesibilitate/pachet necunoscut) — raspunsul deja
           // onest al tryNativeOpenApp ramane cel raportat, exact comportamentul dinainte de fix.
-          else -> BensonAgentTools.toolResult(true, resp ?: "am deschis aplicația") to false
+          else -> {
+            // LIVE+AKA — VERIFICAREA COMPATIBILITĂȚII SEMANTICE (20.10.2026): daca aplicatia
+            // tocmai deschisa are un domeniu NUMIT cunoscut, se ataseaza aici — cel mai devreme
+            // punct posibil, inainte ca modelul sa apuce sa ceara o cautare incompatibila.
+            val domainHint = if (pkg != null) {
+              try { StaffRegistryCore.namedCapabilityDomainHints(StaffRegistry.capsOf(applicationContext, pkg)) } catch (_: Exception) { null }
+            } else null
+            val detail = resp ?: "am deschis aplicația"
+            BensonAgentTools.toolResult(true, if (domainHint != null) "$detail $domainHint" else detail) to false
+          }
         }
       }
+      // LIVE+AKA — VERIFICAREA COMPATIBILITĂȚII SEMANTICE (20.10.2026). In doua faze, ca restul
+      // instrumentelor cu efect (Calendar/Travel/Mobility): confirmed=false NU cauta nimic — doar
+      // intoarce domeniul CUNOSCUT al aplicatiei curente (AKA, StaffRegistryCore.namedCapabilityDomainHints,
+      // pur, nicio regula specifica unui cuvant), ca LIVE sa decida SEMANTIC daca cererea se
+      // potriveste, INAINTE ca EXECUTORUL sa caute efectiv orbeste. Cand nu exista niciun domeniu
+      // NUMIT cunoscut (aplicatie necunoscuta sau fara capacitate declarata), nu e nimic de
+      // verificat — cautarea trece direct, exact ca inainte (zero regresie pe fluxurile deja
+      // dovedite care NU folosesc acest instrument de agent, ci calea deterministica separata).
       BensonAgentTools.SEARCH_IN_APP -> {
         val q = args.optString("query").trim()
         if (q.isBlank()) return BensonAgentTools.toolResult(false, "lipsește textul căutat") to false
         if (svc == null) return BensonAgentTools.toolResult(false, "accesibilitatea nu e disponibilă") to false
+        val confirmed = args.optBoolean("confirmed", false)
+        if (!confirmed) {
+          val fg = svc.currentForegroundPackageLive()
+          val caps = if (fg.isNullOrBlank()) emptyMap() else try { StaffRegistry.capsOf(applicationContext, fg) } catch (_: Exception) { emptyMap() }
+          val domainHint = StaffRegistryCore.namedCapabilityDomainHints(caps)
+          if (domainHint != null) {
+            return BensonAgentTools.toolResult(
+              false,
+              "$domainHint Dacă „$q” NU se potrivește cu acest domeniu, nu căuta aici — explică-i Masterului incompatibilitatea și propune o aplicație potrivită (fără să o deschizi fără acordul lui). Dacă se potrivește, cheamă din nou «search_in_app» cu confirmed=true.",
+            ) to false
+          }
+          // Niciun domeniu NUMIT cunoscut — nimic de verificat, cauta direct (comportament vechi).
+        }
         val r = kotlinx.coroutines.runBlocking {
           svc.runUniversalHandCommand(
             expo.modules.accessibility.UniversalHandCommand.Search(q), skipConfirmGate = true,
@@ -4815,6 +4858,80 @@ class BensonForegroundService : Service() {
           ?: return BensonAgentTools.toolResult(false, "aplicația „$name” nu e încă în registru") to false
         BensonAgentTools.toolResult(true, StaffRegistryCore.formatAppKnowledgeSummary(member)) to false
       }
+      // TRAVEL AGENT (20.10.2026) — DOAR pentru misiuni COMPUSE; comanda simpla de navigatie
+      // ramane pe calea deterministica existenta, neatinsa. Reutilizeaza EXACT acelasi
+      // capability-lookup (AKA) si acelasi mecanism de lansare+verificare SURVIVOR.
+      BensonAgentTools.TRAVEL_NAVIGATE -> {
+        val destination = args.optString("destination").trim()
+        if (destination.isBlank()) return BensonAgentTools.toolResult(false, "lipsește destinația") to false
+        val confirmed = args.optBoolean("confirmed", false)
+        val candidates = try { StaffRegistry.staffForCapability(this, StaffRegistryCore.CAP_NAVIGATE) } catch (_: Exception) { emptyList() }
+        val chosen = candidates.firstOrNull()
+          ?: return BensonAgentTools.toolResult(false, "nu am o aplicație de navigație pe telefon") to false
+        val (member, _) = chosen
+        if (!confirmed) {
+          return BensonAgentTools.toolResult(false, "PROPUNERE (neconfirmat): te duc la „$destination” cu ${member.displayName}. Confirm?") to false
+        }
+        val enc = try { java.net.URLEncoder.encode(destination, "UTF-8") } catch (_: Exception) { destination }
+        val uris = navigationLaunchUris(member.packageName, enc)
+        var launched = false
+        for (u in uris) {
+          launched = try {
+            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(u)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+          } catch (_: Exception) { false }
+          if (launched) break
+        }
+        if (!launched) return BensonAgentTools.toolResult(false, "n-am putut porni navigația spre „$destination”") to false
+        val svcNav = expo.modules.accessibility.BensonAccessibilityService.instance
+        var attemptNav = 0
+        var outcomeNav: ExecutionOutcome = ExecutionOutcome.Unverified
+        while (outcomeNav is ExecutionOutcome.Unverified) {
+          val observed = svcNav?.currentForegroundPackageLive()
+          outcomeNav = classifyLaunchVerification(setOf(member.packageName), observed, attemptNav, 10)
+          if (outcomeNav is ExecutionOutcome.Unverified) Thread.sleep(400)
+          attemptNav++
+        }
+        AudioDiag.log(this, "TRAVEL_NAVIGATE_VERIFY", "pkg=${member.packageName} outcome=$outcomeNav")
+        when (outcomeNav) {
+          is ExecutionOutcome.Success -> BensonAgentTools.toolResult(true, "Te duc la „$destination” cu ${member.displayName}.") to false
+          else -> BensonAgentTools.toolResult(false, "Am pornit ${member.displayName}, dar nu pot confirma că a ajuns pe ecran.") to false
+        }
+      }
+      // MOBILITY — modul SUBORDONAT TRAVEL (cerinta explicita). Reutilizeaza EXACT acelasi motor
+      // determinist deja dovedit (findAppsByCategory, RUNDA S-1 TASK 1) — nicio lista noua.
+      BensonAgentTools.MOBILITY_FIND_APP -> {
+        val category = args.optString("category").trim()
+        if (category.isBlank()) return BensonAgentTools.toolResult(false, "lipsește categoria") to false
+        val confirmed = args.optBoolean("confirmed", false)
+        val chosenPkg = args.optString("chosen_pkg").trim()
+        val found = try { findAppsByCategory(category) } catch (_: Exception) { emptyList() }
+        if (!confirmed) {
+          if (found.isEmpty()) return BensonAgentTools.toolResult(false, "nu am găsit nicio aplicație instalată de „$category”") to false
+          val listed = found.joinToString("; ") { "${it.first} (${it.second})" }
+          return BensonAgentTools.toolResult(false, "Aplicații găsite pentru „$category”: $listed. Spune-i Masterului lista; cheamă din nou cu chosen_pkg EXACT din ea.") to false
+        }
+        if (chosenPkg.isBlank() || found.none { it.second == chosenPkg }) {
+          return BensonAgentTools.toolResult(false, "„$chosenPkg” nu e în lista găsită — nu deschid un pachet neverificat") to false
+        }
+        val ok = try { launchPackageNative(chosenPkg) } catch (_: Exception) { false }
+        if (!ok) return BensonAgentTools.toolResult(false, "n-am putut deschide aplicația") to false
+        val svcMob = expo.modules.accessibility.BensonAccessibilityService.instance
+        var attemptMob = 0
+        var outcomeMob: ExecutionOutcome = ExecutionOutcome.Unverified
+        while (outcomeMob is ExecutionOutcome.Unverified) {
+          val observed = svcMob?.currentForegroundPackageLive()
+          outcomeMob = classifyLaunchVerification(setOf(chosenPkg), observed, attemptMob, 10)
+          if (outcomeMob is ExecutionOutcome.Unverified) Thread.sleep(400)
+          attemptMob++
+        }
+        val chosenName = found.first { it.second == chosenPkg }.first
+        AudioDiag.log(this, "MOBILITY_FIND_APP_VERIFY", "pkg=$chosenPkg outcome=$outcomeMob")
+        when (outcomeMob) {
+          is ExecutionOutcome.Success -> BensonAgentTools.toolResult(true, "Am deschis $chosenName.") to false
+          else -> BensonAgentTools.toolResult(false, "Am pornit $chosenName, dar nu pot confirma că a ajuns pe ecran.") to false
+        }
+      }
       BensonAgentTools.OPEN_URL -> {
         val url = args.optString("url").trim()
         // Validare in cod (§4 din mandat): doar http/https, nimic altceva. Un `intent://` sau un
@@ -4895,8 +5012,15 @@ class BensonForegroundService : Service() {
       }
       BensonAgentTools.SAY -> {
         val text = args.optString("text").trim().ifBlank { "Gata." }
+        val expectsReply = args.optBoolean("expects_reply", false)
         conversationHistory.add("user", originalCommand); conversationHistory.add("assistant", text)
-        finishBrainCommandSuccess(text, originalCommand, "agent_done")
+        if (expectsReply) {
+          agentAwaitingReply = true
+          continueAgentConversation(text, originalCommand)
+        } else {
+          agentAwaitingReply = false
+          finishBrainCommandSuccess(text, originalCommand, "agent_done")
+        }
         BensonAgentTools.toolResult(true, "spus") to true
       }
       else -> BensonAgentTools.toolResult(false, "instrument necunoscut") to true
@@ -5019,7 +5143,23 @@ class BensonForegroundService : Service() {
                 continue
               }
               conversationHistory.add("user", command); conversationHistory.add("assistant", text)
-              mainHandler.post { if (myRun == agentRunId) finishBrainCommandSuccess(text, command, "agent_chat") }
+              // FIX_LIVE_CONVERSATION_CONTINUES_1 — modelul e instruit (systemPrompt) să folosească
+              // instrumentul `say` cu `expects_reply` de fiecare dată; acest ramus text-simplu e
+              // doar plasa de siguranță pentru răspunsul rar fără niciun tool_call — un semn de
+              // punctuație (nu o regulă despre conținut/aplicații) decide dacă ține sesiunea
+              // deschisă, consecvent cu doctrina "fără reguli rigide pe cuvinte".
+              val expectsReply = text.trimEnd().endsWith("?")
+              mainHandler.post {
+                if (myRun == agentRunId) {
+                  if (expectsReply) {
+                    agentAwaitingReply = true
+                    continueAgentConversation(text, command)
+                  } else {
+                    agentAwaitingReply = false
+                    finishBrainCommandSuccess(text, command, "agent_chat")
+                  }
+                }
+              }
               done = true
             }
             break
@@ -5151,6 +5291,9 @@ class BensonForegroundService : Service() {
           } else {
             "Nu am reușit să duc asta la capăt, Master. Am apucat să fac: ${missionProgress.joinToString(", ")}. Spuneți-mi cum continuăm."
           }
+          // Raport final de eșec — niciodată o întrebare: închide orice "așteptare de răspuns"
+          // rămasă dintr-o tură conversațională anterioară a aceleiași rulări.
+          agentAwaitingReply = false
           updateBubbleNative(msg, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
           speakNativeFallbackThenCapture(msg)
         }
@@ -5241,6 +5384,19 @@ class BensonForegroundService : Service() {
     if (resp.isNotBlank()) speak(resp, "chat")
     hideWakeRingNative()
     rearmWakeNative(rearmReason)
+  }
+
+  // FIX_LIVE_CONVERSATION_CONTINUES_1 (20.10.2026) — perechea lui finishBrainCommandSuccess pentru
+  // cazul în care agentul NU a terminat: tocmai a pus o întrebare sau a invitat la continuare, deci
+  // sesiunea rămâne deschisă (NU se eliberează micOwner, NU se ascunde inelul, NU se rearmează
+  // wake-ul aici) — exact simetric cu orice pendingXxx determinist. `agentAwaitingReply` (setat de
+  // apelant ÎNAINTE de asta) face ca `continueSessionAfterUtterance`, chemat din onDone după ce
+  // rostirea asta chiar se termină, să deschidă singur o nouă captură (startFollowUpCapture), fără
+  // alt "Benson". Vezi hasAnyPendingNativeState.
+  private fun continueAgentConversation(resp: String, originalCommand: String) {
+    openSession("agent_awaits_reply", mayDuck = true)
+    updateBubbleNative(resp, originalCommand, terminal = false, dismissDelayMs = BUBBLE_LINGER_MS)
+    if (resp.isNotBlank()) speak(resp, "chat")
   }
 
   // Fiecare ramură reutilizează exact funcția nativă deja existentă (vezi comentariul de mai sus);

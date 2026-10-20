@@ -85,9 +85,29 @@ object BensonAgentTools {
   // deschida nimic, fara nicio apasare. Daca nu exista nimic, spune onest ca nu e explorata.
   const val AKA_QUERY_APP = "aka_query_app"
 
+  // TRAVEL AGENT (20.10.2026, "mandatul anterior" — WORKSTREAM C) — integrat in ACELASI motor de
+  // instrumente, nu un orchestrator nou. Calea DETERMINISTA ("du-mă la X", deja DEVICE_PASS, tag
+  // DEVICE_PASS_SURVIVOR_WAZE_NAV_2026-10-19) ramane neatinsa si e in continuare calea principala
+  // pentru o comanda SIMPLA de navigatie. Acest instrument e pentru misiuni COMPUSE pe care
+  // parserul determinist nu le poate exprima intr-un singur tipar (ex. "navigheaza spre X și
+  // caută-mi o parcare acolo") — reutilizeaza EXACT acelasi capabilitate-lookup (AKA,
+  // StaffRegistry.staffForCapability) si acelasi mecanism de lansare+verificare SURVIVOR
+  // (navigationLaunchUris/classifyLaunchVerification, NavigationMissionTrace.kt).
+  const val TRAVEL_NAVIGATE = "travel_navigate"
+
+  // MOBILITY — modul SUBORDONAT TRAVEL (cerinta explicita), nu un agent separat: nevoi de
+  // mobilitate conexe navigatiei (parcare, ride-hailing, transport public) cand nu exista o tinta
+  // de navigat direct, ci o APLICATIE de gasit. Reutilizeaza EXACT acelasi motor determinist deja
+  // dovedit (AppCategoryMatcher.extractCategory + findAppsByCategory, RUNDA S-1 TASK 1) — nicio
+  // lista noua, nicio logica noua de cautare. Doua faze, ca restul instrumentelor cu efect extern:
+  // confirmed=false listeaza candidatii (nume+pachet REAL, nu ghicit), confirmed=true + chosen_pkg
+  // deschide EXACT pachetul ales din acea lista (nu un index, nu o presupunere).
+  const val MOBILITY_FIND_APP = "mobility_find_app"
+
   val NAMES = listOf(
     EXPLAIN_COMMAND, OPEN_APP, OPEN_URL, PLAY_STREAM, SEARCH_IN_APP, OBSERVE_SCREEN, TAP_ELEMENT, PRESS_BUTTON, VERIFY_PLAYING,
-    CALENDAR_READ_DAY, CALENDAR_FIND_FREE_SLOT, CALENDAR_CREATE_EVENT, CALENDAR_UPDATE_EVENT, AKA_EXPLORE_FUNCTION, AKA_QUERY_APP, SAY,
+    CALENDAR_READ_DAY, CALENDAR_FIND_FREE_SLOT, CALENDAR_CREATE_EVENT, CALENDAR_UPDATE_EVENT, AKA_EXPLORE_FUNCTION, AKA_QUERY_APP,
+    TRAVEL_NAVIGATE, MOBILITY_FIND_APP, SAY,
   )
 
   // Plafon de pasi: mandatul cere explicit "Limiteaza numarul de pasi si reincercari. Nu lasa
@@ -122,8 +142,8 @@ object BensonAgentTools {
       "description":"Deschide o aplicație instalată pe telefon, după nume rostit (ex: Simple Radio, YouTube, Amazon).",
       "parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}}},
      {"type":"function","function":{"name":"$SEARCH_IN_APP",
-      "description":"Caută un text în aplicația deschisă acum: găsește bara de căutare, scrie textul, trimite și verifică dacă au apărut rezultate.",
-      "parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}}},
+      "description":"Caută un text în aplicația deschisă acum: găsește bara de căutare, scrie textul, trimite și verifică dacă au apărut rezultate. confirmed=false (implicit): dacă aplicația are un domeniu CUNOSCUT (din AKA), NU caută — îți spune domeniul, ca să verifici TU, semantic, dacă «query» se potrivește, înainte să continui. confirmed=true: caută efectiv — folosește-l abia după ce ai verificat compatibilitatea (sau dacă instrumentul a spus direct că nu există niciun domeniu cunoscut de verificat).",
+      "parameters":{"type":"object","properties":{"query":{"type":"string"},"confirmed":{"type":"boolean"}},"required":["query","confirmed"],"additionalProperties":false}}},
      {"type":"function","function":{"name":"$OBSERVE_SCREEN",
       "description":"Citește ecranul activ și întoarce elementele numerotate (rol, etichetă, stare). Folosește-l înainte de a apăsa ceva.",
       "parameters":{"type":"object","properties":{},"additionalProperties":false}}},
@@ -143,8 +163,8 @@ object BensonAgentTools {
       "description":"Verifică dacă se aude efectiv audio pe telefon acum. OBLIGATORIU înainte de a spune că ai pornit un radio, o melodie sau un video.",
       "parameters":{"type":"object","properties":{},"additionalProperties":false}}},
      {"type":"function","function":{"name":"$SAY",
-      "description":"Răspunde Masterului cu voce și încheie sarcina. Folosește-l și când nu reușești, explicând exact ce n-a mers.",
-      "parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}}},
+      "description":"Vorbește cu Masterul. Folosește-l pentru ORICE replică — răspuns, întrebare de clarificare, propunere de alternativă sau eșec explicat — niciodată text simplu fără acest instrument. `expects_reply=true` când pui o întrebare sau inviți la continuarea conversației (BENSON rămâne în ascultare, Masterul poate răspunde fără alt «Benson»); `expects_reply=false` când e un răspuns final/raport încheiat (sesiunea se închide, e nevoie de «Benson» din nou data viitoare).",
+      "parameters":{"type":"object","properties":{"text":{"type":"string"},"expects_reply":{"type":"boolean"}},"required":["text","expects_reply"],"additionalProperties":false}}},
       {"type":"function","function":{"name":"explain_command",
       "description":"Citeste registrul real de comenzi BENSON: ce stie sa faca, cum i se cere, ce e doar planificat. Foloseste-l OBLIGATORIU cand Masterul intreaba «cum iti spun sa...», «ce comanda folosesc», «stii sa...», «ce poti face». Lasa `query` gol ca sa primesti tot registrul.",
       "parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}}},
@@ -165,7 +185,13 @@ object BensonAgentTools {
       "parameters":{"type":"object","properties":{"label":{"type":"string"}},"required":["label"],"additionalProperties":false}}},
      {"type":"function","function":{"name":"$AKA_QUERY_APP",
       "description":"Întreabă AKA ce cunoaște deja despre o aplicație (orice aplicație instalată, după nume) — funcții, controale, trasee de navigare deja confirmate, FĂRĂ să deschidă nimic. Folosește-l când Masterul întreabă «știi să faci X în Y» sau înainte de o misiune într-o aplicație necunoscută, ca să nu reexplorezi ce e deja cunoscut. Dacă nu există nicio cunoștință, îți spune onest că aplicația n-a fost încă explorată.",
-      "parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}}}
+      "parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}}},
+     {"type":"function","function":{"name":"$TRAVEL_NAVIGATE",
+      "description":"Pornește navigația reală spre o destinație, ca parte a unei misiuni COMPUSE (ex. «navighează spre X și...»). Pentru o comandă SIMPLĂ de navigație («du-mă la X»), NU folosi acest instrument — aceea e deja gestionată separat, înainte să ajungă la tine. confirmed=false (implicit): NU pornește nimic, doar spune cu ce aplicație ai naviga și întreabă. confirmed=true: pornește efectiv, DOAR după «da» explicit al Masterului într-o comandă ulterioară.",
+      "parameters":{"type":"object","properties":{"destination":{"type":"string"},"confirmed":{"type":"boolean"}},"required":["destination","confirmed"],"additionalProperties":false}}},
+     {"type":"function","function":{"name":"$MOBILITY_FIND_APP",
+      "description":"Găsește o aplicație pentru o nevoie de mobilitate conexă navigației — parcare, ride-hailing (taxi/Uber/Bolt), transport public — subordonat navigației, nu un scop separat. confirmed=false (implicit): listează aplicațiile INSTALATE găsite (nume+pachet reale), fără să deschidă nimic. confirmed=true: deschide EXACT pachetul din `chosen_pkg` (copiat din lista primită la pasul anterior, niciodată ghicit sau inventat).",
+      "parameters":{"type":"object","properties":{"category":{"type":"string"},"confirmed":{"type":"boolean"},"chosen_pkg":{"type":"string"}},"required":["category","confirmed","chosen_pkg"],"additionalProperties":false}}}
     ]
   """.trimIndent()
 
@@ -234,6 +260,16 @@ object BensonAgentTools {
       "Folosește instrumentele DOAR când cererea chiar are nevoie de telefon: să deschizi ceva, să " +
       "pornești muzică sau radio, să cauți într-o aplicație, să suni, să scrii cuiva. Dacă nu ești " +
       "sigur, întreabă scurt cu «say» — nu apăsa nimic.\n" +
+      // FIX_LIVE_CONVERSATION_CONTINUES_1 (20.10.2026) — fără asta, BENSON punea o întrebare și
+      // apoi închidea singur conversația, obligând Masterul să repete «Benson» ca să-i răspundă.
+      "CONTINUAREA CONVERSAȚIEI, fără alt «Benson»: folosește ÎNTOTDEAUNA «say» ca să vorbești (nu " +
+      "text simplu) și setează «expects_reply» cu grijă. «expects_reply=true» de fiecare dată când " +
+      "pui o întrebare de clarificare, ceri o alegere, propui o alternativă sau inviți explicit " +
+      "continuarea discuției — Masterul poate răspunde direct, fără alt «Benson», cât timp rămâi " +
+      "în aceeași conversație. «expects_reply=false» doar când răspunsul tău CHIAR încheie schimbul " +
+      "(un răspuns complet, un raport final de succes/eșec, un «Gata»/«La revedere»). Dacă nu ești " +
+      "sigur dacă ai terminat, presupune că NU ai terminat și pune «expects_reply=true» — e mai " +
+      "ieftin să ceri «mai ai nevoie de ceva?» decât să obligi Masterul să te strige din nou.\n" +
       "CÂND MASTERUL ÎNTREABĂ CUM SĂ-ȚI CEARĂ CEVA («cum îți spun să...», «ce comandă folosesc», " +
       "«știi să...», «ce poți face») NU EXECUTA NIMIC: cheamă «explain_command», apoi explică " +
       "conversațional, în limba în care ți s-a vorbit. Dacă o funcție e PLANIFICAT, spune clar că " +
@@ -313,6 +349,25 @@ object BensonAgentTools {
       "potrivit. Odată găsit ecranul corect, folosește «press_button»/«tap_element» pentru " +
       "ACȚIUNEA reală cerută de Master, nu «aka_explore_function» (acela refuză orice control cu " +
       "risc — e doar pentru a găsi traseul, nu pentru operare).\n" +
+      // LIVE+AKA — VERIFICAREA COMPATIBILITĂȚII SEMANTICE (20.10.2026). Exemplul obligatoriu din
+      // ordin: "Caută lămpi pe Spotify" — Spotify are domeniul muzică/media, nu produse fizice.
+      "Când cauți ceva într-o aplicație («search_in_app»), cheamă-l ÎNTÂI cu confirmed=false. Dacă " +
+      "îți răspunde cu domeniul CUNOSCUT al aplicației, compară-l SEMANTIC (în orice limbă) cu ce " +
+      "ți s-a cerut să cauți — tu decizi, nu o regulă fixă. Exemplu: dacă Masterul cere «caută " +
+      "lămpi pe Spotify» și domeniul e „căutare de muzică”, recunoști incompatibilitatea — NU " +
+      "cauta acolo. Spune-i Masterului clar de ce nu se potrivește și propune o aplicație " +
+      "potrivită (ex. un magazin), DAR nu o deschide fără acordul lui explicit — doar propune și " +
+      "așteaptă. Dacă domeniul se potrivește (sau instrumentul spune că nu există niciun domeniu " +
+      "cunoscut de verificat), cheamă din nou «search_in_app» cu confirmed=true și continuă normal. " +
+      "Dacă nu ești sigur dacă se potrivește, întreabă Masterul pe scurt, nu presupune.\n" +
+      // TRAVEL/MOBILITY (20.10.2026) — doar pentru misiuni COMPUSE; o comanda simpla de navigatie
+      // nu ajunge niciodata aici (e deja rezolvata separat, inainte).
+      "Pentru o misiune COMPUSĂ care implică navigație («navighează spre X și găsește-mi o parcare " +
+      "acolo»): «travel_navigate» pentru destinație, «mobility_find_app» pentru parcare/taxi/" +
+      "transport public — niciodată invers. La «mobility_find_app», dacă primești mai multe " +
+      "aplicații, NU alege tu — spune-i Masterului lista și cheamă din nou cu «chosen_pkg» EXACT " +
+      "cum a venit în listă, abia după ce Masterul alege. Fără aplicații găsite: spune onest, nu " +
+      "inventa un nume.\n" +
       // CALENDAR AGENT (19.10.2026, prioritate explicita) — interpretarea datei/orei ramane la
       // tine (acelasi model care intelege orice limba), executorul primeste deja ISO local.
       "Pentru calendar: calculează TU data/ora exactă din ce spune Masterul, în orice limbă " +

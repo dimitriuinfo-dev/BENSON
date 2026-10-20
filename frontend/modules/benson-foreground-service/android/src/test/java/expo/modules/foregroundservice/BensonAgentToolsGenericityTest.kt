@@ -82,4 +82,44 @@ class BensonAgentToolsGenericityTest {
     assertTrue(json.contains("\"retry_unsafe\":true"))
     assertTrue(json.contains("\"ok\":false"))
   }
+
+  // --- TRAVEL/MOBILITY (20.10.2026) — proba de genericitate: schema instrumentelor nu codifica
+  // NICIO aplicatie de navigatie anume (nici macar Waze, singura dovedita DEVICE_PASS) — alegerea
+  // ramane strict la capability-lookup-ul AKA (StaffRegistry), nu la o ramura de cod per aplicatie. ---
+
+  @Test fun travelAndMobilityToolsAreRegisteredAndDispatchable() {
+    assertTrue(BensonAgentTools.NAMES.contains(BensonAgentTools.TRAVEL_NAVIGATE))
+    assertTrue(BensonAgentTools.NAMES.contains(BensonAgentTools.MOBILITY_FIND_APP))
+  }
+
+  @Test fun travelNavigateSchemaDoesNotHardcodeAnyNavigationAppName() {
+    val json = BensonAgentTools.toolsJson().lowercase()
+    // "waze" apare legitim in codul de EXECUTIE (navigationLaunchUris, deja dovedit), dar NU are
+    // voie sa apara in schema instrumentelor insesi — alegerea aplicatiei ramane a AKA, nu a unui
+    // nume hardcodat in contractul pe care modelul il vede.
+    assertFalse(json.contains("waze"))
+    assertFalse(json.contains("google.navigation"))
+  }
+
+  @Test fun mobilityFindAppRequiresAnExactChosenPackageNotAGuessedIndex() {
+    // Structura insasi dovedeste disciplina "nu ghici": parametrul e un PACHET exact, nu un index.
+    val json = BensonAgentTools.toolsJson()
+    assertTrue(json.contains("\"chosen_pkg\""))
+  }
+
+  // --- expects_reply (20.10.2026, mandat "BENSON OPENAI VOICE CHATBOT") — proba ca instrumentul
+  // "say" obliga modelul sa declare structural daca asteapta un raspuns (conversatie continua,
+  // fara wake word nou) sau daca a incheiat schimbul — singura parte testabila fara Context/
+  // dispozitiv; branch-ul real de pastrare a sesiunii deschise traieste in BensonForegroundService
+  // (Context-dependent) si ramane de verificat pe telefon, nu aici. ---
+
+  @Test fun sayToolSchemaRequiresExpectsReplyField() {
+    val json = BensonAgentTools.toolsJson()
+    assertTrue(json.contains("\"expects_reply\""))
+  }
+
+  @Test fun systemPromptInstructsModelToUseExpectsReplyToContinueConversation() {
+    val prompt = BensonAgentTools.systemPrompt("orice", "orice")
+    assertTrue(prompt.contains("expects_reply"))
+  }
 }

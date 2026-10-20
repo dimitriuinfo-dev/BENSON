@@ -50,3 +50,16 @@ fun classifyLaunchVerification(
   pollsAttempted < maxPolls -> ExecutionOutcome.Unverified
   else -> ExecutionOutcome.Failed("launch_unverified")
 }
+
+// TRAVEL AGENT (20.10.2026, "integreaza MOBILITY ca modul subordonat TRAVEL") — EXTRAS, fara nicio
+// schimbare de comportament, din `handlePendingNavAnswer` (BensonForegroundService.kt, calea
+// deterministica DEVICE_PASS, tag DEVICE_PASS_SURVIVOR_WAZE_NAV_2026-10-19): ACELEASI doua URI-uri,
+// in ACEEASI ordine, pentru ca drumul vechi (vocal) si noul instrument de agent (pentru misiuni
+// compuse, ex. "navigheaza spre X si cauta-mi o parcare acolo") sa foloseasca EXACT acelasi
+// mecanism de lansare — zero a doua sursa de adevar, zero risc de divergenta intre cele doua cai.
+fun navigationLaunchUris(pkg: String, encodedDestination: String): List<String> =
+  if (pkg == "com.waze") {
+    listOf("waze://?q=$encodedDestination&navigate=yes", "google.navigation:q=$encodedDestination")
+  } else {
+    listOf("google.navigation:q=$encodedDestination", "waze://?q=$encodedDestination&navigate=yes")
+  }

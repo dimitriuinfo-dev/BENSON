@@ -172,6 +172,35 @@ internal object StaffRegistryCore {
   // packageName), ca sa nu apara dovezi de pe alt pachet. Cand nu exista NICIO cunostinta, spune
   // explicit ca aplicatia n-a fost inca explorata — identificarea lipsei e la fel de importanta
   // ca raportarea cunostintei.
+  // LIVE+AKA — VERIFICAREA COMPATIBILITĂȚII SEMANTICE (20.10.2026, cerinta explicita: "AKA
+  // furnizeaza functiile si domeniul operational... LIVE interpreteaza semantic"). Harta e DOAR o
+  // ETICHETA in limbaj natural pentru vocabularul de capabilitati NUMITE deja existent (CAP_*,
+  // deja folosit de StaffRegistryCore inainte de aceasta runda) — NU o regula de compatibilitate
+  // ("lampi"/"Spotify"/"Amazon" nu apar NICAIERI aici). Judecata insasi (se potriveste cererea cu
+  // acest domeniu?) ramane STRICT la LIVE (modelul comun) — codul doar garanteaza ca FAPTUL ajunge
+  // la el, de fiecare data, automat, inainte sa actioneze.
+  private val NAMED_CAPABILITY_DOMAIN: Map<String, String> = mapOf(
+    CAP_NAVIGATE to "navigație și hărți",
+    CAP_MEDIA_SEARCH to "căutare de muzică, piese sau conținut media",
+    CAP_MEDIA_CONTROL to "control media (redare/pauză/volum)",
+    CAP_MESSAGE to "trimitere de mesaje text",
+    CAP_CALL to "apeluri audio",
+    CAP_VIDEO_CALL to "apeluri video",
+    CAP_CALCULATE to "calcule matematice",
+    CAP_SEARCH_PRODUCTS to "căutare și cumpărare de produse fizice",
+    CAP_WEB_SEARCH to "căutare generală pe internet",
+  )
+
+  /** Domeniul cunoscut al unei aplicații, in limbaj natural — null cand nu se stie nimic NUMIT. */
+  fun namedCapabilityDomainHints(caps: Map<String, CapLevel>): String? {
+    val known = caps.entries.mapNotNull { (id, level) ->
+      val domain = NAMED_CAPABILITY_DOMAIN[id] ?: return@mapNotNull null
+      if (level == CapLevel.VERIFIED) "$domain (verificat)" else "$domain (încă neconfirmat pe acest telefon)"
+    }
+    if (known.isEmpty()) return null
+    return "Domeniul cunoscut al acestei aplicații: ${known.joinToString("; ")}."
+  }
+
   fun formatAppKnowledgeSummary(member: StaffMember): String {
     val caps = member.caps
     val named = caps.filterKeys { !isUiControlCapability(it) && !isAkaFunctionCapability(it) && !isAkaNavigationCapability(it) }

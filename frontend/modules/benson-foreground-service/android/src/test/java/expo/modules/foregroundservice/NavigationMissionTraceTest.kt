@@ -49,4 +49,22 @@ class NavigationMissionTraceTest {
     val outcome = classifyLaunchVerification(setOf("com.waze"), "com.whatsapp", pollsAttempted = 5, maxPolls = 5)
     assertTrue(outcome is ExecutionOutcome.Failed)
   }
+
+  // --- navigationLaunchUris — TRAVEL AGENT (20.10.2026): proba de REGRESIE ca extragerea din
+  // handlePendingNavAnswer (calea DEVICE_PASS, tag DEVICE_PASS_SURVIVOR_WAZE_NAV_2026-10-19) nu a
+  // schimbat NIMIC — aceleasi URI-uri, in aceeasi ordine, pentru ambele ramuri. ---
+
+  @Test fun navigationLaunchUrisPrefersWazeUriFirstForWazePackage() {
+    assertEquals(
+      listOf("waze://?q=Gara+de+Nord&navigate=yes", "google.navigation:q=Gara+de+Nord"),
+      navigationLaunchUris("com.waze", "Gara+de+Nord"),
+    )
+  }
+
+  @Test fun navigationLaunchUrisPrefersGoogleNavigationFirstForAnyOtherPackage() {
+    assertEquals(
+      listOf("google.navigation:q=Gara+de+Nord", "waze://?q=Gara+de+Nord&navigate=yes"),
+      navigationLaunchUris("com.google.android.apps.maps", "Gara+de+Nord"),
+    )
+  }
 }
