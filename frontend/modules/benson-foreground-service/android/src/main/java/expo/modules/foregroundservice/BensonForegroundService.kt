@@ -303,6 +303,18 @@ class BensonForegroundService : Service() {
   // line, otherwise unchanged behavior either way.
   private val V1_TRUTHFUL_REPORTER = true
 
+  // COMMUNICATION FAST ROUTE (21.10.2026, mandat "pastreaza ruta DEVICE_PASS") — ruta directa
+  // (runWhatsAppOpenConversationCall, deep link pe numar) ramane EXPERIMENTALA, oprita implicit.
+  // runWhatsAppCallNative (cautare in lista WhatsApp) ramane ruta principala pana la DEVICE_PASS
+  // real, separat, pe noua ruta. Revert automat: false = comportament identic cu inainte.
+  private val WA_DIRECT_CALL_ROUTE = false
+
+  // Anti-duplicare (sectiunea 3 a mandatului) — per contact+tip, in memorie, NU persistat. Un
+  // apel CALL_UNVERIFIED/CALL_VERIFIED recent blocheaza o noua incercare catre ACELASI contact —
+  // un efect extern posibil deja activ nu se repeta orbeste. NOT_STARTED/CALL_FAILED_VERIFIED nu
+  // blocheaza nimic (waCallSafeToRetry).
+  private val lastWaCallVerdict = java.util.concurrent.ConcurrentHashMap<String, expo.modules.accessibility.WaCallVerdict>()
+
   // Exact aceeași listă de 5 verificată la începutul handleNativeCommandFlow — o întrebare
   // (confirmare/disambiguare) setează unul dintre ele ÎNAINTE de a fi rostită și îl golește abia
   // după răspuns, deci "niciunul setat" la finalul unui TTS înseamnă sigur raport final, nu
@@ -4301,9 +4313,30 @@ class BensonForegroundService : Service() {
     // of inventing a second wake mechanism. Harmless when the screen is already on.
     wakeScreen()
     svc.runOnServiceScope {
+      // COMMUNICATION FAST ROUTE — anti-duplicare (sectiunea 3): un apel recent catre ACELASI
+      // contact+tip, cu verdict ce NU autoriza reincercare (CALL_VERIFIED/CALL_UNVERIFIED), oprește
+      // o a doua incercare — posibil efect extern deja activ.
+      val waDuplicateKey = "${pending.contact.phone ?: pending.contact.displayName}:${pending.kind}"
+      val priorVerdict = lastWaCallVerdict[waDuplicateKey]
+      if (priorVerdict != null && !expo.modules.accessibility.waCallSafeToRetry(priorVerdict) && (pending.kind == "call" || pending.kind == "video")) {
+        AudioDiag.log(this@BensonForegroundService, "WA_CALL_DUPLICATE_BLOCKED", "key=$waDuplicateKey priorVerdict=$priorVerdict")
+        mainHandler.post {
+          updateBubbleNative("Am încercat deja să dau acest apel — verifică telefonul înainte să cer din nou.", "", terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+          speakNativeFallbackThenCapture("Am încercat deja să dau acest apel — verifică telefonul înainte să cer din nou.")
+        }
+        return@runOnServiceScope
+      }
       val result = when (pending.kind) {
-        "call" -> svc.runWhatsAppCallNative(pending.contact.displayName, "voice_call")
-        "video" -> svc.runWhatsAppCallNative(pending.contact.displayName, "video_call")
+        "call" -> if (WA_DIRECT_CALL_ROUTE && !pending.contact.phone.isNullOrBlank()) {
+          svc.runWhatsAppOpenConversationCall(pending.contact.phone!!, pending.contact.displayName, "voice_call")
+        } else {
+          svc.runWhatsAppCallNative(pending.contact.displayName, "voice_call")
+        }
+        "video" -> if (WA_DIRECT_CALL_ROUTE && !pending.contact.phone.isNullOrBlank()) {
+          svc.runWhatsAppOpenConversationCall(pending.contact.phone!!, pending.contact.displayName, "video_call")
+        } else {
+          svc.runWhatsAppCallNative(pending.contact.displayName, "video_call")
+        }
         else -> {
           // ADAOS WA_VISIBLE_DRAFT (2026-10-03, user-directed) — the draft was already typed by
           // startWaDraftAndAsk (missionId set then); this sends whatever is ACTUALLY in the field
@@ -4323,6 +4356,14 @@ class BensonForegroundService : Service() {
         }
       }
       AudioDiag.log(this@BensonForegroundService, "WA_INTENT", "kind=${pending.kind} result=${if (result.success) "ok" else "fail:${result.step}"}")
+      // COMMUNICATION FAST ROUTE — verdict explicit DOAR pentru call/video (mesajele au propriul
+      // drum, neatins). Retinut in lastWaCallVerdict pentru garda anti-duplicare de mai sus.
+      val waVerdict = if (pending.kind == "call" || pending.kind == "video") {
+        val v = expo.modules.accessibility.classifyWaCallOutcome(result.success, result.step, result.nameMatch)
+        lastWaCallVerdict[waDuplicateKey] = v
+        AudioDiag.log(this@BensonForegroundService, "WA_CALL_VERDICT", "key=$waDuplicateKey verdict=$v step=${result.step} nameMatch=${result.nameMatch}")
+        v
+      } else null
       mainHandler.post {
         val response = if (result.success) when (pending.kind) {
           "call" -> "Sun pe ${pending.contact.displayName}."
@@ -4331,7 +4372,12 @@ class BensonForegroundService : Service() {
           // ADAOS WA-1 (2026-10-03) — "ancoră negăsită" per spec section 4: the chat DID open and
           // verify correctly (steps 1-2 passed), only the compose field itself wasn't found. Never
           // presses anything in that case (the function already returns before any ACTION_CLICK).
-        } else if (result.step == "FIND_MESSAGE_INPUT") "Am deschis conversația, preiei tu." else "Nu am reușit: ${result.step}."
+        } else if (result.step == "FIND_MESSAGE_INPUT") "Am deschis conversația, preiei tu."
+        // CALL_UNVERIFIED — doctrina anti-duplicare: nu declara esec confirmat cand efectul e
+        // incert (posibil apel deja activ); cere explicit verificarea Masterului, nu reincerca.
+        else if (waVerdict == expo.modules.accessibility.WaCallVerdict.CALL_UNVERIFIED)
+          "Nu pot confirma ce s-a întâmplat cu apelul — verifică telefonul, te rog."
+        else "Nu am reușit: ${result.step}."
         // V1 (08.10.2026, M1 raportorul adevărat) — standardizează logarea OUTCOME cerută de Motor,
         // PESTE decizia deja existentă (result.success), nu o înlocuiește: WA era deja corect,
         // "Sun pe X."/"Trimis." se rostesc DOAR când result.success e adevărat, verificat mai sus.
