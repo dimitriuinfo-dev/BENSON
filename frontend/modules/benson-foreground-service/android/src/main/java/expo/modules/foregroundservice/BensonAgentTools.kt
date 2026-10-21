@@ -103,6 +103,15 @@ object BensonAgentTools {
   // (navigationLaunchUris/classifyLaunchVerification, NavigationMissionTrace.kt).
   const val TRAVEL_NAVIGATE = "travel_navigate"
 
+  // P0 FIX V2 (21.10.2026, incident real "Benson, finde eine Tankstelle in der Nähe" -> FAIL) —
+  // CAUTAREA unui loc (benzinarie, farmacie, parcare, restaurant, spital — ORICE categorie, nu
+  // doar una numita in cod) e DIFERITA de navigatia catre o destinatie deja stabilita
+  // (travel_navigate). Acest instrument incearca MECANIC mai multe aplicatii candidate (Maps,
+  // Waze, apoi un browser) in ACELASI apel — fara niciun rond-trip OpenAI suplimentar intre
+  // incercari — si intoarce verdictul SURVIVOR real + ultimul ecran observat, ca modelul sa
+  // citeasca rezultatul, nu sa-l ghiceasca. Nu porneste navigatia — doar gaseste si raporteaza.
+  const val TRAVEL_FIND_POI = "travel_find_poi"
+
   // MOBILITY — modul SUBORDONAT TRAVEL (cerinta explicita), nu un agent separat: nevoi de
   // mobilitate conexe navigatiei (parcare, ride-hailing, transport public) cand nu exista o tinta
   // de navigat direct, ci o APLICATIE de gasit. Reutilizeaza EXACT acelasi motor determinist deja
@@ -115,7 +124,7 @@ object BensonAgentTools {
   val NAMES = listOf(
     EXPLAIN_COMMAND, OPEN_APP, OPEN_URL, PLAY_STREAM, SEARCH_IN_APP, OBSERVE_SCREEN, TAP_ELEMENT, PRESS_BUTTON, VERIFY_PLAYING,
     CALENDAR_READ_DAY, CALENDAR_FIND_FREE_SLOT, CALENDAR_CREATE_EVENT, CALENDAR_UPDATE_EVENT, AKA_EXPLORE_FUNCTION, AKA_QUERY_APP,
-    AKA_CAPABILITY_QUERY, TRAVEL_NAVIGATE, MOBILITY_FIND_APP, SAY,
+    AKA_CAPABILITY_QUERY, TRAVEL_NAVIGATE, TRAVEL_FIND_POI, MOBILITY_FIND_APP, SAY,
   )
 
   // Plafon de pasi: mandatul cere explicit "Limiteaza numarul de pasi si reincercari. Nu lasa
@@ -200,6 +209,9 @@ object BensonAgentTools {
      {"type":"function","function":{"name":"$TRAVEL_NAVIGATE",
       "description":"Pornește navigația reală spre o destinație, ca parte a unei misiuni COMPUSE (ex. «navighează spre X și...»). Pentru o comandă SIMPLĂ de navigație («du-mă la X»), NU folosi acest instrument — aceea e deja gestionată separat, înainte să ajungă la tine. confirmed=false (implicit): NU pornește nimic, doar spune cu ce aplicație ai naviga și întreabă. confirmed=true: pornește efectiv, DOAR după «da» explicit al Masterului într-o comandă ulterioară.",
       "parameters":{"type":"object","properties":{"destination":{"type":"string"},"confirmed":{"type":"boolean"}},"required":["destination","confirmed"],"additionalProperties":false}}},
+     {"type":"function","function":{"name":"$TRAVEL_FIND_POI",
+      "description":"Caută un loc din apropiere sau dintr-o categorie (benzinărie, farmacie, parcare, restaurant, spital, orice altceva) — DIFERIT de navigație: aici doar GĂSEȘTI locul, nu pornești drumul spre el. Încearcă MECANIC mai multe aplicații disponibile, fără cost suplimentar de apeluri — tu primești înapoi UN rezultat consolidat (inclusiv pachetul exact folosit), cu dovada reală de pe ecran. Dacă verdictul e «fără rezultate găsite», asta e o căutare REUȘITĂ fără locuri — NU o eroare; spune asta onest, nu insista orbește. Dacă Masterul cere explicit altă aplicație («încearcă cu alta»), cheamă din nou cu «avoid_pkg» = EXACT pachetul primit data trecută. Dacă Masterul vrea să mergi la locul găsit, folosește abia apoi «travel_navigate».",
+      "parameters":{"type":"object","properties":{"query":{"type":"string"},"category":{"type":"string"},"avoid_pkg":{"type":"string"}},"required":["query","category","avoid_pkg"],"additionalProperties":false}}},
      {"type":"function","function":{"name":"$MOBILITY_FIND_APP",
       "description":"Găsește o aplicație pentru o nevoie de mobilitate conexă navigației — parcare, ride-hailing (taxi/Uber/Bolt), transport public — subordonat navigației, nu un scop separat. confirmed=false (implicit): listează aplicațiile INSTALATE găsite (nume+pachet reale), fără să deschidă nimic. confirmed=true: deschide EXACT pachetul din `chosen_pkg` (copiat din lista primită la pasul anterior, niciodată ghicit sau inventat).",
       "parameters":{"type":"object","properties":{"category":{"type":"string"},"confirmed":{"type":"boolean"},"chosen_pkg":{"type":"string"}},"required":["category","confirmed","chosen_pkg"],"additionalProperties":false}}}
@@ -240,8 +252,19 @@ object BensonAgentTools {
   // Personalitatea din §3: majordom cultivat, calm, scurt. Fara jargon, fara "Master" in fiecare
   // propozitie, fara succes declarat inainte de verificare (§4, doctrina 9).
   fun systemPrompt(foregroundApp: String, installedApps: String): String =
-    "Ești BENSON, majordomul personal al Masterului. Vorbești română naturală, calmă și concisă. " +
-      "Te adresezi cu «Master», dar nu în fiecare propoziție. Fără jargon tehnic.\n" +
+    "Ești BENSON, majordomul personal al Masterului. Vorbești natural și calm. " +
+      "Te adresezi cu «Master» (sau echivalentul lui în limba conversației), dar nu în fiecare " +
+      "propoziție. Fără jargon tehnic.\n" +
+      // FIX_MULTILINGUAL_TTS_1 (21.10.2026, "INVESTOR READY VOICE") — DOVADA: cerut explicit
+      // "Please answer me in English from now on", modelul a continuat sa raspunda in romana
+      // ("Capitala Franței este Paris.") — cauza era aceasta linie, care fixa limba inainte sa
+      // existe vreo instructiune de schimbare. BENSON LAW 00 cere deja un singur chatbot
+      // multilingv; aici era contrazisa de fapt.
+      "Răspunzi ÎNTOTDEAUNA în limba în care Masterul ți s-a adresat chiar acum — română, " +
+      "germană sau engleză, oricare dintre ele. Dacă Masterul cere explicit să schimbi limba " +
+      "conversației («răspunde-mi în engleză», «continuăm în românește», «antworte mir auf " +
+      "Deutsch»), schimbă imediat și rămâi în limba nouă pentru restul conversației, fără să " +
+      "ceri reconfirmarea sau să repeți ce s-a discutat deja.\n" +
       // FIX_AGENT_CONVERSATION_FIRST_1 (15.10.2026) — CAUZA DEMONSTRATA a plangerii „BENSON nu
       // poate discuta natural". Dovada, conversatie reala injectata (21:53–21:55):
       //   "vreau să discutăm despre automobile electrice" -> agent -> open_app("chrome") -> observe_screen
@@ -390,6 +413,24 @@ object BensonAgentTools {
       "aplicații, NU alege tu — spune-i Masterului lista și cheamă din nou cu «chosen_pkg» EXACT " +
       "cum a venit în listă, abia după ce Masterul alege. Fără aplicații găsite: spune onest, nu " +
       "inventa un nume.\n" +
+      // P0 FIX V2 (21.10.2026, incident real) — CAUZA DOVEDITA a esecului „Benson, finde eine
+      // Tankstelle in der Nähe": modelul a citit "domeniul cunoscut... (încă neconfirmat pe acest
+      // telefon)" ca pe un BLOCAJ ("nu pot folosi aici") si a renuntat, desi domeniul (navigatie/
+      // harti) se potrivea perfect cu cererea (o benzinarie e exact genul de loc cautat intr-o
+      // aplicatie de harti). Clarificare explicita, ca sa nu se repete pe nicio alta aplicatie:
+      "«Încă neconfirmat pe acest telefon» descrie STRICT nivelul de VERIFICARE AKA — NU înseamnă " +
+      "«nu pot folosi aici». Dacă domeniul se potrivește semantic cu cererea, continuă normal " +
+      "(confirmed=true sau instrumentul potrivit), chiar dacă nu e încă «verificat». Starea de " +
+      "verificare și potrivirea de domeniu sunt lucruri DIFERITE — nu renunța la o misiune doar " +
+      "pentru că AKA n-a mai confirmat încă acea aplicație.\n" +
+      "Pentru «găsește-mi o benzinărie/farmacie/parcare/restaurant/spital (lângă mine, în " +
+      "apropiere)» — o CĂUTARE de loc, nu o comandă de drum către o destinație deja stabilită — " +
+      "folosește «travel_find_poi», niciodată open_app+search_in_app direct pentru genul ăsta de " +
+      "cerere. Instrumentul încearcă singur mai multe aplicații dacă prima nu merge — NU renunța " +
+      "după un singur eșec dacă instrumentul spune că mai are variante de încercat. Dacă " +
+      "rezultatul e onest „nicio aplicație n-a găsit ceva” sau „zero rezultate pe ecran”, asta e " +
+      "informația reală — spune-o Masterului calm, nu o trata ca pe o eroare și nu insista orbește " +
+      "peste limita pe care instrumentul o raportează.\n" +
       // CALENDAR AGENT (19.10.2026, prioritate explicita) — interpretarea datei/orei ramane la
       // tine (acelasi model care intelege orice limba), executorul primeste deja ISO local.
       "Pentru calendar: calculează TU data/ora exactă din ce spune Masterul, în orice limbă " +

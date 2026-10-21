@@ -3594,6 +3594,11 @@ class BensonAccessibilityService : AccessibilityService() {
         // complet diferita — apelantul (SURVIVOR) nu are voie sa retrogradeze o cunostinta AKA
         // validă doar pentru ca o notificare a intrerupt observarea.
         val foreignAppDetected: Boolean = false,
+        // P0 FIX V2 (21.10.2026) — DOAR calea de cautare (UniversalHandCommand.Search) populeaza
+        // asta; toate celelalte ramuri (press/tap/scroll) raman null, comportament identic cu
+        // inainte. Distinge explicit SEARCH_SUCCESS_EMPTY de SEARCH_FAILED/SEARCH_UNVERIFIED —
+        // vezi PoiSearchVerification.kt.
+        val searchVerdict: PoiSearchVerdict? = null,
     )
 
     // FAZA 3 / SCREEN OBSERVATION — singurul punct public prin care ecranul activ devine un
@@ -4349,14 +4354,30 @@ class BensonAccessibilityService : AccessibilityService() {
         }
 
         val contentCount = after?.second ?: 0
-        val ok = changed && contentCount >= 3
-        Log.i("BENSON_AUDIO", "SEARCH_VERIFY query=\"$query\" pkg=$pkg changed=$changed content=$contentCount ok=$ok")
-        if (!ok) {
-            return ControlResult(false, "Am scris $query în căutare, dar rezultatele nu s-au deschis.")
+        // P0 FIX V2 (21.10.2026, incident real "Tankstelle in der Nähe") — CAUZA DOVEDITA: un singur
+        // verdict binar (`changed && contentCount >= 3`) confunda "am cautat, chiar nu exista nimic"
+        // cu "nu am reusit sa caut deloc" — modelul nu putea distinge cele doua si renunta la
+        // misiune pe un fals "eșec tehnic". classifyPoiSearch (pur, testat) le separa explicit;
+        // searchFieldFound/textEntered sunt mereu true aici (am ajuns deja dupa pasii lor, care
+        // intorc devreme altfel) — doar schimbarea ecranului si continutul raman de verificat.
+        val verdict = classifyPoiSearch(
+            searchFieldFound = true, textEntered = true,
+            screenChangedAfterSubmit = changed, contentElementCount = contentCount,
+        )
+        val ok = verdict == PoiSearchVerdict.SEARCH_SUCCESS_RESULTS
+        Log.i("BENSON_AUDIO", "SEARCH_VERIFY query=\"$query\" pkg=$pkg changed=$changed content=$contentCount verdict=$verdict")
+        if (verdict == PoiSearchVerdict.SEARCH_UNVERIFIED) {
+            return ControlResult(false, "Am scris $query în căutare, dar nu pot confirma dacă rezultatele s-au deschis.", searchVerdict = verdict)
+        }
+        if (verdict == PoiSearchVerdict.SEARCH_SUCCESS_EMPTY) {
+            return ControlResult(true, "Am căutat $query. Ecranul nu arată niciun rezultat.", searchVerdict = verdict)
         }
         // Raportam primul rand real de pe ecranul de rezultate, in limba ecranului.
         val firstLabel = firstContentLabel() ?: tappedLabel
-        return ControlResult(true, if (firstLabel.isNotBlank()) "Am căutat $query. Primul rezultat: $firstLabel." else "Am căutat $query. Rezultatele sunt pe ecran.")
+        return ControlResult(
+            ok, if (firstLabel.isNotBlank()) "Am căutat $query. Primul rezultat: $firstLabel." else "Am căutat $query. Rezultatele sunt pe ecran.",
+            searchVerdict = verdict,
+        )
     }
 
     // Prima eticheta „de continut" de pe ecran: nu bara de căutare, nu butoanele de navigatie.
@@ -4386,7 +4407,7 @@ class BensonAccessibilityService : AccessibilityService() {
                     val tree = snapshotTree(root, refs, intArrayOf(0))
                     val field = ControlLocator.findSearchField(tree, ControlSynonyms.wordsFor("search")) /* FIX_SEARCH_STRUCTURAL_1 */
                     Log.i("BENSON_AUDIO", "CONTROL_FIND intent=search pkg=$pkg layer=semantic match=${field?.let { controlMatchLayer(it) } ?: "none"} result=${if (field != null) "found" else "none"}")
-                    if (field == null) return@withContext ControlResult(false, "Nu găsesc câmpul de căutare pe ecran.")
+                    if (field == null) return@withContext ControlResult(false, "Nu găsesc câmpul de căutare pe ecran.", searchVerdict = PoiSearchVerdict.SEARCH_FAILED)
                     val fieldRef = field.ref as? AccessibilityNodeInfo
                     val input = if (fieldRef?.isEditable == true) {
                         fieldRef
@@ -4394,13 +4415,13 @@ class BensonAccessibilityService : AccessibilityService() {
                         val clickTarget = ControlLocator.clickableTarget(field, tree)?.ref as? AccessibilityNodeInfo
                         val tapped = clickTarget?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
                         Log.i("BENSON_AUDIO", "CONTROL_ACT action=search_open_tap ok=$tapped")
-                        if (!tapped) return@withContext ControlResult(false, "Nu am putut deschide căutarea.")
+                        if (!tapped) return@withContext ControlResult(false, "Nu am putut deschide căutarea.", searchVerdict = PoiSearchVerdict.SEARCH_FAILED)
                         waitForNode(2000, 120, pkg, "g1_search_input") { it.isEditable }
                     }
-                    if (input == null) return@withContext ControlResult(false, "Nu găsesc câmpul de căutare pe ecran.")
+                    if (input == null) return@withContext ControlResult(false, "Nu găsesc câmpul de căutare pe ecran.", searchVerdict = PoiSearchVerdict.SEARCH_FAILED)
                     val ok = setTextOn(input, cmd.query)
                     Log.i("BENSON_AUDIO", "CONTROL_ACT action=search_set_text ok=$ok text=\"${cmd.query}\"")
-                    if (!ok) return@withContext ControlResult(false, "Nu am putut introduce textul.")
+                    if (!ok) return@withContext ControlResult(false, "Nu am putut introduce textul.", searchVerdict = PoiSearchVerdict.SEARCH_FAILED)
                     // FIX_SEARCH_SUBMIT_VERIFY_1 (14.10.2026, op. 1 aprobata de Master) — inainte,
                     // ramura se oprea aici si raporta "Caut X." doar pentru ca ACTION_SET_TEXT a
                     // reusit: succes declarat fara nicio dovada pe ecran, exact ce interzice

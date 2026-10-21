@@ -56,4 +56,12 @@ class SttTranscriptValidatorTest {
   @Test fun mixedScriptWithLatinContentIsUsable() {
     assertTrue(SttTranscriptValidator.isUsable("pune 当 pe youtube"))
   }
+
+  // INVESTOR READY VOICE (21.10.2026) — confirmare explicita: alfabetul latin ([A-Za-z...]) deja
+  // acopera engleza, nu doar ro/de — nicio schimbare necesara aici, doar proba ca presupunerea e
+  // corecta inainte de a declara fisierul "reparat" fara motiv.
+  @Test fun plainEnglishSentencesAreAlreadyUsable() {
+    assertTrue(SttTranscriptValidator.isUsable("Now please answer me in English."))
+    assertTrue(SttTranscriptValidator.isUsable("Open the calculator."))
+  }
 }

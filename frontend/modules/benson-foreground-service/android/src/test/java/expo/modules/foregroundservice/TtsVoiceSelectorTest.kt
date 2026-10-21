@@ -36,6 +36,77 @@ class TtsVoiceSelectorTest {
     assertNull(TtsVoiceSelector.pickBest(voices))
   }
 
+  // --- pickBest(preferredLanguage) — FIX_MULTILINGUAL_TTS_1: vocea urmeaza limba replicii ---
+
+  @Test fun preferredLanguageWinsOverTheRomanianCascadeDefault() {
+    val voices = listOf(voice("ro-RO-local", "ro", "RO"), voice("de-DE-local", "de", "DE"))
+    assertEquals("de-DE-local", TtsVoiceSelector.pickBest(voices, preferredLanguage = "de")?.name)
+  }
+
+  @Test fun preferredLanguageFallsBackToCascadeWhenNotAvailable() {
+    val voices = listOf(voice("ro-RO-local", "ro", "RO"))
+    assertEquals("ro-RO-local", TtsVoiceSelector.pickBest(voices, preferredLanguage = "en")?.name)
+  }
+
+  @Test fun nullPreferredLanguageBehavesExactlyLikeBefore() {
+    val voices = listOf(voice("de-DE-local", "de", "DE"))
+    assertEquals("de-DE-local", TtsVoiceSelector.pickBest(voices, preferredLanguage = null)?.name)
+  }
+
+  // --- detectTextLanguage — diacritice TARI intai, cuvinte-reper engleze neambigue abia apoi ---
+
+  @Test fun germanDiacriticsAreDetectedAsGerman() {
+    assertEquals("de", TtsVoiceSelector.detectTextLanguage("Könnte ich dir heute helfen?"))
+  }
+
+  @Test fun plainGermanWithoutUmlautsIsStillDetectedViaMarkerWords() {
+    // FIX_MULTILINGUAL_TTS_2, dovada pe telefon: "Master, 2 plus 2 ergibt 4." (germana corecta,
+    // fara niciun umlaut) ramanea pe vocea engleza anterioara fara cuvinte-reper germane.
+    assertEquals("de", TtsVoiceSelector.detectTextLanguage("Guten Morgen, wie kann ich dir helfen?"))
+    assertEquals("de", TtsVoiceSelector.detectTextLanguage("Master, 2 plus 2 ergibt 4."))
+  }
+
+  @Test fun romanianDiacriticsAreDetectedAsRomanian() {
+    assertEquals("ro", TtsVoiceSelector.detectTextLanguage("Bună dimineața, cu ce te pot ajuta?"))
+  }
+
+  @Test fun unambiguousEnglishMarkerWordsAreDetectedAsEnglish() {
+    assertEquals("en", TtsVoiceSelector.detectTextLanguage("Sure, here is what I can do for you."))
+  }
+
+  @Test fun plainRomanianWithoutDiacriticsIsNotMisreadAsEnglish() {
+    // Caz real frecvent: raspuns romanesc fara diacritice (STT/text simplu) — NU trebuie clasificat
+    // gresit ca engleza doar pentru ca e ASCII.
+    assertNull(TtsVoiceSelector.detectTextLanguage("Nu am inteles comanda, repeta te rog"))
+  }
+
+  @Test fun ambiguousShortTextReturnsNullInsteadOfGuessing() {
+    assertNull(TtsVoiceSelector.detectTextLanguage("18"))
+  }
+
+  // --- shouldAttemptSelection(desiredLanguage) — reselecteaza DOAR cand limba difera de legatura CONFIRMATA ---
+
+  @Test fun confirmedBindingStillSkipsWhenDesiredLanguageMatchesBoundLanguage() {
+    val binding = TtsVoiceBinding("com.google.android.tts", TtsVoiceState.CONFIRMED, "ro-RO-local", "ro")
+    assertFalse(
+      TtsVoiceSelector.shouldAttemptSelection(binding, retryCount = 0, nowMs = 100_000L, lastAttemptAtMs = 0L, desiredLanguage = "ro"),
+    )
+  }
+
+  @Test fun confirmedBindingReselectsWhenDesiredLanguageDiffersFromBoundLanguage() {
+    val binding = TtsVoiceBinding("com.google.android.tts", TtsVoiceState.CONFIRMED, "ro-RO-local", "ro")
+    assertTrue(
+      TtsVoiceSelector.shouldAttemptSelection(binding, retryCount = 0, nowMs = 100_000L, lastAttemptAtMs = 0L, desiredLanguage = "de"),
+    )
+  }
+
+  @Test fun confirmedBindingWithNullDesiredLanguageBehavesExactlyLikeBefore() {
+    val binding = TtsVoiceBinding("com.google.android.tts", TtsVoiceState.CONFIRMED, "ro-RO-local", "ro")
+    assertFalse(
+      TtsVoiceSelector.shouldAttemptSelection(binding, retryCount = 0, nowMs = 100_000L, lastAttemptAtMs = 0L, desiredLanguage = null),
+    )
+  }
+
   // --- shouldAttemptSelection: cerinta 1+4 — confirmat nu se reincearca; esuat se reincearca plafonat ---
 
   @Test fun confirmedBindingNeverRetries() {

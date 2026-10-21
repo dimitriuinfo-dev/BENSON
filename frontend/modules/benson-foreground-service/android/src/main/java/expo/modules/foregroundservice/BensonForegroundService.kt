@@ -709,7 +709,7 @@ class BensonForegroundService : Service() {
   // rostire; una esuata/neincarcata se reincearca, plafonat, fara bucla infinita (cerintele 1+4+8).
   // Nu se mai atribuie niciodata `t.language`/`t.voice` orbeste cand nu exista o voce aleasa —
   // asta era exact mecanismul care lasa motorul sa cada pe vocea lui implicita (en-IN).
-  private fun ensureNativeTtsVoiceCurrent(t: android.speech.tts.TextToSpeech) {
+  private fun ensureNativeTtsVoiceCurrent(t: android.speech.tts.TextToSpeech, desiredLanguage: String? = null) {
     val engine = try { t.defaultEngine } catch (_: Exception) { null }
     if (engine != ttsVoiceBinding.engine) {
       val (resetBinding, resetRetries) = TtsVoiceSelector.resetForNewEngine(engine)
@@ -717,7 +717,7 @@ class BensonForegroundService : Service() {
       ttsVoiceRetryCount = resetRetries
     }
     val nowMs = System.currentTimeMillis()
-    if (!TtsVoiceSelector.shouldAttemptSelection(ttsVoiceBinding, ttsVoiceRetryCount, nowMs, ttsVoiceLastAttemptAtMs)) return
+    if (!TtsVoiceSelector.shouldAttemptSelection(ttsVoiceBinding, ttsVoiceRetryCount, nowMs, ttsVoiceLastAttemptAtMs, desiredLanguage)) return
     ttsVoiceLastAttemptAtMs = nowMs
 
     val prefs = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
@@ -729,7 +729,7 @@ class BensonForegroundService : Service() {
       if (!hasRo) AudioDiag.log(this, "TTS_NO_RO_VOICE", "engine=$engine")
     }
 
-    val chosenCandidate = candidates?.let { TtsVoiceSelector.pickBest(it) }
+    val chosenCandidate = candidates?.let { TtsVoiceSelector.pickBest(it, desiredLanguage) }
     val chosenVoice = chosenCandidate?.let { cand -> androidVoices?.firstOrNull { it.name == cand.name } }
 
     // Cerinta 3: se citesc REZULTATELE reale, nu se presupune succes din simpla atribuire.
@@ -759,8 +759,10 @@ class BensonForegroundService : Service() {
   }
 
   // Applied right before every speak() — car mode can toggle mid-session (cable plugged/unplugged).
-  private fun applyTtsRouting(t: android.speech.tts.TextToSpeech) {
-    ensureNativeTtsVoiceCurrent(t)
+  // FIX_MULTILINGUAL_TTS_1 — desiredLanguage (detectat din TEXTUL replicii curente) lasă vocea pe
+  // cascada veche (ro) când e null (ack-ul fix, sau text neconcludent) — zero schimbare acolo.
+  private fun applyTtsRouting(t: android.speech.tts.TextToSpeech, desiredLanguage: String? = null) {
+    ensureNativeTtsVoiceCurrent(t, desiredLanguage)
     logCarModeIfChanged()
     val carMode = lastCarModeLogged == true
     try { t.setAudioAttributes(currentTtsAudioAttributes(carMode)) } catch (_: Exception) {}
@@ -839,7 +841,7 @@ class BensonForegroundService : Service() {
       // either experiment. Real question intonation needs a different TTS engine/voice with actual
       // prosody control (SSML), not a text-level trick on the stock speak()/setPitch() API — a
       // separate, bigger round if still wanted.
-      applyTtsRouting(t)
+      applyTtsRouting(t, TtsVoiceSelector.detectTextLanguage(text))
       val utteranceId = "wake_say_${System.currentTimeMillis()}"
       // FIX_TTS_VOICE_CACHE_1 (19.10.2026, P0 — "accent indian", cerintele 5+6+7) — nu se vorbeste
       // CU VOCE decat pe o selectie CONFIRMATA pentru acest motor (altfel inseamna sa lasam
@@ -1877,6 +1879,29 @@ class BensonForegroundService : Service() {
     return if (configured == "de" || configured == "ro") configured else "ro"
   }
 
+  // FIX_MULTILINGUAL_STT_1 (21.10.2026, "INVESTOR READY VOICE") — DISTINCT de cmdLanguage() de mai
+  // sus (neschimbata — foloseste inca doar la AppNameSynonyms.canonicalName, strict ro/de, nicio
+  // legatura cu STT). Pentru transcrierea PRIMARA (OpenAI, incercata prima in nativeTranscribe):
+  // null = fara parametru "language" in cerere -> Whisper/gpt-4o-mini-transcribe detecteaza
+  // automat limba (suportat oficial, documentat OpenAI) — asta permite conversatia sa treaca
+  // liber intre ro/de/en in aceeasi sesiune, fara sa fortam o limba gresita. Doar daca Masterul a
+  // FIXAT explicit o limba in Setari, o transmitem ca sa accelereze/stabilizeze transcrierea.
+  private fun sttLanguageHint(): String? {
+    val configured = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+      .getString("stt_language", null)?.substringBefore('-')?.lowercase()
+    return if (configured == "ro" || configured == "de" || configured == "en") configured else null
+  }
+
+  // Pentru rezervele Deepgram/Groq (incercate DOAR cand OpenAI esueaza/bugetul e atins):
+  // auto-detectarea Deepgram ("multi") nu are suport confirmat pentru romana, asa ca NU risc
+  // regresia fallback-ului — pastrez un default concret (ro, comportamentul de pana acum), dar
+  // admit explicit si "en" (nu doar ro/de) daca Masterul a fixat-o in Setari.
+  private fun cmdLanguageOrEnglish(): String {
+    val configured = getSharedPreferences("benson_watchdog_prefs", Context.MODE_PRIVATE)
+      .getString("stt_language", null)?.substringBefore('-')?.lowercase()
+    return if (configured == "de" || configured == "ro" || configured == "en") configured else "ro"
+  }
+
   // Deepgram first (same credential NativeCloudWake already reads — pushed down from JS at app
   // open / key save, see setWakeDeepgramCredentials in app/index.tsx), Groq fallback (same
   // credential setNativeWakeCredentials already pushes). Never logs a key. Returns null only if
@@ -1935,12 +1960,12 @@ class BensonForegroundService : Service() {
   private fun postToOpenAiTranscribe(wav: ByteArray, apiKey: String, prefs: android.content.SharedPreferences): String? {
     AudioDiag.log(this, "STT_REQUEST", "provider=openai bytes=${wav.size}")
     val baseUrl = (prefs.getString("brain_base_url", "")?.takeIf { it.isNotBlank() } ?: "https://api.openai.com/v1").trimEnd('/')
-    val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+    val bodyBuilder = MultipartBody.Builder().setType(MultipartBody.FORM)
       .addFormDataPart("file", "audio.wav", wav.toRequestBody("audio/wav".toMediaType()))
       .addFormDataPart("model", "gpt-4o-mini-transcribe")
-      .addFormDataPart("language", cmdLanguage())
       .addFormDataPart("response_format", "json")
-      .build()
+    sttLanguageHint()?.let { bodyBuilder.addFormDataPart("language", it) }
+    val body = bodyBuilder.build()
     val request = Request.Builder().url("$baseUrl/audio/transcriptions")
       .addHeader("Authorization", "Bearer $apiKey").post(body).build()
     return try {
@@ -1972,7 +1997,7 @@ class BensonForegroundService : Service() {
     // smart_format=true (it already enables punctuation) — adding both would be redundant, so
     // only smart_format is sent. This is what feeds WA_COMPOSE's brain step and, on brain timeout,
     // the spoken fallback text directly — needs real punctuation either way.
-    val url = "https://api.deepgram.com/v1/listen?model=nova-3&language=${cmdLanguage()}&smart_format=true"
+    val url = "https://api.deepgram.com/v1/listen?model=nova-3&language=${cmdLanguageOrEnglish()}&smart_format=true"
     val request = Request.Builder().url(url).addHeader("Authorization", "Token $apiKey")
       .post(wav.toRequestBody("audio/wav".toMediaType())).build()
     return try {
@@ -1998,7 +2023,7 @@ class BensonForegroundService : Service() {
     val body = MultipartBody.Builder().setType(MultipartBody.FORM)
       .addFormDataPart("file", "audio.wav", wav.toRequestBody("audio/wav".toMediaType()))
       .addFormDataPart("model", model)
-      .addFormDataPart("language", cmdLanguage())
+      .addFormDataPart("language", cmdLanguageOrEnglish())
       .addFormDataPart("response_format", "json")
       .build()
     val request = Request.Builder().url("$baseUrl/audio/transcriptions")
@@ -5155,6 +5180,92 @@ class BensonForegroundService : Service() {
         when (outcomeNav) {
           is ExecutionOutcome.Success -> BensonAgentTools.toolResult(true, "Te duc la „$destination” cu ${member.displayName}.") to false
           else -> BensonAgentTools.toolResult(false, "Am pornit ${member.displayName}, dar nu pot confirma că a ajuns pe ecran.") to false
+        }
+      }
+      // P0 FIX V2 (21.10.2026, incident real "Benson, finde eine Tankstelle in der Nähe" -> FAIL) —
+      // cautarea unui LOC (POI), distincta de travel_navigate. Incearca MECANIC mai multe rute
+      // AKA-ordonate (StaffRegistry.staffForCapability, acelasi tipar ca travel_navigate), in
+      // ACELASI apel de instrument — zero apeluri OpenAI suplimentare intre rute. Buget fix
+      // (RouteAttemptBudget, pur, testat): maximum 3 rute distincte, maximum 1 reincercare per
+      // ruta (doar pe SEARCH_UNVERIFIED — motiv observabil), maximum 6 incercari totale, STOP
+      // opreste imediat. O ruta SEARCH_FAILED nu se reincearca niciodata (shouldAbandonRoutePermanently).
+      BensonAgentTools.TRAVEL_FIND_POI -> {
+        val query = args.optString("query").trim()
+        if (query.isBlank()) return BensonAgentTools.toolResult(false, "lipsește ce anume caut") to false
+        if (svc == null) return BensonAgentTools.toolResult(false, "accesibilitatea nu e disponibilă") to false
+        val avoidPkg = args.optString("avoid_pkg").trim()
+
+        val navCandidates = try { StaffRegistry.staffForCapability(this, StaffRegistryCore.CAP_NAVIGATE) } catch (_: Exception) { emptyList() }
+          .filter { (member, _) -> avoidPkg.isBlank() || member.packageName != avoidPkg }
+        if (navCandidates.isEmpty()) {
+          return BensonAgentTools.toolResult(false, "Nu am nicio altă aplicație de hărți pe acest telefon pentru o căutare de loc.") to false
+        }
+
+        var budget = RouteAttemptBudget()
+        val triedLabels = mutableListOf<String>()
+        var lastOk = false
+        var lastDetail = ""
+        var lastPkg = ""
+        var lastVerdict: expo.modules.accessibility.PoiSearchVerdict? = null
+        var stoppedByUser = false
+
+        routeLoop@ for ((member, _) in navCandidates) {
+          if (!canTryNewRoute(budget)) break@routeLoop
+          if (try { expo.modules.accessibility.BensonAccessibilityService.isAbortActive() } catch (_: Throwable) { false }) {
+            stoppedByUser = true
+            AudioDiag.log(this, "TRAVEL_POI", "status=stopped_by_user")
+            break@routeLoop
+          }
+          budget = nextBudgetAfterNewRoute(budget)
+          triedLabels.add(member.displayName)
+          lastPkg = member.packageName
+
+          val openArgs = JSONObject().apply { put("name", member.displayName) }
+          val (openResult, _) = runAgentToolLocked(BensonAgentTools.OPEN_APP, openArgs, originalCommand)
+          val openOk = runCatching { JSONObject(openResult).optBoolean("ok", false) }.getOrDefault(false)
+          AudioDiag.log(this, "TRAVEL_POI", "route=${member.packageName} step=open_app ok=$openOk attempt=${budget.totalAttempts}")
+          if (!openOk) {
+            lastOk = false
+            lastDetail = runCatching { JSONObject(openResult).optString("detail") }.getOrDefault("")
+            lastVerdict = null
+            continue@routeLoop
+          }
+
+          var searchResult = kotlinx.coroutines.runBlocking {
+            svc.runUniversalHandCommand(expo.modules.accessibility.UniversalHandCommand.Search(query), skipConfirmGate = true)
+          }
+          AudioDiag.log(this, "TRAVEL_POI", "route=${member.packageName} step=search verdict=${searchResult.searchVerdict} ok=${searchResult.ok} attempt=${budget.totalAttempts}")
+
+          if (searchResult.searchVerdict == expo.modules.accessibility.PoiSearchVerdict.SEARCH_UNVERIFIED &&
+            canRetrySameRoute(budget, observableReasonToRetry = true)
+          ) {
+            budget = nextBudgetAfterRetry(budget)
+            searchResult = kotlinx.coroutines.runBlocking {
+              svc.runUniversalHandCommand(expo.modules.accessibility.UniversalHandCommand.Search(query), skipConfirmGate = true)
+            }
+            AudioDiag.log(this, "TRAVEL_POI", "route=${member.packageName} step=search_retry verdict=${searchResult.searchVerdict} ok=${searchResult.ok} attempt=${budget.totalAttempts}")
+          }
+
+          lastOk = searchResult.ok
+          lastDetail = searchResult.message
+          lastVerdict = searchResult.searchVerdict
+
+          val verdict = searchResult.searchVerdict
+          if (verdict == null || !expo.modules.accessibility.poiSearchJustifiesAlternativeRoute(verdict)) {
+            // SEARCH_SUCCESS_RESULTS sau SEARCH_SUCCESS_EMPTY — misiune incheiata, onest, STOP.
+            break@routeLoop
+          }
+          // SEARCH_FAILED (shouldAbandonRoutePermanently) sau SEARCH_UNVERIFIED epuizat — trece la
+          // urmatoarea ruta distincta din bucla, daca mai exista buget.
+        }
+
+        val triedSummary = if (triedLabels.isEmpty()) "" else "Am încercat: ${triedLabels.joinToString(", ")}. "
+        when {
+          stoppedByUser -> BensonAgentTools.toolResult(false, "Oprit la cererea Masterului. $triedSummary") to false
+          lastVerdict == expo.modules.accessibility.PoiSearchVerdict.SEARCH_SUCCESS_RESULTS ||
+            lastVerdict == expo.modules.accessibility.PoiSearchVerdict.SEARCH_SUCCESS_EMPTY ->
+            BensonAgentTools.toolResult(true, "$lastDetail (pachet folosit: $lastPkg)") to false
+          else -> BensonAgentTools.toolResult(false, "$triedSummary Nicio rută n-a putut confirma rezultate. $lastDetail") to false
         }
       }
       // MOBILITY — modul SUBORDONAT TRAVEL (cerinta explicita). Reutilizeaza EXACT acelasi motor
