@@ -4334,6 +4334,114 @@ class BensonForegroundService : Service() {
     return WakeVerifyMatcher.isWakeVerified(command, NativeCloudWake.currentWakeName(this))
   }
 
+  // FAST SYMBIOSIS (21.10.2026, "ADDENDUM FINAL V2") — ruta per-aplicatie, keyed, pentru circuit
+  // breaker (sectiunea 4): doua esecuri CONSECUTIVE confirmate de SURVIVOR pe ACEEASI ruta
+  // dezactiveaza-o temporar, fara sa invalideze global aplicatia. In memorie, nu persistat — un
+  // restart al serviciului reseteaza contorul, intentionat (acelasi tipar ca celelalte garzi
+  // de sesiune din acest fisier, nu o stare noua, durabila).
+  private val fastPathFailureCount = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+
+  // Ruta FAST #1 (din maximum 3-4 cerute, sectiunea 9.2): calcule simple in Calculator, ALE
+  // CARUI butoane AKA le-a verificat REAL pe acest telefon (vezi dovada 21.10.2026). Executa
+  // DIRECT prin runAgentToolLocked — EXACT dispatch-ul pe care agentul platit il foloseste — fara
+  // niciun apel OpenAI. O singura capabilitate neverificata (REVERIFY/KNOWN/absenta) face toata
+  // ruta ambigua/incompleta (regula explicita din mandat) si cade silentios pe calea veche
+  // (return false => handleNativeCommandFlow continua, ajunge in cele din urma la tryAgent).
+  private fun tryFastPathCalculate(command: String): Boolean {
+    val expr = parseArithmeticExpression(command) ?: return false
+    val steps = arithmeticExpressionToButtonSteps(expr) ?: return false
+    val pkg = "com.oneplus.calculator"
+    val routeId = "fast_path:calculator:arithmetic"
+    val failures = fastPathFailureCount.getOrPut(routeId) { java.util.concurrent.atomic.AtomicInteger(0) }
+    if (shouldDisableFastPathRoute(failures.get())) {
+      AudioDiag.log(this, "FAST_PATH", "route=$routeId verdict=circuit_open failures=${failures.get()}")
+      return false
+    }
+    val caps = try { StaffRegistry.capsOf(applicationContext, pkg) } catch (_: Exception) { emptyMap() }
+    val requiredLevels = steps.map { caps[StaffRegistryCore.uiControlCapabilityId(it.label)] }
+    val verdict = evaluateFastPathEligibility(requiredLevels)
+    if (verdict != FastPathVerdict.ELIGIBLE) {
+      AudioDiag.log(this, "FAST_PATH", "route=$routeId verdict=$verdict expr=\"$expr\" steps=${steps.size}")
+      return false
+    }
+    val missionId = "fp-${System.currentTimeMillis()}"
+    AudioDiag.log(this, "FAST_PATH", "route=$routeId verdict=eligible mission=$missionId expr=\"$expr\" steps=${steps.size}")
+    Thread({
+      val t0 = System.currentTimeMillis()
+      var allOk = true
+      var cancelled = false
+      try { expo.modules.accessibility.BensonAccessibilityService.clearAbort() } catch (_: Throwable) {}
+      val tOpen = System.currentTimeMillis()
+      val openArgs = JSONObject().apply { put("name", "calculator") }
+      val (openResult, _) = synchronized(agentFingerLock) { runAgentToolLocked(BensonAgentTools.OPEN_APP, openArgs, command) }
+      val openOk = runCatching { JSONObject(openResult).optBoolean("ok", false) }.getOrDefault(false)
+      AudioDiag.log(this, "FAST_PATH_STAGE", "mission=$missionId stage=open_app ms=${System.currentTimeMillis() - tOpen} ok=$openOk")
+      if (!openOk) allOk = false
+      var lastObserved = ""
+      if (allOk) {
+        for ((i, step) in steps.withIndex()) {
+          val abortNow = try { expo.modules.accessibility.BensonAccessibilityService.isAbortActive() } catch (_: Throwable) { false }
+          if (abortNow) {
+            cancelled = true
+            AudioDiag.log(this, "FAST_PATH_STAGE", "mission=$missionId stage=press_$i label=\"${step.label}\" status=cancelled_before_send")
+            break
+          }
+          val tPress = System.currentTimeMillis()
+          val pressArgs = JSONObject().apply { put("label", step.label) }
+          val (result, _) = synchronized(agentFingerLock) { runAgentToolLocked(BensonAgentTools.PRESS_BUTTON, pressArgs, command) }
+          val ok = runCatching { JSONObject(result).optBoolean("ok", false) }.getOrDefault(false)
+          AudioDiag.log(this, "FAST_PATH_STAGE", "mission=$missionId stage=press_$i label=\"${step.label}\" ms=${System.currentTimeMillis() - tPress} ok=$ok")
+          if (!ok) { allOk = false; break }
+        }
+      }
+      if (allOk && !cancelled) {
+        val tObs = System.currentTimeMillis()
+        val (obsResult, _) = synchronized(agentFingerLock) { runAgentToolLocked(BensonAgentTools.OBSERVE_SCREEN, JSONObject(), command) }
+        lastObserved = runCatching { JSONObject(obsResult).optString("detail") }.getOrDefault("")
+        AudioDiag.log(this, "FAST_PATH_STAGE", "mission=$missionId stage=observe_screen ms=${System.currentTimeMillis() - tObs}")
+      }
+      val totalMs = System.currentTimeMillis() - t0
+      AudioDiag.log(this, "FAST_PATH_RESULT", "mission=$missionId route=$routeId ok=$allOk cancelled=$cancelled totalMs=$totalMs steps=${steps.size}")
+      if (cancelled) {
+        // Sectiunea 6 — misiunea a fost anulata intre pasi; presele DEJA trimise sunt efecte
+        // externe angajate (ireversibile), raportate onest, nu aplicate tacit.
+        failures.set(0)
+        mainHandler.post { AudioDiag.log(this, "FAST_PATH", "mission=$missionId status=LATE_AFTER_CANCEL_SAFE partial_steps_executed=true") }
+        return@Thread
+      }
+      if (!allOk) {
+        // SURVIVOR: doua esecuri CONSECUTIVE pe ACEEASI ruta -> circuit breaker + REVERIFY doar pe
+        // capabilitatile afectate (nu invalidare globala a aplicatiei).
+        val n = failures.incrementAndGet()
+        AudioDiag.log(this, "FAST_PATH", "route=$routeId consecutive_failures=$n")
+        if (shouldDisableFastPathRoute(n)) {
+          for (step in steps) {
+            try { StaffRegistry.markNeedsReverification(applicationContext, pkg, StaffRegistryCore.uiControlCapabilityId(step.label)) } catch (_: Exception) {}
+          }
+          AudioDiag.log(this, "FAST_PATH", "route=$routeId action=circuit_opened_and_reverify_marked")
+        }
+        mainHandler.post {
+          val msg = "Nu am reușit calculul prin drumul rapid, Master. Încerc altfel."
+          updateBubbleNative(msg, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+          speakNativeFallbackThenCapture(msg)
+        }
+        return@Thread
+      }
+      failures.set(0)
+      // Doctrina 9 — citeste valoarea REALA afisata (extractCalculatorDisplayValue), niciodata
+      // calculata/ghicita de BENSON insusi; daca n-a putut citi clar, spune asta onest.
+      val displayValue = extractCalculatorDisplayValue(lastObserved)
+      mainHandler.post {
+        val msg = if (displayValue != null) "${expr.removeSuffix("=")} = $displayValue"
+          else "Am apăsat secvența pentru $expr, dar nu pot confirma clar rezultatul de pe ecran."
+        agentAwaitingReply = false
+        updateBubbleNative(msg, command, terminal = true, dismissDelayMs = BUBBLE_LINGER_MS)
+        finishBrainCommandSuccess(msg, command, "fast_path_done")
+      }
+    }, "benson-fast-path").start()
+    return true
+  }
+
   private fun handleNativeCommandFlow(rawTranscript: String, isFollowUp: Boolean, originalPhrase: String, originalWavPath: String?) {
     val command = if (isFollowUp) rawTranscript.trim() else stripWakeWordNative(rawTranscript)
     // FIX_INTERRUPT_1 — PRIMUL in lant: "stop" trebuie sa functioneze si in mijlocul unei
@@ -4435,6 +4543,10 @@ class BensonForegroundService : Service() {
     if (tryMusicPlay(command)) return
     if (tryNativeYoutubeOpenSearch(command)) return
     if (tryYoutubeSearchConfirm(command)) return
+    // FAST SYMBIOSIS (21.10.2026) — intentie simpla, deja demonstrata, verificata AKA; daca nu e
+    // eligibila (o singura capabilitate lipsa/REVERIFY e suficient), cade silentios pe calea veche
+    // (tryAgent, cu OpenAI), fara nicio schimbare de comportament pentru acel caz.
+    if (tryFastPathCalculate(command)) return
     var response = tryNativeOpenApp(command) ?: tryNativeYoutube(command) ?: tryNativeMediaControl(command) ?: tryContextSearch(command)
     // RUNDA G-1 — "mâna universală", checked only after all the existing faster/specific handlers
     // above declined, and before the generic web-search fallback below (so YouTube/Spotify keep
